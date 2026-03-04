@@ -1,6 +1,6 @@
 # MM Alignments
 
-A package for string alignment needs.
+A package for Exome mutation analysis.
 
 ## Features
 
