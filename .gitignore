@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.sqlite3
+
+# Environments
+.venv/
+venv/
+.env
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Coverage
+.htmlcov/
+.tox/
+.coverage*
+.cache/
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+
+# Mypy / Ruff
+.mypy_cache/
+.ruff_cache/
+
+# Sphinx
+docs/_build/
