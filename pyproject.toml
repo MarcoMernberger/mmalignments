@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "mmalignments"
 version = "0.1.0"
-description = "A package for string alignment needs."
+description = "A package for Exome mutation analysis."
 authors = ["Marco Mernberger <marco.mernberger@gmail.com>"]
 readme = "README.md"
 packages = [
@@ -9,7 +9,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.14"
+python = "^3.12"
 pydantic-settings = "^2.5.0"
 python-dotenv = "^1.0.1"
 typer = { version = "^0.12.0", extras = ["all"] }
