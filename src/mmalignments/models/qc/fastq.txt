@@ -1,0 +1,174 @@
+Implementiere mir bitte eine fasq quality control.
+
+wir haben die folgende Ordnerstruktur:
+
+mmalignments/
+  models/
+        externals.py              # Base class: External -> build_cmd + run
+        tasks.py                  # Base class: Elements + MappedElement
+    aligners/
+        __init__.py
+        samtools.py              # External subclass: Samtools wrapper -> Callable + Element(s)
+    callers/
+        __init__.py
+        gatk.py                   # External subclass: GATK wrapper -> Callable + Element(s)
+    qc/
+        __init__.py
+        fastp.py                  # External subclass: fastp wrapper -> Callable + Element(s)
+        fastqc.py                 # External subclass: fastqc wrapper -> Callable + Element(s)
+        multiqc.py                # External subclass: multiqc wrapper -> Callable + Element (project-level)
+        mosdepth.py               # External subclass: MosDepth
+        qc.py                     # Orchestrator: baut Element-Graph pro Sample + project-level MultiQC and general functions
+
+Bitte erweitere die Funktionalität, indem du in fastq.py eine SubKlasse von Externals namens "FastP" erstellst, 
+die die fastp-Software für die Qualitätskontrolle von FASTQ-Dateien integriert. 
+Diese Klasse sollte Methoden enthalten, um fastp mit den erforderlichen 
+Eingabedateien und Parametern auszuführen und die Ergebnisse in einem definierten 
+Ausgabeordner zu speichern.
+
+Die Klasse Fastp soll analog zu Samtools und GATK aufgebaut sein, also mit einer low-level 
+Funktion, die die required und optionalen input files und parameter entgegennimmt, 
+den runner baut und zurückgibt. 
+
+low-level:
+
+def run_fastp(
+    self,
+    fastq_r1: Path | str,
+    fastq_r2: Path | str | None,
+    out_r1: Path | str,
+    out_r2: Path | str | None,
+    json_out: Path | str,
+    html_out: Path | str,
+    cwd: Optional[Path] = None,
+    threads: Optional[int] = None,
+    parameters: Mapping[str, Any] = None,
+) -> Callable[[], subprocess.CompletedProcess]:
+    ...
+
+High-level:
+def fastp(
+    self,
+    sample: Sample | Element,   # nutze sample_fastqs aus data.py :contentReference[oaicite:9]{index=9}
+    folder: Optional[Path] = None,
+    threads: Optional[int] = None,
+    parameters: Mapping[str, Any] = None,
+) -> Element:
+    """
+    Returns Element with artifacts:
+      fastq_r1, fastq_r2 (optional), fastp_json, fastp_html, sample_name
+    pres: []  (oder pres=[previous Element], wenn input Element)
+    """
+
+
+Die Klasse FastQC ist bereits vorhanden, soll aber erweitert werden um eine
+
+low-level Funktion run_fastqc, die die required und optionalen input files und parameter entgegennimmt, den runner baut und zurückgibt.
+def run_fastqc(
+    self,
+    input_files: list[Path | str],
+    output_dir: Path | str,
+    threads: Optional[int] = None,
+    extract: bool = False,
+    cwd: Optional[Path] = None,
+    **parameters: Any,
+) -> Callable[[], subprocess.CompletedProcess]:
+
+und eine high-level Funktion qc, die ein Sample oder Element entgegennimmt, 
+die Fastq-Dateien extrahiert, den runner baut und ein Element zurückgibt, das die FastQC-Ergebnisse als Artefakte enthält.
+
+def fastqc(
+    self,
+    sample: Sample | Element,
+    folder: Path,
+    label: str,                 # "raw" oder "cleaned"
+    threads: Optional[int] = None,
+    **parameters: Any
+) -> Element:
+    """
+    Artifacts:
+      fastqc_dir (Path)
+      fastqc_html_r1, fastqc_zip_r1
+      fastqc_html_r2, fastqc_zip_r2 (optional)
+      fastq_r1, fastq_r2 (echo from input for traceability)
+    pres: [input_element] wenn sample als Element reinkommt
+    """
+
+In der Klasse MultiQC muss ebenfalls noch eine low-level Funktion run hinzugefügt werden, 
+die die required und optionalen input files und parameter entgegennimmt, den runner baut und zurückgibt.
+
+def run_multiqc(
+    self,
+    analysis_dir: Path | str,
+    output_dir: Path | str,
+    report_name: str = "multiqc_report.html",
+    force: bool = True,
+    cwd: Optional[Path] = None,
+    **parameters: Any,
+) -> Callable[[], subprocess.CompletedProcess]:
+    ...
+
+und eine High-level Funktion aggregate, die eine Liste von QC-Elementen entgegennimmt, 
+die QC-Ergebnisse extrahiert, den runner baut und ein Element zurückgibt, 
+das die MultiQC-Ergebnisse als Artefakte enthält.
+
+def aggregate(
+    self,
+    qc_root: Path,                # look for qc results in this root (e.g. results/qc/)
+    qc_elements: list[Element],    # extract input files from these Elements
+    output_dir: Optional[Path, str] = None,           # where to put the MultiQC report (e.g. results/qc/multiqc/)
+    report_name: Optional[str] = "pre_alignment_multiqc.html",
+    pres: Optional[list[Element]] = None,
+    **parameters: Any
+) -> Element:
+    """
+    Artifacts:
+      multiqc_html (Path)
+      multiqc_data_dir (Path)
+    pres: alle sample-qc Elemente (fastp + fastqc), damit Signature passt
+    """
+
+
+dann benötige ich in mmalignments/src/mmalignments/models/qc/qc.py:
+
+Eine sanity check Funktion, die die Struktur der FASTQ-Dateien auf einer Stichprobe von Datensätzen überprüft,eine Überprüfung der gepaarten IDs (falls gepaart) durchführt und QC-Ergebnisse in JSON/TXT-Formaten speichert.
+def build_input_check(
+    sample: Sample,
+    out_dir: Path,
+    n_records: int = 10_000,
+) -> Element:
+    """
+    Creates Element that:
+      - sanity checks FASTQ structure on sample of records
+      - paired-end ID matching check (if paired)
+      - writes qc json/txt
+    Artifacts:
+      input_check_json, input_check_txt
+    """
+
+
+Dann brauche ich ebenfalls in qc.py eine Orchestrator-Funktion, die den gesamten QC-Workflow für ein Sample steuert, einschließlich der Ausführung von FastP, FastQC und der Zusammenfassung der Ergebnisse in einem MultiQC-Bericht auf Projektebene.
+
+Hier sollen die Elemente in der richtigen Reihenfolge erstellt und miteinander verknüpft werden, um sicherzustellen, dass die QC-Ergebnisse korrekt gesammelt und zusammengefasst werden:
+
+1. input_check (pure python Element)
+2. fastp Element (pres=[input_check]) - Input FASTQs (raw) → cleaned FASTQs + fastp html/json
+3. fastqc_raw Element (pres=[input_check]) - läuft auf raw FASTQs
+4. fastqc_cleaned Element (pres=[fastp]) - läuft auf cleaned FASTQs (aus fastp Element artifacts)
+5. qc_summary Element (pres=[fastp, fastqc_raw, fastqc_cleaned]) - parst fastp.json + fastqc summaries und schreibt {sample}.qc.json + {sample}.qc.tsv
+
+die funktion soll heissen pre_alignment_qc und die signature soll wie folgt aussehen:
+def pre_alignment_qc(
+    sample: Sample,
+    qc_root: Path,                # root for all qc results (e.g. results/qc/)
+    threads: Optional[int] = None,
+    parameters: Mapping[str, Any] = None,
+) -> Element:
+
+erstelle bitte noch ein python modul parsers.py, das Funktionen enthält, um die fastp.json und die fastqc zip summaries zu parsen und die relevanten QC-Metriken in einem konsistenten Format (z.B. als dict) für die Erstellung der QC-Zusammenfassung zu extrahieren.
+Ziel: Summary aus Outputs bauen (maschinenlesbar), ohne neue Datamodel-Explosion.
+parse_fastp_json(path) -> dict
+parse_fastqc_zip(zip_path) -> dict (lies summary.txt im FastQC zip)
+build_qc_summary(sample, metrics_dict, out_path) -> Element (pure python Element)
+
+am ende erstelle mir ein Usage-Beispiel, das zeigt, wie die pre_alignment_qc Funktion in einem Workflow verwendet werden kann, um die QC-Elemente für ein Sample zu erstellen und auszuführen.

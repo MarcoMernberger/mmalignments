@@ -1,0 +1,26 @@
+{
+  "slop": {
+    "b": {
+      "flag": "-b",
+      "dtype": ["int", "float"],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Increase the BED/GFF/VCF entry -b base pairs in each direction. (Integer) or (Float, e.g. 0.1) if used with -pct."
+    },
+    "extract": {
+      "flag": "-l",
+      "dtype": ["int", "float"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "The number of base pairs to subtract from the start coordinate. (Integer) or (Float, e.g. 0.1) if used with -pct."
+    }
+  },
+  "sort": {
+  },
+  "merge": {
+  }
+}

@@ -1,0 +1,366 @@
+"""Module contains a FastQC interface for quality control of sequencing data."""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+from pathlib import Path
+from subprocess import CompletedProcess
+from typing import Callable, Mapping
+
+from mmalignments.models.data import Sample
+from mmalignments.models.tasks import Element, element
+from mmalignments.services.io import ensure
+
+from ..externals import External, ExternalRunConfig, subroutine
+from ..parameters import Params, ParamSet
+
+logger = logging.getLogger(__name__)
+
+
+class FastQC(External):
+    """FastQC interface for quality control of sequencing reads.
+
+    Provides methods for running FastQC on FASTQ or BAM files to generate
+    quality control reports. Returns zero-argument callables that can be
+    executed independently or chained.
+
+    FastQC generates HTML reports and zip archives containing quality metrics
+    for sequencing data.
+
+    Examples
+    --------
+    Run FastQC on a single BAM file::
+
+        fastqc = FastQC()
+        qc_runner = fastqc.run_qc(
+            input_file="aligned.bam",
+            output_dir="qc_results"
+        )
+        qc_runner()  # Execute
+
+    Run FastQC on multiple files::
+
+        fastqc = FastQC()
+        qc_runner = fastqc.run_qc(
+            input_file=["sample1.bam", "sample2.bam"],
+            output_dir="qc_results"
+        )
+        qc_runner()
+
+    With custom parameters::
+
+        fastqc = FastQC(parameters={"--threads": 4})
+        qc_runner = fastqc.run_qc(
+            input_file="data.fastq.gz",
+            output_dir="qc",
+            extract=True  # Extract zip files
+        )
+        qc_runner()
+    """
+
+    def __init__(
+        self,
+        name: str = "fastqc",
+        primary_binary: str = "fastqc",
+        version: str | None = None,
+        source: str = "https://www.bioinformatics.babraham.ac.uk/projects/fastqc/",
+        parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None = None,
+    ) -> None:
+        """Initialize FastQC wrapper.
+
+        Parameters
+        ----------
+        name : str
+            Tool name (default: "fastqc").
+        primary_binary : str
+            Path to FastQC executable (default: "fastqc").
+        version : Optional[str]
+            Version string override.
+        source : str
+            URL/source for the tool.
+        parameters : Mapping[str, ParamSet] | ParamSet | str | Path | None
+            Set of parameters for invocations. If the tool has subroutines,
+            this can be a mapping from subroutine names to parameter sets.
+            This will be used for default parameters, validation and
+            constructing cli arguments in the ``build_cmd`` function.
+        """
+        parameters_file = Path(__file__).parent / "fastqc.json"
+        parameters = parameters or parameters_file
+        super().__init__(
+            name=name,
+            primary_binary=primary_binary,
+            version=version,
+            source=source,
+            parameters=parameters,
+        )
+
+    def get_version(self, fallback: str | None = None) -> str | None:
+        """Get FastQC version string.
+
+        Parameters
+        ----------
+        fallback : Optional[str]
+                Value to return if version cannot be determined.
+
+        Returns
+        -------
+        Optional[str]
+                Version string (e.g., "0.12.1") or fallback if not found.
+        """
+        if self._version:
+            return self._version
+
+        if not self.primary_binary or not self.ensure_binary():
+            return fallback
+
+        try:
+            cp = subprocess.run(
+                [self.primary_binary, "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            output = cp.stdout.strip()
+            if output:
+                # FastQC output: "FastQC v0.12.1"
+                parts = output.split()
+                for part in parts:
+                    if part.startswith("v"):
+                        return part[1:]  # Remove 'v' prefix
+                    elif part[0].isdigit():
+                        return part
+        except Exception:
+            pass
+
+        return fallback
+
+    @subroutine
+    def run_fastqc(
+        self,
+        input_files: list[Path | str],
+        output_dir: Path | str,
+        params: Params | None = Params(threads=10, extract=False),
+        cfg: ExternalRunConfig | None = ExternalRunConfig(threads=10),
+    ) -> Callable[[], CompletedProcess]:
+        """Run FastQC on FASTQ files (low-level).
+
+        Creates a zero-argument callable that runs FastQC quality control
+        on FASTQ files and generates HTML/ZIP reports.
+
+        Parameters
+        ----------
+        input_files : List[Union[Path, str]]
+                List of input FASTQ files to analyze.
+        output_dir : Union[Path, str]
+                Output directory for FastQC reports.
+        threads : Optional[int]
+                Number of threads to use (default: None, FastQC uses 1).
+        extract : bool
+                If True, extract zip files (default: False).
+        cwd : Optional[Path]
+                Working directory for the command.
+        parameters : Any
+                Additional FastQC parameters (e.g., {"--nogroup": True}).
+
+        Returns
+        -------
+        Callable[[], subprocess.CompletedProcess]
+                Zero-argument callable that executes FastQC.
+
+        Examples
+        --------
+        >>> fastqc = FastQC()
+        >>> runner = fastqc.run_fastqc(
+        ...     input_files=["sample_R1.fastq.gz", "sample_R2.fastq.gz"],
+        ...     output_dir="qc_results/fastqc",
+        ...     threads=4,
+        ...     extract=True
+        ... )
+        >>> runner()
+        """
+        input_files = [Path(f).absolute() for f in input_files]
+        # Build command: fastqc [options] -o output_dir input_file(s)
+        arguments = ["-o", str(output_dir)]
+        # Add input files
+        for f in input_files:
+            arguments.append(str(f))
+        return arguments, [output_dir], None, None, None
+
+    @element
+    def qc(
+        self,
+        sample: Sample | Element,
+        label: str,
+        folder: Path | str | None = None,
+        params: Params | None = None,
+        cfg: ExternalRunConfig | None = None,
+    ) -> Element:
+        """Run FastQC quality control (high-level).
+
+        Creates an Element that runs FastQC on input FASTQ files from a Sample
+        or Element and generates HTML/ZIP QC reports.
+
+        Parameters
+        ----------
+        sample : Union[Sample, Element]
+            Sample or Element containing FASTQ file paths and metadata.
+        label : str
+            Label for this QC run (e.g., "raw" or "cleaned").
+            Used in Element naming and key generation.
+        folder : Optional[Union[Path, str]]
+            Output folder for FastQC results. If None, a default folder will be
+            used.
+        params : Params | None
+            Optional parameters for FastQC (e.g., threads, extract).
+        cfg : ExternalRunConfig | None
+            Optional configuration for running FastQC (e.g., working directory,
+            threads, ...).
+
+        Returns
+        -------
+        Element
+            An Element that executes FastQC when run. Artifacts include:
+            - fastqc_dir: Output directory
+            - fastqc_html_r1: HTML report for R1
+            - fastqc_zip_r1: ZIP archive for R1
+            - fastqc_html_r2: HTML report for R2 (if paired-end)
+            - fastqc_zip_r2: ZIP archive for R2 (if paired-end)
+            - fastq_r1: Input R1 FASTQ (for traceability)
+            - fastq_r2: Input R2 FASTQ (for traceability, if paired-end)
+
+        Examples
+        --------
+        >>> fastqc = FastQC()
+        >>> sample = Sample(name="my_sample", pairing="paired",
+        ...                 fastq_r1_path="sample_R1.fastq.gz",
+        ...                 fastq_r2_path="sample_R2.fastq.gz")
+        >>> fastqc_elem = fastqc.fastqc(
+        ...     sample=sample,
+        ...     folder="results/qc/my_sample/fastqc_raw",
+        ...     label="raw",
+        ...     threads=4
+        ... )
+        >>> fastqc_elem.run()
+        """
+        params = params or Params(threads=10, extract=False)
+        cfg = cfg or ExternalRunConfig(threads=Params.get("--threads", 10))
+
+        # Prepare output folder
+        if not folder:
+            folder = sample.result_dir / "fastqc" / label
+        else:
+            folder = (Path(folder) / label).absolute()
+        ensure(Path(folder).absolute())
+
+        # Extract FASTQ paths from Sample or Element
+        # Collect input files
+        input_files = [sample.fastq_r1]
+        if sample.fastq_r2:
+            input_files.append(sample.fastq_r2)
+
+        # Build runner
+        runner = self.run_fastqc(
+            input_files=input_files,
+            output_dir=folder,
+            params=params,
+            cfg=cfg,
+        )
+
+        # Build artifacts
+        # FastQC names output files based on input filename
+        r1_base = sample.fastq_r1.stem
+        if r1_base.endswith(".fastq"):
+            r1_base = r1_base[:-6]
+        elif r1_base.endswith(".fq"):
+            r1_base = r1_base[:-3]
+
+        artifacts = {
+            "html_r1": folder / f"{r1_base}_fastqc.html",
+            "zip_r1": folder / f"{r1_base}_fastqc.zip",
+        }
+
+        if sample.fastq_r2:
+            r2_base = sample.fastq_r2.stem
+            if r2_base.endswith(".fastq"):
+                r2_base = r2_base[:-6]
+            elif r2_base.endswith(".fq"):
+                r2_base = r2_base[:-3]
+
+            artifacts["html_r2"] = folder / f"{r2_base}_fastqc.html"
+            artifacts["zip_r2"] = folder / f"{r2_base}_fastqc.zip"
+
+        # Build prerequisites list
+        pres = []
+        sample_name = sample.name
+        if isinstance(sample, Element):
+            if "." in sample.name:
+                sample_name = sample.name.split(".")[0]
+            pres.append(sample)
+
+        determinants = self.signature_determinants(params)
+        name = f"{sample_name}.{label}.QC({self.name})"
+        key = f"{sample_name}_{label}_{self.version_name}"
+        return Element(
+            name=name,
+            key=key,
+            run=runner,
+            determinants=determinants,
+            inputs=input_files,
+            artifacts=artifacts,
+            pres=pres,
+        )
+
+    @subroutine
+    def run_qc(
+        self,
+        input_file: Path | str | list[Path | str],
+        output_dir: Path | str,
+        params: Params | None = None,
+        cfg: ExternalRunConfig | None = None,
+    ) -> Callable[[], None]:
+        """Run FastQC on one or more sequencing files.
+
+        Creates a zero-argument callable that runs FastQC quality control
+        on FASTQ or BAM files and generates HTML reports.
+
+        Parameters
+        ----------
+        input_file : Union[Path, str, List[Union[Path, str]]]
+                Input file(s) to analyze (FASTQ, BAM, or SAM).
+                Can be a single file or list of files.
+        output_dir : Union[Path, str]
+                Output directory for FastQC reports.
+        cwd : Optional[Path]
+                Working directory for the command.
+        parameters : Any
+                Additional FastQC parameters (e.g., {"--nogroup": True}).
+
+        Returns
+        -------
+        Callable[[], None]
+                Zero-argument callable that executes FastQC.
+
+        Examples
+        --------
+        >>> fastqc = FastQC()
+        >>> qc = fastqc.run_qc("aligned.bam", "qc_results")
+        >>> qc()
+        """
+        params = params or Params(threads=10, extract=False)
+        cfg = cfg or ExternalRunConfig(threads=Params.get("--threads", 1))
+        # Handle single file or list of files
+        if isinstance(input_file, (list, tuple)):
+            input_files = [Path(f).absolute() for f in input_file]
+        else:
+            input_files = [Path(input_file).absolute()]
+
+        # Build command: fastqc [options] -o output_dir input_file(s)
+        arguments = []
+        # Add output directory
+        arguments.extend(["-o", str(output_dir)])
+        # Add input files
+        for f in input_files:
+            arguments.append(str(f))
+        return arguments, [output_dir], None, None, None

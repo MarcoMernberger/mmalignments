@@ -1,0 +1,3 @@
+"""
+API interface for mmalignments.
+"""

@@ -1,0 +1,162 @@
+Erweitere meinen code bitte um funktionen, die folgende calls abdecken:
+
+
+in mmalignments/src/mmalignments/models/callers/gatk.py:
+
+0a) 
+
+
+Sequence Dictionary für Picard/GATK (falls nicht vorhanden)
+samtools faidx mm10.fa
+
+
+
+
+0b) BED → interval_list (für Picard CollectHsMetrics)
+
+Picard will interval_list, nicht BED.
+
+gatk BedToIntervalList \
+  -I targets.bed \
+  -O targets.interval_list \
+  -SD mm10.dict
+
+Optional, wenn du targets.padded.bed nutzen willst:
+
+gatk BedToIntervalList -I targets.padded.bed -O targets.padded.interval_list -SD mm10.dict
+
+
+1) Picard Alignment Summary Metrics (Mapping/Alignment-QC)
+
+Input: sample.dedup.bam
+Output: qc/<sample>/picard/alignment_summary_metrics.txt
+
+gatk CollectAlignmentSummaryMetrics \
+  -R mm10.fa \
+  -I sample.dedup.bam \
+  -O qc/<sample>/picard/alignment_summary_metrics.txt
+
+# Was du daraus liest: Mapping Rate, PF aligned, mismatch-Rates grob.
+
+2) Picard Insert Size Metrics
+
+Outputs:
+
+qc/<sample>/picard/insert_size_metrics.txt
+
+qc/<sample>/picard/insert_size_histogram.pdf
+
+gatk CollectInsertSizeMetrics \
+  -I sample.dedup.bam \
+  -O qc/<sample>/picard/insert_size_metrics.txt \
+  -H qc/<sample>/picard/insert_size_histogram.pdf
+
+Was du daraus liest: Fragmentlänge/Library-Qualität, Ausreißer, Degradation.
+
+3) Picard HS Metrics (Capture/On-target, Fold-80 etc.)
+
+Outputs:
+
+qc/<sample>/picard/hs_metrics.txt
+
+qc/<sample>/picard/hs_metrics_per_target_coverage.txt (optional, je nach Version/Option)
+
+Wenn du nur targets hast:
+
+gatk CollectHsMetrics \
+  -R mm10.fa \
+  -I sample.dedup.bam \
+  -O qc/<sample>/picard/hs_metrics.txt \
+  --BAIT_INTERVALS targets.interval_list \
+  --TARGET_INTERVALS targets.interval_list
+
+Wenn du lieber targets.padded.interval_list für Targets nehmen willst:
+
+gatk CollectHsMetrics \
+  -R mm10.fa \
+  -I sample.dedup.bam \
+  -O qc/<sample>/picard/hs_metrics.txt \
+  --BAIT_INTERVALS targets.interval_list \
+  --TARGET_INTERVALS targets.padded.interval_list
+
+Was du daraus liest (wichtige Felder):
+
+PCT_SELECTED_BASES (on-target Anteil)
+
+MEAN_TARGET_COVERAGE
+
+FOLD_80_BASE_PENALTY (Capture-Uniformität)
+
+PCT_TARGET_BASES_10X/20X/... (je nach Output)
+
+
+in mmalignments/src/mmalignments/models/qc/mosdepth.py:
+
+4) mosdepth Coverage auf Targets
+
+Outputs (typisch):
+
+qc/<sample>/mosdepth/sample.targets.mosdepth.summary.txt
+
+qc/<sample>/mosdepth/sample.targets.regions.bed.gz (mean depth pro Interval)
+
+qc/<sample>/mosdepth/sample.targets.global.dist.txt (Depth distribution)
+
+qc/<sample>/mosdepth/sample.targets.per-base.bed.gz (optional/teuer; nur wenn du’s brauchst)
+
+Command (für Exome meist mit gepaddeten Targets sinnvoll):
+
+mkdir -p qc/<sample>/mosdepth
+
+mosdepth -t 8 \
+  --by targets.padded.bed \
+  qc/<sample>/mosdepth/<sample>.targets \
+  sample.dedup.bam
+
+Was du daraus liest:
+
+Depth-Verteilung und “callable”-Anteil (z.B. ≥10x) → wichtig für Mutational Load Nenner.
+
+
+in mmalignments/src/mmalignments/models/qc/samtools.py:
+
+
+5) samtools stats / flagstat (quick sanity)
+
+Outputs:
+
+qc/<sample>/samtools/flagstat.txt
+
+qc/<sample>/samtools/stats.txt
+
+mkdir -p qc/<sample>/samtools
+
+samtools flagstat sample.dedup.bam > qc/<sample>/samtools/flagstat.txt
+samtools stats sample.dedup.bam > qc/<sample>/samtools/stats.txt
+
+Was du daraus liest: mapped/unmapped, properly paired, duplicates (grob), insert-related stats.
+
+
+in mmalignments/src/mmalignments/models/qc/multiqc.py:
+
+6) MultiQC (über alle Samples)
+
+Wenn du alles unter results/qc/ sammelst:
+
+multiqc results/qc -o results/qc/multiqc
+
+Output:
+
+results/qc/multiqc/multiqc_report.html
+
+results/qc/multiqc/multiqc_data/
+
+Orientiere dich dabei immer an der folgenden Struktur:
+
+Eine low-level-funktion nimmt die required und optional input files und parameter entgegen, baut den runner und gibt diesen zurück. 
+Eine high-level funktion darüber nimmt wo sinnvoll elements entgegen, baut die benötigten Pfade und Dateien zusammen, ruft die Funktion darunter auf und bekommt den runner. Dann gibt sie ein Element zurück, das den Runner enthält.
+
+Ein beispiel dazu, wie das aussehen soll ist in gatk.py die funktionen get_pileup_summaries (low_level) und pilesum (high-level). Orientiere dich daran und erstelle die neuen funktionen im selben schema.
+
+Erstelle mir bitte dann in mmalignments/src/mmalignments/models/qc/qc.py eine convenience funktion "post_mapping_qc", die all die oben genannten schritte hintereinander ausführt. Dazu darf sie alle Elements bekommen, die nötig sind.
+Diese funktion soll mehrere Elements erzeugen und zurück geben und definiert einen DAG. Orientiere dich an der funktion alignsort in mmalignments/src/mmalignments/models/aligners/BWAmem.py, die auch mehrere Schritte hintereinander ausführt.

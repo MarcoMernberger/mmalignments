@@ -1,0 +1,498 @@
+{
+  "default": {
+    "force": {
+      "flag": "--force",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Overwrite any existing reports"
+    },
+    "config": {
+      "flag": "--config",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": false,
+      "render": "value",
+      "description": "Specific config file to load, after those in MultiQC dir / home dir / working dir. (PATH)"
+    },
+    "cl_config": {
+      "flag": "--cl-config",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": false,
+      "render": "value",
+      "description": "Specify MultiQC config YAML on the command line (TEXT)"
+    },
+    "filename": {
+      "flag": "--filename",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Report filename. Use 'stdout' to print to standard out. (TEXT)"
+    },
+    "outdir": {
+      "flag": "--outdir",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Create report in the specified output directory. (TEXT)"
+    },
+    "ignore": {
+      "flag": "--ignore",
+      "dtype": "str",
+      "required": false,
+      "default": [],
+      "affects_output": false,
+      "render": "multi_repeat",
+      "description": "Ignore analysis files (GLOB EXPRESSION). Can be specified multiple times."
+    },
+    "ignore_samples": {
+      "flag": "--ignore-samples",
+      "dtype": "str",
+      "required": false,
+      "default": [],
+      "affects_output": false,
+      "render": "multi_repeat",
+      "description": "Ignore sample names (GLOB EXPRESSION). Can be specified multiple times."
+    },
+    "ignore_symlinks": {
+      "flag": "--ignore-symlinks",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Ignore symlinked directories and files"
+    },
+    "file_list": {
+      "flag": "--file-list",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": false,
+      "render": "value",
+      "description": "Supply a file containing a list of file paths to be searched, one per row"
+    },
+
+    "module": {
+      "flag": "--module",
+      "dtype": "str",
+      "required": false,
+      "default": [],
+      "affects_output": false,
+      "render": "multi_repeat",
+      "description": "Use only this module. Can specify multiple times. (MODULE NAME)"
+    },
+    "exclude": {
+      "flag": "--exclude",
+      "dtype": "str",
+      "required": false,
+      "default": [],
+      "affects_output": false,
+      "render": "multi_repeat",
+      "description": "Do not use this module. Can specify multiple times. (MODULE NAME)"
+    },
+    "require_logs": {
+      "flag": "--require-logs",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Require all explicitly requested modules to have log files. If not, MultiQC will exit with an error."
+    },
+
+    "dirs": {
+      "flag": "--dirs",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Prepend directory to sample names"
+    },
+    "dirs_depth": {
+      "flag": "--dirs-depth",
+      "dtype": "int",
+      "required": false,
+      "default": null,
+      "affects_output": false,
+      "render": "value",
+      "description": "Prepend n directories to sample names. Negative number to take from start of path. (INTEGER)"
+    },
+    "fullnames": {
+      "flag": "--fullnames",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Do not clean the sample names (leave as full file name)"
+    },
+    "fn_as_s_name": {
+      "flag": "--fn_as_s_name",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Use the log filename as the sample name"
+    },
+    "replace_names": {
+      "flag": "--replace-names",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": false,
+      "render": "value",
+      "description": "TSV file to rename sample names during report generation (PATH)"
+    },
+
+    "title": {
+      "flag": "--title",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Report title. Printed as page header, used for filename if not otherwise specified. (TEXT)"
+    },
+    "comment": {
+      "flag": "--comment",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Custom comment, will be printed at the top of the report. (TEXT)"
+    },
+    "template": {
+      "flag": "--template",
+      "dtype": "str",
+      "required": false,
+      "default": "default",
+      "affects_output": true,
+      "render": "value",
+      "description": "Report template to use. (default|gathered|geo|sections|simple)"
+    },
+    "sample_names": {
+      "flag": "--sample-names",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": false,
+      "render": "value",
+      "description": "TSV file containing alternative sample names for renaming buttons in the report (PATH)"
+    },
+    "sample_filters": {
+      "flag": "--sample-filters",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": false,
+      "render": "value",
+      "description": "TSV file containing show/hide patterns for the report (PATH)"
+    },
+    "custom_css_file": {
+      "flag": "--custom-css-file",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Custom CSS file to add to the final report (PATH)"
+    },
+
+    "flat": {
+      "flag": "--flat",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Use only flat plots (static images)"
+    },
+    "interactive": {
+      "flag": "--interactive",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Use only interactive plots (in-browser Javascript)"
+    },
+    "export": {
+      "flag": "--export",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Export plots as static images in addition to the report"
+    },
+    "data_dir": {
+      "flag": "--data-dir",
+      "dtype": "bool",
+      "required": false,
+      "default": null,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Force the parsed data directory to be created (use --data-dir) or not created (use --no-data-dir)"
+    },
+    "data_format": {
+      "flag": "--data-format",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output parsed data in a different format. (tsv|csv|json|yaml)"
+    },
+    "zip_data_dir": {
+      "flag": "--zip-data-dir",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Compress the data directory"
+    },
+    "no_report": {
+      "flag": "--no-report",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Do not generate a report, only export data and plots"
+    },
+    "clean_up": {
+      "flag": "--clean-up",
+      "dtype": "bool",
+      "required": false,
+      "default": null,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Remove the temporary directory and log file after finishing (use --clean-up) or keep them (use --no-clean-up)"
+    },
+    "pdf": {
+      "flag": "--pdf",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Creates PDF report with the 'simple' template. Requires Pandoc to be installed."
+    },
+    "verbose": {
+      "flag": "--verbose",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Increase output verbosity."
+    },
+    "quiet": {
+      "flag": "--quiet",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Only show log warnings"
+    },
+    "no_version_check": {
+      "flag": "--no-version-check",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Disable checking the latest MultiQC version on the server"
+    },
+    "strict": {
+      "flag": "--strict",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Don't catch exceptions, run additional code checks to help development"
+    },
+    "development": {
+      "flag": "--development",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Development mode. Do not compress and minimise JS, export uncompressed plot data"
+    },
+    "dev": {
+      "flag": "--dev",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Alias for --development"
+    },
+    "profile_runtime": {
+      "flag": "--profile-runtime",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Add analysis of how long MultiQC takes to run to the report"
+    },
+    "profile_memory": {
+      "flag": "--profile-memory",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Add analysis of how much memory each module uses (tracking increases runtime)"
+    },
+    "no_megaqc_upload": {
+      "flag": "--no-megaqc-upload",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Don't upload generated report to MegaQC, even if MegaQC options are found"
+    },
+    "no_ansi": {
+      "flag": "--no-ansi",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Disable coloured log output"
+    },
+    "version": {
+      "flag": "--version",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Show the version and exit"
+    },
+    "help": {
+      "flag": "--help",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Show this message and exit"
+    },
+
+    "ai": {
+      "flag": "--ai",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Generate an AI summary of the report"
+    },
+    "ai_summary": {
+      "flag": "--ai-summary",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Generate an AI summary of the report"
+    },
+    "ai_summary_full": {
+      "flag": "--ai-summary-full",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Generate a detailed AI summary of the report"
+    },
+    "ai_provider": {
+      "flag": "--ai-provider",
+      "dtype": "str",
+      "required": false,
+      "default": "seqera",
+      "affects_output": true,
+      "render": "value",
+      "description": "Select AI provider for report summarization. (seqera|openai|anthropic|aws_bedrock|custom)"
+    },
+    "no_ai": {
+      "flag": "--no-ai",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Disable AI toolbox and buttons in the report"
+    },
+
+    "check_config": {
+      "flag": "--check-config",
+      "dtype": "bool",
+      "required": false,
+      "default": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Check a MultiQC configuration file for errors and exit"
+    },
+
+    "only_samples": {
+      "flag": "--only-samples",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": false,
+      "render": "value",
+      "description": "Only include sample names matching the given glob expression (GLOB EXPRESSION)"
+    },
+
+    "ai_model": {
+      "flag": "--ai-model",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Select AI model to use for report summarization (TEXT)"
+    },
+    "ai_custom_endpoint": {
+      "flag": "--ai-custom-endpoint",
+      "dtype": "str",
+      "required": false,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Custom AI endpoint to use with OpenAI API (TEXT)"
+    },
+    "ai_custom_context_window": {
+      "flag": "--ai-custom-context-window",
+      "dtype": "int",
+      "required": false,
+      "default": 128000,
+      "affects_output": true,
+      "render": "value",
+      "description": "Custom context window to use with OpenAI API"
+    }
+  }
+}

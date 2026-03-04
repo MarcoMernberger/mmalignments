@@ -1,0 +1,332 @@
+{
+  "index": {
+    "prefix": {
+      "flag": "-p",
+      "dtype": ["str", "path"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Index prefix (idxbase). If not set, bwa-mem2 derives it from input fasta name."
+    }
+  },
+  "mem": {
+    "output": {
+      "flag": "-o",
+      "dtype": ["str", "path"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output SAM file name. If not set, writes SAM to stdout."
+    },
+    "threads": {
+      "flag": "-t",
+      "dtype": ["int"],
+      "default": 1,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Number of threads."
+    },
+    "min_seed_len": {
+      "flag": "-k",
+      "dtype": ["int"],
+      "default": 19,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum seed length."
+    },
+    "band_width": {
+      "flag": "-w",
+      "dtype": ["int"],
+      "default": 100,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Band width for banded alignment."
+    },
+    "x_dropoff": {
+      "flag": "-d",
+      "dtype": ["int"],
+      "default": 100,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Off-diagonal X-dropoff."
+    },
+    "internal_seed_frac": {
+      "flag": "-r",
+      "dtype": ["float"],
+      "default": 1.5,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Look for internal seeds inside a seed longer than {-k} * FLOAT."
+    },
+    "seed_occ_3rd_round": {
+      "flag": "-y",
+      "dtype": ["int"],
+      "default": 20,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Seed occurrence for the 3rd round seeding."
+    },
+    "skip_seeds_over_occ": {
+      "flag": "-c",
+      "dtype": ["int"],
+      "default": 500,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Skip seeds with more than INT occurrences."
+    },
+    "drop_chain_frac": {
+      "flag": "-D",
+      "dtype": ["float"],
+      "default": 0.5,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Drop chains shorter than FLOAT fraction of the longest overlapping chain."
+    },
+    "discard_chain_seeded_bases_lt": {
+      "flag": "-W",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Discard a chain if seeded bases shorter than INT."
+    },
+    "mate_rescue_rounds": {
+      "flag": "-m",
+      "dtype": ["int"],
+      "default": 50,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Perform at most INT rounds of mate rescues for each read."
+    },
+    "skip_mate_rescue": {
+      "flag": "-S",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Skip mate rescue."
+    },
+    "skip_pairing": {
+      "flag": "-P",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Skip pairing; mate rescue performed unless -S also in use."
+    },
+
+    "score_match": {
+      "flag": "-A",
+      "dtype": ["int"],
+      "default": 1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Score for a sequence match."
+    },
+    "penalty_mismatch": {
+      "flag": "-B",
+      "dtype": ["int"],
+      "default": 4,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Penalty for a mismatch."
+    },
+    "gap_open": {
+      "flag": "-O",
+      "dtype": ["str"],
+      "default": "6,6",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Gap open penalties for deletions and insertions. Format: INT[,INT]."
+    },
+    "gap_extend": {
+      "flag": "-E",
+      "dtype": ["str"],
+      "default": "1,1",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Gap extension penalty. Format: INT[,INT]."
+    },
+    "clip_penalty": {
+      "flag": "-L",
+      "dtype": ["str"],
+      "default": "5,5",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Penalty for 5' and 3' end clipping. Format: INT[,INT]."
+    },
+    "unpaired_penalty": {
+      "flag": "-U",
+      "dtype": ["int"],
+      "default": 17,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Penalty for an unpaired read pair."
+    },
+
+    "smart_pairing": {
+      "flag": "-p",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Smart pairing (ignoring in2.fq)."
+    },
+    "read_group": {
+      "flag": "-R",
+      "dtype": ["str"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Read group header line such as '@RG\\tID:foo\\tSM:bar'."
+    },
+    "header": {
+      "flag": "-H",
+      "dtype": ["str", "path"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Insert STR to header if it starts with @; or insert lines in FILE."
+    },
+    "alt_contigs_primary": {
+      "flag": "-j",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Treat ALT contigs as part of the primary assembly (ignore <idxbase>.alt)."
+    },
+    "split_primary_smallest_coord": {
+      "flag": "-5",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "For split alignment, take alignment with smallest coordinate as primary."
+    },
+    "dont_modify_supp_mapq": {
+      "flag": "-q",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Don't modify mapQ of supplementary alignments."
+    },
+    "batch_bases": {
+      "flag": "-K",
+      "dtype": ["int"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Process INT input bases in each batch regardless of nThreads."
+    },
+    "verbose_level": {
+      "flag": "-v",
+      "dtype": ["int"],
+      "default": 3,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Verbose level: 1=error, 2=warning, 3=message, 4+=debugging."
+    },
+    "min_score": {
+      "flag": "-T",
+      "dtype": ["int"],
+      "default": 30,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum score to output."
+    },
+    "xa_hits": {
+      "flag": "-h",
+      "dtype": ["str"],
+      "default": "5,200",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "If there are <INT hits with score >80% of max score, output all in XA. Format: INT[,INT]."
+    },
+    "all_alignments": {
+      "flag": "-a",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Output all alignments for SE or unpaired PE."
+    },
+    "append_comment": {
+      "flag": "-C",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Append FASTA/FASTQ comment to SAM output."
+    },
+    "xr_tag": {
+      "flag": "-V",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Output the reference FASTA header in the XR tag."
+    },
+    "softclip_supp": {
+      "flag": "-Y",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Use soft clipping for supplementary alignments."
+    },
+    "mark_shorter_split_secondary": {
+      "flag": "-M",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Mark shorter split hits as secondary."
+    },
+    "insert_size_dist": {
+      "flag": "-I",
+      "dtype": ["str"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Insert size distribution. Format: FLOAT[,FLOAT[,INT[,INT]]]."
+    }
+  }
+}

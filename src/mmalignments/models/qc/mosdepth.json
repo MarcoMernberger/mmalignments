@@ -1,0 +1,157 @@
+{
+  "default": {
+    "prefix": {
+      "flag": null,
+      "dtype": "str",
+      "required": true,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output prefix for mosdepth result files"
+    },
+    "bam": {
+      "flag": null,
+      "dtype": "str",
+      "required": true,
+      "default": null,
+      "affects_output": true,
+      "render": "value",
+      "description": "Input BAM or CRAM file"
+    },
+    "threads": {
+      "flag": "--threads",
+      "dtype": "int",
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Number of BAM decompression threads"
+    },
+    "chrom": {
+      "flag": "--chrom",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Restrict depth calculation to chromosome"
+    },
+    "by": {
+      "flag": "--by",
+      "dtype": ["str", "int"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "BED file or integer window size"
+    },
+    "no_per_base": {
+      "flag": "--no-per-base",
+      "dtype": "bool",
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Do not output per-base depth"
+    },
+    "fasta": {
+      "flag": "--fasta",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "FASTA file for CRAM input"
+    },
+    "flag": {
+      "flag": "--flag",
+      "dtype": "int",
+      "default": 1796,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Exclude reads with any of the bits in FLAG set"
+    },
+    "include_flag": {
+      "flag": "--include-flag",
+      "dtype": "int",
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Only include reads with any of the bits in FLAG set"
+    },
+    "fast_mode": {
+      "flag": "--fast-mode",
+      "dtype": "bool",
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Do not inspect internal CIGAR operations or correct mate overlaps"
+    },
+    "quantize": {
+      "flag": "--quantize",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Quantize coverage output into segments"
+    },
+    "mapq": {
+      "flag": "--mapq",
+      "dtype": "int",
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Mapping quality threshold"
+    },
+    "min_frag_len": {
+      "flag": "--min-frag-len",
+      "dtype": "int",
+      "default": -1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum fragment length"
+    },
+    "max_frag_len": {
+      "flag": "--max-frag-len",
+      "dtype": "int",
+      "default": -1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Maximum fragment length"
+    },
+    "thresholds": {
+      "flag": "--thresholds",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Comma-separated integer thresholds"
+    },
+    "use_median": {
+      "flag": "--use-median",
+      "dtype": "bool",
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Output median instead of mean for regions"
+    },
+    "read_groups": {
+      "flag": "--read-groups",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Comma-separated read group IDs"
+    }
+  }
+}

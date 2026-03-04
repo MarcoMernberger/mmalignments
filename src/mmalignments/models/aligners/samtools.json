@@ -1,0 +1,553 @@
+{
+  "sort": {
+    "compression_level": {
+      "flag": "-l",
+      "dtype": ["int"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Set compression level, from 0 (uncompressed) to 9 (best)."
+    },
+    "uncompressed": {
+      "flag": "-u",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Output uncompressed data (equivalent to -l 0)."
+    },
+    "max_mem_per_thread": {
+      "flag": "-m",
+      "dtype": ["str", "int"],
+      "default": "768M",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Set maximum memory per thread; suffix K/M/G recognized [768M]."
+    },
+    "use_minimiser": {
+      "flag": "-M",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Use minimiser for clustering unaligned/unplaced reads."
+    },
+    "no_reverse_strand": {
+      "flag": "-R",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Do not use reverse strand (only compatible with -M)."
+    },
+    "kmer_size": {
+      "flag": "-K",
+      "dtype": ["int"],
+      "default": 20,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Kmer size to use for minimiser [20]."
+    },
+    "minimiser_order_fasta": {
+      "flag": "-I",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Order minimisers by their position in FILE FASTA."
+    },
+    "window_size": {
+      "flag": "-w",
+      "dtype": ["int"],
+      "default": 100,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Window size for minimiser indexing via -I ref.fa [100]."
+    },
+    "squash_homopolymers": {
+      "flag": "-H",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Squash homopolymers when computing minimiser."
+    },
+    "sort_by_read_name_natural": {
+      "flag": "-n",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Sort by read name (natural). Cannot be used with samtools index."
+    },
+    "sort_by_read_name_ascii": {
+      "flag": "-N",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Sort by read name (ASCII). Cannot be used with samtools index."
+    },
+    "sort_by_tag": {
+      "flag": "-t",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Sort by value of TAG. Uses position as secondary index (or read name if -n is set)."
+    },
+    "output": {
+      "flag": "-o",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Write final output to FILE rather than standard output."
+    },
+    "temp_prefix": {
+      "flag": "-T",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Write temporary files to PREFIX.nnnn.bam."
+    },
+    "no_pg": {
+      "flag": "--no-PG",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Do not add a PG line."
+    },
+    "template_coordinate": {
+      "flag": "--template-coordinate",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Sort by template-coordinate."
+    },
+    "input_fmt_option": {
+      "flag": "--input-fmt-option",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Specify a single input file format option OPTION or OPTION=VALUE."
+    },
+    "output_fmt": {
+      "flag": "-O",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Specify output format (SAM, BAM, CRAM) and optional OPT[=VAL]..."
+    },
+    "output_fmt_option": {
+      "flag": "--output-fmt-option",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Specify a single output file format option OPTION or OPTION=VALUE."
+    },
+    "reference": {
+      "flag": "--reference",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Reference sequence FASTA FILE [null]."
+    },
+    "threads": {
+      "flag": "--threads",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Number of additional threads to use [0]."
+    },
+    "write_index": {
+      "flag": "--write-index",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Automatically index the output files [off]."
+    },
+    "verbosity": {
+      "flag": "--verbosity",
+      "dtype": ["int"],
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Set level of verbosity."
+    }
+  },
+
+  "index": {
+    "bai": {
+      "flag": "-b",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Generate BAI-format index for BAM files [default behavior if no -c]."
+    },
+    "csi": {
+      "flag": "-c",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Generate CSI-format index for BAM files."
+    },
+    "min_shift": {
+      "flag": "-m",
+      "dtype": ["int"],
+      "default": 14,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Set minimum interval size for CSI indices to 2^INT [14]."
+    },
+    "multi": {
+      "flag": "-M",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Interpret all filename arguments as files to be indexed."
+    },
+    "output": {
+      "flag": "-o",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Write index to FILE (alternative to positional out.index)."
+    },
+    "threads": {
+      "flag": "-@",
+      "dtype": ["int"],
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Sets the number of threads [none]."
+    }
+  },
+
+  "faidx": {
+    "output": {
+      "flag": "-o",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Write FASTA to file."
+    },
+    "length": {
+      "flag": "-n",
+      "dtype": ["int"],
+      "default": 60,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Length of FASTA sequence line [60]."
+    },
+    "continue": {
+      "flag": "-c",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Continue after trying to retrieve missing region."
+    },
+    "region_file": {
+      "flag": "-r",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "File of regions (chr:from-to), one per line."
+    },
+    "reverse_complement": {
+      "flag": "-i",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Reverse complement sequences."
+    },
+    "mark_strand": {
+      "flag": "--mark-strand",
+      "dtype": ["str"],
+      "default": "rc",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Add strand indicator to sequence name. TYPE = rc|no|sign|custom,<pos>,<neg>."
+    },
+    "fai_idx": {
+      "flag": "--fai-idx",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Name of the index file (default file.fa.fai)."
+    },
+    "gzi_idx": {
+      "flag": "--gzi-idx",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Name of compressed file index (default file.fa.gz.gzi)."
+    },
+    "fastq": {
+      "flag": "-f",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "File and index in FASTQ format."
+    }
+  },
+
+  "stats": {
+    "coverage": {
+      "flag": "-c",
+      "dtype": "str",
+      "default": "1,1000,1",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Coverage distribution min,max,step [1,1000,1]."
+    },
+    "remove_dups": {
+      "flag": "-d",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Exclude from statistics reads marked as duplicates."
+    },
+    "customized_index_file": {
+      "flag": "-X",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Use a customized index file."
+    },
+    "required_flag": {
+      "flag": "-f",
+      "dtype": ["str", "int"],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Required flag, 0 for unset."
+    },
+    "filtering_flag": {
+      "flag": "-F",
+      "dtype": ["str", "int"],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Filtering flag, 0 for unset."
+    },
+    "gc_depth": {
+      "flag": "--GC-depth",
+      "dtype": ["float"],
+      "default": 20000.0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Size of GC-depth bins (smaller bins increase memory) [2e4]."
+    },
+    "insert_size_max": {
+      "flag": "-i",
+      "dtype": ["int"],
+      "default": 8000,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Maximum insert size [8000]."
+    },
+    "id": {
+      "flag": "-I",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Include only listed read group or sample name."
+    },
+    "read_length": {
+      "flag": "-l",
+      "dtype": ["int"],
+      "default": -1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Include only reads with the given read length [-1]."
+    },
+    "most_inserts": {
+      "flag": "-m",
+      "dtype": ["float"],
+      "default": 0.99,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Report only the main part of inserts [0.99]."
+    },
+    "split_prefix": {
+      "flag": "-P",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Path or string prefix for filepaths output by -S."
+    },
+    "trim_quality": {
+      "flag": "-q",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "The BWA trimming parameter [0]."
+    },
+    "ref_seq": {
+      "flag": "-r",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Reference sequence (required for GC-depth and mismatches-per-cycle)."
+    },
+    "split": {
+      "flag": "-S",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Also write statistics to separate files split by tagged field."
+    },
+    "target_regions": {
+      "flag": "-t",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Do stats in these regions only (tab-delimited chr,from,to; 1-based inclusive)."
+    },
+    "sparse": {
+      "flag": "-x",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Suppress outputting IS rows where there are no insertions."
+    },
+    "remove_overlaps": {
+      "flag": "-p",
+      "dtype": ["bool"],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Remove overlaps of paired-end reads from coverage and base count computations."
+    },
+    "cov_threshold": {
+      "flag": "-g",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Only bases with coverage above this value included in target percentage computation [0]."
+    },
+    "input_fmt_option": {
+      "flag": "--input-fmt-option",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Specify a single input file format option OPTION or OPTION=VALUE."
+    },
+    "reference": {
+      "flag": "--reference",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Reference sequence FASTA FILE [null]."
+    },
+    "threads": {
+      "flag": "-@",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Number of additional threads to use [0]."
+    },
+    "verbosity": {
+      "flag": "--verbosity",
+      "dtype": ["int"],
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Set level of verbosity."
+    }
+  }
+}

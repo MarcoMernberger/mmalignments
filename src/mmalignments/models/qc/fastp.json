@@ -1,0 +1,13 @@
+{
+  "default": {
+    "thread": {
+      "flag": "--thread",
+      "dtype": "int",
+      "default": 3,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "number of threads"
+    }
+  }
+}
