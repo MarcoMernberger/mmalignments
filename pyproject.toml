@@ -12,7 +12,6 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "typer[all]>=0.12.0",
 ]
-
 [project.optional-dependencies]
 dev = [
     "black>=24.4.0",
@@ -33,6 +32,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mmalignments"]
+
+[tool.hatch.build]
+sources = ["src"]
 
 [tool.uv]
 dev-dependencies = [
