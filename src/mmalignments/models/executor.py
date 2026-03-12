@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, Future
 from contextlib import contextmanager
 from logging import Logger
@@ -22,7 +23,7 @@ from mmalignments.models.status import (  # type: ignore[import]
     NodeState,
     ProgressReporter,
 )
-from mmalignments.services.io import from_json, parents
+from mmalignments.services.io import from_json, parents, ensure
 
 
 class Executor:
@@ -44,35 +45,35 @@ class Executor:
         registry: ElementRegistry | None = None,
         resources: ResourceConfig | None = None,
     ):
+        self.main_dir = cache_path or Path("cache/.run")
+        self.cache_dir = self.main_dir / "store"
         self.resources = resources or ResourceConfig.detect()
-        self.log_dir = cache_path or Path(".runlog")
-        self.cache_dir = cache_path or Path("cache/run")
+        self.log_dir = self.main_dir / "log"
         self.signature_store_path = self.cache_dir / "signatures.json"
-        self.logger = logger or logging.getLogger("pipeline.run")
+        ensure(self.log_dir, self.cache_dir)
+        self.logger = self.initlog(console=True)
+        # self.logger = logger or logging.getLogger("pipeline.run")
         self.dot_path = self.cache_dir / "dag.dot"
         self.verbose_level = verbose_level
         self.registry = registry or ElementRegistry()
         self.stop_event = threading.Event()
         self.state = "init"
-        signal.signal(signal.SIGTERM, self._handle_interrupt)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, self._handle_interrupt)
+            signal.signal(signal.SIGINT, self._handle_interrupt)
         # Keys present in the registry at the time record() was called.
         # play() will only run elements whose keys were added after record().
         self._baseline_keys: set[str] | None = None
-        self.active_processes: set[subprocess.Popen] = set()
 
     def _handle_interrupt(self, signum, frame):
         self.logger.warning("Interrupt received — stopping pipeline...")
         self.stop_event.set()
-        for proc in list(self.active_processes):  # terminate running subprocesses
-            proc.terminate()
 
     def _keyboard_listener(self):
         for line in sys.stdin:
             if line.strip().lower() == "q":
                 self.logger.warning("User requested stop.")
                 self.stop_event.set()
-                for proc in list(self.active_processes):
-                    proc.terminate()
                 break
 
     ###########################################################################
@@ -193,7 +194,7 @@ class Executor:
             self.logger.error(message)
         else:
             self.logger.debug(message)
-        print(message)
+        # print(message)
 
     def log(
         self,
@@ -228,11 +229,49 @@ class Executor:
             if will_run:
                 command = shlex.join(cmd) if cmd else "<no command available>"
                 message += f"\n  cmd:  {command}"
-                if display and display != cmd:
+                if display and display != command:
                     message += f"\n  display:  {display}"
                     message += f"\n  prov: {node.provenance}"
                 message += f"\n  default output: {node.default_output_file}"
         return message
+
+    def initlog(self, console: bool = False) -> Logger:
+        timestamp = self.get_timestamp()
+        return self.setup_run_logger(timestamp, console=console)
+
+    def get_timestamp(self) -> str:
+        return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def setup_run_logger(self, timestamp: str, console: bool = False) -> Logger:
+        run_log = self.log_dir / f"run_{timestamp}.log"
+        logger = logging.getLogger("pipeline.run")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+        formatter = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        )
+
+        if not any(
+            isinstance(h, logging.FileHandler) and h.baseFilename == str(run_log)
+            for h in logger.handlers
+        ):
+            fh = logging.FileHandler(run_log)
+            fh.setLevel(logging.INFO)
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
+
+        if console and not any(
+            isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.FileHandler)
+            for h in logger.handlers
+        ):
+            ch = logging.StreamHandler()
+            ch.setLevel(logging.INFO)
+            ch.setFormatter(formatter)
+            logger.addHandler(ch)
+
+        return logger
 
     ###########################################################################
     # Core execution
@@ -260,7 +299,7 @@ class Executor:
         nodes = self.collect(targets)
         order = self.toposort(nodes)
         self.check_duplicate_outputs(nodes)
-        self.write_dot(nodes, dot_path or self.dot_path, verbose)
+        self.write_dot(nodes, dot_path or self.dot_path)
 
         reporter: ProgressReporter | None = (
             ProgressReporter() if (progress and not dry_run) else None

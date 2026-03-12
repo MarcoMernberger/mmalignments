@@ -48,7 +48,6 @@ from mmalignments.models.parameters import (
 )
 from mmalignments.services.errors import handle_called_process_error
 from mmalignments.services.io import ensure, open_target, parents
-from mmalignments.services.time import TIMEFORMAT, str_to_timestamp, timestamp_to_str
 from mmalignments.models.resources import ResourceConfig  # type: ignore[import]
 from mmalignments.models.resources import current_resources
 
@@ -214,6 +213,18 @@ class External:
             **self.param_registry.by_subcommand,
         }
 
+    @property
+    def ts_format(self) -> str:
+        """
+        Return the format string used for timestamps in log filenames.
+
+        Returns
+        -------
+        str
+            The format string for timestamps.
+        """
+        return "%Y-%m-%d-%H-%M-%S"
+
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return f"<External name={self.name} binary={self.primary_binary}>"
 
@@ -306,11 +317,44 @@ class External:
         try:
             cur_ts_with_pid = current_base[len(cur_prefix) + 1 :]
             cur_ts_str = cur_ts_with_pid.split("_")[0]
-            cur_ts = str_to_timestamp(cur_ts_str)
+            cur_ts = self._str_to_timestamp(cur_ts_str)
         except Exception:
             # if we cannot parse current timestamp return None
             pass
         return cur_ts
+
+    def _timestamp_to_str(self, timestamp: datetime) -> str:
+        """
+        Convert a datetime object to a string format used in log filenames.
+
+        Parameters
+        ----------
+        timestamp : datetime
+            The timestamp to convert.
+
+        Returns
+        -------
+        str
+            The formatted timestamp string.
+        """
+        return timestamp.strftime(self.ts_format)
+
+    def _str_to_timestamp(self, cur_ts_str: str) -> datetime:
+        """
+        Convert a timestamp string from log filenames back to a datetime object.
+
+        Parameters
+        ----------
+        cur_ts_str : str
+            The timestamp string to convert.
+
+        Returns
+        -------
+        datetime
+            The corresponding datetime object.
+        """
+        ret = datetime.strptime(cur_ts_str, self.ts_format)
+        return ret
 
     ###########################################################################
     # Multi-Threading
@@ -420,7 +464,7 @@ class External:
 
     def get_timestamp_with_pid(self, timestamp: datetime) -> str:
         """Generate a timestamp string for log file naming."""
-        timestamp_pid = f"{timestamp_to_str(timestamp)}_{os.getpid()}"
+        timestamp_pid = f"{self._timestamp_to_str(timestamp)}_{os.getpid()}"
         return timestamp_pid
 
     def _delete_associated_logs(
@@ -453,7 +497,7 @@ class External:
         self, log_dir: Path, base: str, timestamp: datetime
     ) -> tuple[Path, Path, Path]:
         combined_log_path = (
-            log_dir / f"{base}_{timestamp_to_str(timestamp)}_{os.getpid()}.log"
+            log_dir / f"{base}_{self._timestamp_to_str(timestamp)}_{os.getpid()}.log"
         )
         stdout_log_path = combined_log_path.with_suffix(f".stdout.log")
         stderr_log_path = combined_log_path.with_suffix(f".stderr.log")
@@ -590,7 +634,7 @@ class External:
         """
 
         # extract timestamp part from current_base (strip pid suffix)
-        current_base = f"{current_prefix}_{timestamp_to_str(current_timestamp)}"
+        current_base = f"{current_prefix}_{self._timestamp_to_str(current_timestamp)}"
         for p in Path(log_dir).glob(f"{current_prefix}_*.log"):
             stem = p.stem  # base without suffix
             if stem == current_base:
