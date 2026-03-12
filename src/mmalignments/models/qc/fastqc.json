@@ -1,5 +1,11 @@
 {
   "default": {
+    "_thread_spec": {
+      "flag": "threads",
+      "max_threads": null,
+      "fraction": 0.5,
+      "multi": true
+    },
     "threads": {
       "flag": "--threads",
       "dtype": "int",

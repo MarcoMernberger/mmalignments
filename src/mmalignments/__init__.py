@@ -16,32 +16,54 @@ try:
 except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.1.0"
 
+from mmalignments.jobs.aligner_jobs import (  # noqa: F401
+    index_genome,
+    jobify,
+    write_lengths,  # noqa: F401
+)
+from mmalignments.models.aligners import (
+    BCFtools,
+    Bedtools,  # noqa: F401
+    BWAMem2,
+    Samtools,
+)
+from mmalignments.models.callers.gatk import GATK  # noqa: F401
+from mmalignments.models.data import Genome, Sample, Pairing  # noqa: F401
+from mmalignments.models.elements import (
+    Element,
+    FileElement,  # noqa: F401
+    FilesElement,
+    NextGenSampleElement,  # noqa: F401
+    ValidationPolicy,
+)
+from mmalignments.models.executor import Executor  # noqa: F401
+from mmalignments.models.qc import (
+    FastQC,
+    MultiQC,
+    post_mapping_qc_with_multiqc,
+    pre_alignment_qc,
+)
+from mmalignments.models.reports.report import MutationalLoadReport  # noqa: F401
+from mmalignments.services import ensure, initlog  # noqa: F401
+
 from .core import ensemblmap  # noqa: F401
-from .jobs.aligner_jobs import write_lengths  # noqa: F401
-from .jobs.aligner_jobs import index_genome, jobify  # noqa: F401
-from .models.aligners import (BCFtools, Bedtools, BWAMem2,  # noqa: F401
-                              Samtools)
-from .models.callers.gatk import GATK  # noqa: F401
-from .models.data import Genome, Sample  # noqa: F401
-from .models.executor import Executor  # noqa: F401
-from .models.qc import (FastQC, MultiQC, post_mapping_qc_with_multiqc,
-                        pre_alignment_qc)
-from .models.reports.report import MutationalLoadReport  # noqa: F401
-from .models.tasks import Element, FileElement, ValidationPolicy  # noqa: F401
-from .services import ensure, initlog  # noqa: F401
+from mmalignments.models.parameters import Params  # noqa: F401
+from mmalignments.models.externals import ExternalRunConfig  # noqa: F401
+from mmalignments.models.tags import ElementTag  # noqa: F401
 
 __all__ = [
-    "__version__",
     "Bedtools",
     "BCFtools",
     "BWAMem2",
     "Element",
+    "ElementTag",
+    "ExternalRunConfig",
+    "FilesElement",
+    "FileElement",
     "ensure",
-    "ensure_dir",
-    "ensure_dirs",
     "Executor",
     "FastQC",
-    "FileElement",
+    "FilesElement",
     "ensemblmap",
     "GATK",
     "Genome",
@@ -50,18 +72,13 @@ __all__ = [
     "jobify",
     "MultiQC",
     "MutationalLoadReport",
+    "NextGenSampleElement",
+    "Params",
     "pre_alignment_qc",
     "post_mapping_qc_with_multiqc",
     "Sample",
     "Samtools",
     "ValidationPolicy",
-    "write_lengths",
-    "Samtools",
-    "ValidationPolicy",
-    "write_lengths",
-    "ValidationPolicy",
-    "write_lengths",
-]
-    "ValidationPolicy",
+    "__version__",
     "write_lengths",
 ]

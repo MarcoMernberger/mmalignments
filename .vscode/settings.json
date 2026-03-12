@@ -12,5 +12,9 @@
         "--line-length",
         "80"
     ],
-    "python.analysis.typeCheckingMode": "basic"
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.extraPaths": [
+        "src",
+        "../../mbf/src"
+    ]
 }

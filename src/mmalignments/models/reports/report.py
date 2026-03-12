@@ -3,25 +3,30 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Mapping
 
 import matplotlib.pyplot as plt
 
-from mmalignments.models.tasks import Element
+from mmalignments.models.elements import Element, element
+from mmalignments.models.tags import (Method, PartialElementTag, Stage, State,
+                                      from_prior)
+from mmalignments.services.io import ensure
 
 
-def _read_json(p: Union[str, Path]) -> dict:
+def _read_json(p: str | Path) -> dict:
     with open(Path(p), "r") as f:
         return json.load(f)
 
 
-def _write_tsv(rows: List[dict], out_tsv: Path, columns: List[str]) -> None:
+def _write_tsv(rows: list[dict], out_tsv: Path, columns: list[str]) -> None:
     out_tsv.parent.mkdir(parents=True, exist_ok=True)
     with open(out_tsv, "w") as f:
         f.write("\t".join(columns) + "\n")
         for r in rows:
             f.write(
-                "\t".join("" if r.get(c) is None else str(r.get(c)) for c in columns)
+                "\t".join(
+                    "" if r.get(c) is None else str(r.get(c)) for c in columns
+                )  # noqa: E501
                 + "\n"
             )
 
@@ -41,7 +46,7 @@ def _tissue_from_sample(sample: str) -> str:
     return "Other"
 
 
-def _safe_float(x: Any) -> Optional[float]:
+def _safe_float(x: Any) -> float | None:
     try:
         if x is None:
             return None
@@ -50,9 +55,10 @@ def _safe_float(x: Any) -> Optional[float]:
         return None
 
 
-def _parse_picard_markdup_metrics(metrics_txt: Union[str, Path]) -> Optional[float]:
+def _parse_picard_markdup_metrics(metrics_txt: str | Path) -> float | None:
     """
-    Picard/GATK MarkDuplicates metrics: the duplication rate is usually in column PERCENT_DUPLICATION.
+    Picard/GATK MarkDuplicates metrics: the duplication rate is usually in
+    column PERCENT_DUPLICATION.
     We'll parse the first non-comment data line under the header.
     """
     p = Path(metrics_txt)
@@ -80,11 +86,11 @@ def _parse_picard_markdup_metrics(metrics_txt: Union[str, Path]) -> Optional[flo
 
 
 def _parse_picard_hs_metrics(
-    metrics_txt: Union[str, Path],
-) -> Tuple[Optional[float], Optional[float]]:
+    metrics_txt: str | Path,
+) -> tuple[float | None, float | None]:
     """
-    CollectHsMetrics has columns like PCT_SELECTED_BASES and MEAN_TARGET_COVERAGE.
-    We'll parse similarly.
+    CollectHsMetrics has columns like PCT_SELECTED_BASES and
+    MEAN_TARGET_COVERAGE. We'll parse similarly.
     Returns: (on_target_pct, mean_target_depth)
     """
     p = Path(metrics_txt)
@@ -95,7 +101,7 @@ def _parse_picard_hs_metrics(
     for line in p.read_text().splitlines():
         if not line.strip() or line.startswith("#"):
             continue
-        # HS metrics header line often starts with BAIT_SET / or has PCT_SELECTED_BASES
+        # HS metrics header line often starts with BAIT_SET / or has PCT_SELECTED_BASES  # noqa: E501
         if header is None and (
             "PCT_SELECTED_BASES" in line and "MEAN_TARGET_COVERAGE" in line
         ):
@@ -115,13 +121,17 @@ def _parse_picard_hs_metrics(
 
 @dataclass
 class MutationalLoadReport:
-    output_dir: Union[str, Path] = "results/report"
+    output_dir: str | Path = "results/report"
 
+    @element
     def build(
         self,
-        pairs: Dict[str, str],
-        counted_by_tumor: Dict[str, Element],
-        qc_by_sample: Optional[Dict[str, Dict[str, Union[str, Path]]]] = None,
+        pairs: Mapping[str, str],
+        counted_by_tumor: Mapping[str, Element],
+        *,
+        tag: PartialElementTag | None = None,
+        markdup_by_sample: Mapping[str, Element] = None,
+        hs_by_sample: Mapping[str, Element] = None,
     ) -> Element:
         out_dir = Path(self.output_dir).absolute()
         out_tsv = out_dir / "mutational_load_summary.tsv"
@@ -131,16 +141,21 @@ class MutationalLoadReport:
         out_plot_group_pdf = out_dir / "mut_load_by_group.pdf"
         out_plot_mouse_png = out_dir / "mut_load_by_mouse.png"
         out_plot_mouse_pdf = out_dir / "mut_load_by_mouse.pdf"
-
-        qc_by_sample = qc_by_sample or {}
-
+        inputs = []
+        for el in counted_by_tumor.values():
+            inputs.extend(list(el.inputs))
+        if markdup_by_sample:
+            for el in markdup_by_sample.values():
+                inputs.extend(list(el.inputs))
+        if hs_by_sample:
+            for el in hs_by_sample.values():
+                inputs.extend(list(el.inputs))
         # Build prerequisites: all count elements
         pres = list(counted_by_tumor.values())
 
         def _run() -> None:
-            out_dir.mkdir(parents=True, exist_ok=True)
-
-            rows: List[dict] = []
+            ensure(out_dir)
+            rows: list[dict] = []
             for tumor, normal in pairs.items():
                 if tumor not in counted_by_tumor:
                     # If you want, raise here; I keep it robust.
@@ -162,16 +177,13 @@ class MutationalLoadReport:
                     mut_load = n_total / callable_mb
 
                 # optional QC
-                qc = qc_by_sample.get(tumor, {})
+                qc = markdup_by_sample.get(tumor, {})
                 dup_rate = (
-                    _parse_picard_markdup_metrics(qc["markdup_metrics"])
-                    if "markdup_metrics" in qc
-                    else None
-                )
+                    _parse_picard_markdup_metrics(qc["metrics"]) if qc else None
+                )  # noqa: E501
+                qc = hs_by_sample.get(tumor, {})
                 on_target_pct, mean_target_depth = (
-                    _parse_picard_hs_metrics(qc["hs_metrics"])
-                    if "hs_metrics" in qc
-                    else (None, None)
+                    _parse_picard_hs_metrics(qc["hs"]) if qc else (None, None)
                 )
 
                 row = {
@@ -272,12 +284,32 @@ class MutationalLoadReport:
                 plt.savefig(out_plot_mouse_pdf)
                 plt.close()
 
+        count_element = next(iter(counted_by_tumor.values()))
+        tag = from_prior(
+            count_element.tag,
+            tag,
+            root="report",
+            level=(max([el.tag.level for el in counted_by_tumor.values()]) + 1),
+            stage=Stage.INTEGRATE,
+            method=Method.CUSTOM,
+            state=State.REPORT,
+            ext="json",
+        )
+        pres = list(counted_by_tumor.values())
+        if markdup_by_sample:
+            pres.extend(markdup_by_sample.values())
+        if hs_by_sample:
+            pres.extend(hs_by_sample.values())
+        determinants = []  # fill me
+        runner = _run
+        runner.command = ["generate mutational load report"]
+        runner.threads = 1
         return Element(
-            name="final_mutational_load_report",
             key="final_mutational_load_report",
             run=_run,
-            parameters={},
-            input_files=[],
+            tag=tag,
+            determinants=determinants,
+            inputs=inputs,
             artifacts={
                 "tsv": out_tsv,
                 "json": out_json,
@@ -287,5 +319,4 @@ class MutationalLoadReport:
                 "plot_mouse_pdf": out_plot_mouse_pdf,
             },
             pres=pres,
-            store_attributes={"multi_core": False},
         )

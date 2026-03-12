@@ -8,9 +8,14 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
-from mmalignments.models.data import Sample
-from mmalignments.models.tasks import Element, element
-from mmalignments.services.io import ensure
+from mmalignments.models.elements import (
+    Element,
+    NextGenSampleElement,
+    element,
+    sample_fastqs,
+)
+from mmalignments.models.tags import ElementTag, Method, Stage, State, merge_tag
+from mmalignments.models.tags import PartialElementTag as Tag
 
 from ..externals import External, ExternalRunConfig, subroutine
 from ..parameters import Params, ParamSet
@@ -75,7 +80,7 @@ class FastQC(External):
             Tool name (default: "fastqc").
         primary_binary : str
             Path to FastQC executable (default: "fastqc").
-        version : Optional[str]
+        version : str | None
             Version string override.
         source : str
             URL/source for the tool.
@@ -100,13 +105,13 @@ class FastQC(External):
 
         Parameters
         ----------
-        fallback : Optional[str]
-                Value to return if version cannot be determined.
+        fallback : str | None
+            Value to return if version cannot be determined.
 
         Returns
         -------
-        Optional[str]
-                Version string (e.g., "0.12.1") or fallback if not found.
+        str | None
+            Version string (e.g., "0.12.1") or fallback if not found.
         """
         if self._version:
             return self._version
@@ -136,14 +141,38 @@ class FastQC(External):
 
         return fallback
 
+    ####################################################################################
+    # Helper
+    ####################################################################################
+
+    def get_base(self, path: Path) -> str:
+        base = None
+        if path.suffix == ".gz":
+            base = path.with_suffix("").stem
+        elif path.suffix == ".fastq" or path.suffix == ".fq":
+            base = path.stem
+        else:
+            raise NotImplementedError(f"Unexpected FASTQ filename: {path}")
+        return base
+
+    ####################################################################################
+    # Elements
+    ####################################################################################
+
     @subroutine
     def run_fastqc(
         self,
         input_files: list[Path | str],
         output_dir: Path | str,
-        params: Params | None = Params(threads=10, extract=False),
+        params: Params | None,
         cfg: ExternalRunConfig | None = ExternalRunConfig(threads=10),
-    ) -> Callable[[], CompletedProcess]:
+    ) -> tuple[
+        list[str],
+        list[str],
+        str | None,
+        Callable[[], CompletedProcess] | None,
+        Callable[[], None] | None,
+    ]:
         """Run FastQC on FASTQ files (low-level).
 
         Creates a zero-argument callable that runs FastQC quality control
@@ -151,32 +180,29 @@ class FastQC(External):
 
         Parameters
         ----------
-        input_files : List[Union[Path, str]]
-                List of input FASTQ files to analyze.
-        output_dir : Union[Path, str]
-                Output directory for FastQC reports.
-        threads : Optional[int]
-                Number of threads to use (default: None, FastQC uses 1).
-        extract : bool
-                If True, extract zip files (default: False).
-        cwd : Optional[Path]
-                Working directory for the command.
-        parameters : Any
-                Additional FastQC parameters (e.g., {"--nogroup": True}).
+        input_files : list[Path | str]
+            List of input FASTQ files to analyze.
+        output_dir : Path | str
+            Output directory for FastQC reports.
+        params : Params | None
+            Additional FastQC parameters (e.g., Params(threads=4, extract=True)).
+        cfg : ExternalRunConfig | None
+            External run configuration (e.g., threads, working directory).
 
         Returns
         -------
-        Callable[[], subprocess.CompletedProcess]
-                Zero-argument callable that executes FastQC.
+        Callable[[], CompletedProcess]
+            Zero-argument callable that executes FastQC.
 
         Examples
         --------
         >>> fastqc = FastQC()
+        >>> from mmalignments.models.externals import ExternalRunConfig
         >>> runner = fastqc.run_fastqc(
         ...     input_files=["sample_R1.fastq.gz", "sample_R2.fastq.gz"],
         ...     output_dir="qc_results/fastqc",
-        ...     threads=4,
-        ...     extract=True
+        ...     params=Params(threads=4, extract=True),
+        ...     cfg=ExternalRunConfig(threads=4),
         ... )
         >>> runner()
         """
@@ -191,9 +217,12 @@ class FastQC(External):
     @element
     def qc(
         self,
-        sample: Sample | Element,
+        sample: NextGenSampleElement,
         label: str,
-        folder: Path | str | None = None,
+        *,
+        tag: Tag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Element:
@@ -204,19 +233,25 @@ class FastQC(External):
 
         Parameters
         ----------
-        sample : Union[Sample, Element]
+        sample : Sample | Element
             Sample or Element containing FASTQ file paths and metadata.
         label : str
             Label for this QC run (e.g., "raw" or "cleaned").
             Used in Element naming and key generation.
-        folder : Optional[Union[Path, str]]
-            Output folder for FastQC results. If None, a default folder will be
-            used.
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default
+            naming. If not provided, a default tag will be generated based on
+            the input Element's name.
+        outdir : Path | str | None
+            Directory for the sorted BAM file. If not provided, defaults to
+            the same directory as the input BAM file.
+        filename : Path | str | None
+            Filename override. If not provided, defaults to ``tag.default_output``.
         params : Params | None
-            Optional parameters for FastQC (e.g., threads, extract).
+            Additional FastQC parameters.
         cfg : ExternalRunConfig | None
-            Optional configuration for running FastQC (e.g., working directory,
-            threads, ...).
+            Configuration for running the FastQC command (e.g., working
+            directory, threads).
 
         Returns
         -------
@@ -233,79 +268,65 @@ class FastQC(External):
         Examples
         --------
         >>> fastqc = FastQC()
+        >>> from mmalignments.models.externals import ExternalRunConfig
         >>> sample = Sample(name="my_sample", pairing="paired",
         ...                 fastq_r1_path="sample_R1.fastq.gz",
         ...                 fastq_r2_path="sample_R2.fastq.gz")
-        >>> fastqc_elem = fastqc.fastqc(
+        >>> fastqc_elem = fastqc.qc(
         ...     sample=sample,
-        ...     folder="results/qc/my_sample/fastqc_raw",
+        ...     outdir="results/qc/my_sample/fastqc_raw",
         ...     label="raw",
-        ...     threads=4
+        ...     cfg=ExternalRunConfig(threads=4),
         ... )
         >>> fastqc_elem.run()
         """
-        params = params or Params(threads=10, extract=False)
-        cfg = cfg or ExternalRunConfig(threads=Params.get("--threads", 10))
+        params = params or Params(extract=False)
+        cfg = cfg or ExternalRunConfig()
+        default_tag = ElementTag(
+            root=sample.root,
+            level=sample.tag.level + 1,
+            stage=Stage.QC,
+            method=Method.FASTQC,
+            state=State.REPORT,
+            omics=sample.tag.omics,
+            param=label,
+        )
+        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
 
         # Prepare output folder
-        if not folder:
-            folder = sample.result_dir / "fastqc" / label
-        else:
-            folder = (Path(folder) / label).absolute()
-        ensure(Path(folder).absolute())
-
+        outdir = outdir or sample.fastq_r1.parent / "qc" / "fastqc"
         # Extract FASTQ paths from Sample or Element
+        fastq_r1, fastq_r2, _, _ = sample_fastqs(sample)
         # Collect input files
-        input_files = [sample.fastq_r1]
-        if sample.fastq_r2:
-            input_files.append(sample.fastq_r2)
+        input_files = [fastq_r1, fastq_r2] if fastq_r2 else [fastq_r1]
 
         # Build runner
         runner = self.run_fastqc(
             input_files=input_files,
-            output_dir=folder,
+            output_dir=outdir,
             params=params,
             cfg=cfg,
         )
-
         # Build artifacts
         # FastQC names output files based on input filename
-        r1_base = sample.fastq_r1.stem
-        if r1_base.endswith(".fastq"):
-            r1_base = r1_base[:-6]
-        elif r1_base.endswith(".fq"):
-            r1_base = r1_base[:-3]
-
+        r1_base = self.get_base(fastq_r1)
         artifacts = {
-            "html_r1": folder / f"{r1_base}_fastqc.html",
-            "zip_r1": folder / f"{r1_base}_fastqc.zip",
+            "html_r1": outdir / f"{r1_base}_fastqc.html",
+            "zip_r1": outdir / f"{r1_base}_fastqc.zip",
         }
-
         if sample.fastq_r2:
-            r2_base = sample.fastq_r2.stem
-            if r2_base.endswith(".fastq"):
-                r2_base = r2_base[:-6]
-            elif r2_base.endswith(".fq"):
-                r2_base = r2_base[:-3]
-
-            artifacts["html_r2"] = folder / f"{r2_base}_fastqc.html"
-            artifacts["zip_r2"] = folder / f"{r2_base}_fastqc.zip"
+            r2_base = self.get_base(fastq_r2)
+            artifacts["html_r2"] = outdir / f"{r2_base}_fastqc.html"
+            artifacts["zip_r2"] = outdir / f"{r2_base}_fastqc.zip"
 
         # Build prerequisites list
-        pres = []
-        sample_name = sample.name
-        if isinstance(sample, Element):
-            if "." in sample.name:
-                sample_name = sample.name.split(".")[0]
-            pres.append(sample)
-
+        pres = [sample] if isinstance(sample, Element) else []
         determinants = self.signature_determinants(params)
-        name = f"{sample_name}.{label}.QC({self.name})"
-        key = f"{sample_name}_{label}_{self.version_name}"
+        key = f"{tag.default_name}_{label}_{self.version_name}"
         return Element(
-            name=name,
             key=key,
             run=runner,
+            tag=tag,
             determinants=determinants,
             inputs=input_files,
             artifacts=artifacts,
@@ -327,25 +348,28 @@ class FastQC(External):
 
         Parameters
         ----------
-        input_file : Union[Path, str, List[Union[Path, str]]]
-                Input file(s) to analyze (FASTQ, BAM, or SAM).
-                Can be a single file or list of files.
-        output_dir : Union[Path, str]
-                Output directory for FastQC reports.
-        cwd : Optional[Path]
-                Working directory for the command.
-        parameters : Any
-                Additional FastQC parameters (e.g., {"--nogroup": True}).
+        input_file : Path | str | list[Path | str]
+            Input file(s) to analyze (FASTQ, BAM, or SAM). Can be a single
+            file or list of files.
+        output_dir : Path | str
+            Output directory for FastQC reports.
+        params : Params | None
+            Additional FastQC parameters (e.g., Params(extract=True)).
+        cfg : ExternalRunConfig | None
+            External run configuration (e.g., threads, working directory).
 
         Returns
         -------
-        Callable[[], None]
-                Zero-argument callable that executes FastQC.
+        Callable[[], CompletedProcess]
+            Zero-argument callable that executes FastQC.
 
         Examples
         --------
         >>> fastqc = FastQC()
-        >>> qc = fastqc.run_qc("aligned.bam", "qc_results")
+        >>> from mmalignments.models.externals import ExternalRunConfig
+        >>> qc = fastqc.run_qc(
+        ...     "aligned.bam", "qc_results", cfg=ExternalRunConfig(threads=4)
+        ... )
         >>> qc()
         """
         params = params or Params(threads=10, extract=False)

@@ -11,10 +11,16 @@ If you need more fields later, add them here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any, List, Literal, Mapping, Iterator
+from typing import Any, List, Literal
 
-from mmalignments.models.tasks import Element
+# from .elements import Element
+
+
+class Pairing(str, Enum):
+    PAIRED = "paired"
+    SINGLE = "single"
 
 
 @dataclass
@@ -97,31 +103,6 @@ class Genome:
 
     def __str__(self) -> str:
         return self.__repr__()
-
-
-def sample_fastqs(
-    sample: Sample | Element,
-) -> tuple[Path, Path | None, str, str | None]:
-    if isinstance(sample, Sample):
-        r1 = Path(sample.input_files[0]).absolute()
-        r2 = (
-            Path(sample.input_files[1]).absolute()
-            if len(sample.input_files) > 1
-            else None
-        )
-        name = sample.name
-        rg = getattr(sample, "read_group", None)
-        return r1, r2, name, rg
-    else:
-        r1 = Path(sample.artifacts["fastq_r1"]).absolute()
-        r2 = (
-            Path(sample.artifacts.get("fastq_r2")).absolute()
-            if sample.artifacts.get("fastq_r2")
-            else None
-        )
-        name = sample.artifacts.get("sample_name", sample.name)
-        rg = sample.artifacts.get("read_group")
-        return r1, r2, name, rg
 
 
 @dataclass

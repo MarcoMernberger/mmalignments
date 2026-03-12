@@ -1,8 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
 from mmalignments.services.io import load_param_json
+from mmalignments.models.resources import ResourceConfig  # type: ignore[import]
+
 
 ###############################################################################
 # Params
@@ -11,18 +13,17 @@ from mmalignments.services.io import load_param_json
 
 @dataclass(frozen=True)
 class Params:
-    _override_params: Mapping[str, Any]
-
-    @classmethod
-    def of(cls, **kwargs: Any) -> "Params":
-        return cls(kwargs)
+    _override_params: Mapping[str, Any] = field(default_factory=dict)
 
     def __init__(self, **kwargs: Any) -> None:
         object.__setattr__(self, "_override_params", dict(kwargs))
 
-    # ---- Mapping interface ----
+    @classmethod
+    def of(cls, **kwargs: Any) -> "Params":
+        return cls(**kwargs)
+
     def __getitem__(self, key: str) -> Any:
-        return self._override_paramss[key]
+        return self._override_params[key]
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._override_params)
@@ -44,8 +45,8 @@ class Params:
     def __contains__(self, key: str) -> bool:
         return key in self._override_params
 
-    def add_new(self, **kwargs: Any) -> "Params":
-        return Params(**self.to_dict(), **kwargs)
+    def override(self, **kwargs: Any) -> "Params":
+        return Params(**{**self._override_params, **kwargs})
 
     def __repr__(self) -> str:
         return f"Params({self._override_params})"
@@ -106,7 +107,7 @@ class ParamSpec:
     name: str
     flag: str | None  # "--threads" or None for positional
     dtype: type | tuple[type, ...]  # expected type(s)
-    required: True | False = False  # is this required?
+    required: bool = False  # is this required?
     default: Any = None  # default value
     affects_output: bool = True  # do we need a re run?
     description: str = ""  # for documentation
@@ -114,6 +115,81 @@ class ParamSpec:
 
 
 #    normalize: Callable[[Any], Any] | None = None  # optional normalization function
+###############################################################################
+# ToolThreadSpec
+###############################################################################
+
+
+@dataclass(frozen=True)
+class ToolThreadSpec(ParamSpec):
+    """Declares how a specific tool or subroutine uses threads.
+
+    This is the **tool-side** half of thread allocation. It lives on the
+    External subclass and describes *capability*, not a concrete value.
+
+    Parameters
+    ----------
+    param_flag : str | None
+        CLI flag to pass the thread count to the tool (e.g. ``"-t"``,
+        ``"--threads"``, ``"--nthreads"``). ``None`` means the tool does not
+        accept a thread flag but still benefits from CPU reservation.
+    max_threads : int | None
+        Hard cap on threads for this tool/subroutine. ``None`` = no cap,
+        use all available.
+    fraction : float
+        Fraction of available CPUs to use (default 1.0 = all available).
+        E.g. ``0.5`` means "use half the machine's CPUs".
+    multi : bool
+        Whether the tool actually supports multi-threading at all.
+        If ``False``, ``resolve()`` always returns 1 and no flag is emitted.
+    """
+
+    name: str = "_thread_spec"
+    flag: str | None = "threads"
+    max_threads: int | None = None
+    fraction: float = 1.0
+    multi: bool = True
+    dtype: type = str
+    default: int = 1
+    required = False  # is this required?
+    affects_output = False  # do we need a re run?
+    description = "_thread_spec for ResourceConfig"  # for documentation
+    render = render_value  # "flag", "value", "multi"
+
+    def resolve(self, resources: ResourceConfig) -> int:
+        """Compute the concrete thread count for *resources*.
+
+        Parameters
+        ----------
+        resources : ResourceConfig
+            The machine's available resources.
+
+        Returns
+        -------
+        int
+            The thread count to actually use.
+        """
+        if not self.multi:
+            return 1
+        n = resources.for_tool(self.fraction)
+        if self.max_threads is not None:
+            n = min(n, self.max_threads)
+        return max(1, n)
+
+    def to_cli(self, resources: ResourceConfig) -> list[str]:
+        """Return the CLI fragment for this spec, e.g. ``["-t", "8"]``.
+
+        Returns an empty list when the tool is single-threaded or has no flag.
+
+        Parameters
+        ----------
+        resources : ResourceConfig
+            The machine's available resources.
+        """
+        if not self.multi or self.flag is None:
+            return []
+        return [self.flag, str(self.resolve(resources))]
+
 
 DEFAULT_KEY = "default"
 
@@ -126,7 +202,6 @@ class ParamSet:
 
     def validate(self, params: Params | None) -> None:
         overrides = params.to_dict() if params else {}
-
         # unknown keys
         unknown = set(overrides) - set(self.specs)
         if unknown:
@@ -161,16 +236,18 @@ class ParamSet:
         return merged
 
     def to_cli(self, params: Params | None) -> list[str]:
-        self.validate(params)
-        merged = self.merged_values(params)
-        tokens: list[str] = []
-        for name, spec in self.specs.items():
-            if name in params:
-                v = merged.get(name, None)
-                if v is None or v is False or v == []:
-                    continue
-                tokens.extend(spec.render(spec.flag, v))
-        return tokens
+        if params:
+            self.validate(params)
+            merged = self.merged_values(params)
+            tokens: list[str] = []
+            for name, spec in self.specs.items():
+                if name in params:
+                    v = merged.get(name, None)
+                    if v is None or v is False or v == []:
+                        continue
+                    tokens.extend(spec.render(spec.flag, v))
+            return tokens
+        return []
 
     def signature_determinants(self, params: Params | None) -> list[str]:
         """Stable signature tokens for caching/re-run decisions."""
@@ -187,6 +264,10 @@ class ParamSet:
                 continue
             out.append(f"{name}={v}")
         return out
+
+    def get_spec(self, name: str) -> ParamSpec | None:
+        spec = self.specs[name] if name in self.specs else None
+        return spec
 
 
 class ParamRegistry:
@@ -209,7 +290,7 @@ class ParamRegistry:
 
 def initialize_param_registry(
     tool_name: str,
-    parameters: Mapping[str, "ParamSet"] | "ParamSet" | str | Path | None,
+    parameters: Mapping[str, "ParamSet"] | "ParamSet" | str | Path,
 ) -> ParamRegistry:
     """
     - ParamSet -> default ParamSet
@@ -219,22 +300,6 @@ def initialize_param_registry(
     """
     default = ParamSet({})
     by_subcommand: dict[str, ParamSet] = {}
-
-    if parameters is None:
-        # try implicit default json
-        default_path = (
-            Path(__file__).resolve().parent
-            / "resources"
-            / "params"
-            / f"{tool_name}.json"
-        )
-        if default_path.exists():
-            spec_obj = load_param_json(default_path)
-            by_subcommand = _paramsets_from_json(tool_name, spec_obj)
-            default = by_subcommand.pop(
-                DEFAULT_KEY, ParamSet({}, tool_name, DEFAULT_KEY)
-            )
-        return ParamRegistry(default=default, by_subcommand=by_subcommand)
 
     if isinstance(parameters, ParamSet):
         return ParamRegistry(default=parameters, by_subcommand={})
@@ -253,6 +318,28 @@ def initialize_param_registry(
         return ParamRegistry(default=default, by_subcommand=by_subcommand)
 
     raise ValueError("Invalid parameters format.")
+
+
+def _thread_spec_from_json(block: dict) -> ToolThreadSpec:
+    """Parse a ``_thread_spec`` block from a params JSON file.
+
+    Parameters
+    ----------
+    block : dict
+        The ``_thread_spec`` dict from the JSON, e.g.
+        ``{"param_flag": "-t", "fraction": 0.5, "multi": true}``.
+
+    Returns
+    -------
+    ToolThreadSpec
+    """
+    return ToolThreadSpec(
+        name="_thread_spec",
+        flag=block.get("flag", "--threads"),
+        max_threads=block.get("max_threads", None),
+        fraction=float(block.get("fraction", 1.0)),
+        multi=bool(block.get("multi", True)),
+    )
 
 
 def _paramsets_from_json(tool_name: str, obj: dict[str, Any]) -> dict[str, ParamSet]:
@@ -275,9 +362,26 @@ def _paramsets_from_json(tool_name: str, obj: dict[str, Any]) -> dict[str, Param
         if not isinstance(params_block, dict):
             raise ValueError(f"Block for '{subroutine}' must be an object.")
 
-        specs: dict[str, ParamSpec] = {}
+        # Extract _thread_spec before iterating over param specs
+        thread_spec: ToolThreadSpec | None = None
+        thread_spec_raw = params_block.get("_thread_spec", None)
+        if thread_spec_raw is not None:
+            thread_spec = _thread_spec_from_json(thread_spec_raw)
+            params_block.pop("_thread_spec")
+        else:
+            thread_spec = ToolThreadSpec(
+                name="_thread_spec",
+                flag=None,
+                max_threads=1,
+                fraction=1.0,
+                multi=False,
+            )
+
+        specs: dict[str, ParamSpec] = {thread_spec.name: thread_spec}
 
         for key, spec in params_block.items():
+            if key == "_thread_spec":  # skip meta key
+                continue
             if not isinstance(key, str):
                 raise ValueError(f"Param keys in '{subroutine}' must be strings.")
             if not isinstance(spec, dict):
@@ -286,7 +390,7 @@ def _paramsets_from_json(tool_name: str, obj: dict[str, Any]) -> dict[str, Param
             flag = spec.get("flag", None)
             if flag is not None and not isinstance(flag, str):
                 raise ValueError(
-                    f"flag must be string or null for '{subroutine}.{key}'"
+                    f"flag must be None or a non-null string value for '{subroutine}.{key}'"
                 )
 
             ps = ParamSpec(

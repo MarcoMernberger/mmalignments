@@ -1,5 +1,6 @@
 import subprocess
-from mmalignments.models.externals import External
+from mmalignments.models.externals import External  # type: ignore
+from mmalignments.models.aligners.bwamem2 import BWAMem2  # type: ignore
 
 
 def test_build_cmd_and_formatting():
@@ -49,7 +50,6 @@ def test_missing_binary_get_version():
 
 
 def test_bwamem2_align_accepts_post_list_and_runs_in_order(monkeypatch):
-    from mmalignments.models.aligners.bwamem2 import BWAMem2
 
     calls = []
 

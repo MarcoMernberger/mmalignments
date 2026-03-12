@@ -8,9 +8,24 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
-from mmalignments.models.data import Genome, Sample, sample_fastqs
-from mmalignments.models.tags import ElementTag, Method, Omics, Stage, State
-from mmalignments.models.tasks import Element, MappedElement, element
+from mmalignments.models.data import Genome
+from mmalignments.models.elements import (
+    Element,
+    MappedElement,
+    element,
+    sample_fastqs,
+    NextGenSampleElement,
+)
+from mmalignments.models.tags import (
+    ElementTag,
+    Method,
+    Omics,
+    Stage,
+    State,
+    merge_tag,
+    PartialElementTag,
+    from_prior,
+)
 from mmalignments.services.io import parents
 
 from ..externals import External, ExternalRunConfig, subroutine
@@ -82,6 +97,8 @@ class BWAMem2(External):
         """
         if source is None:
             source = "https://github.com/bwa-mem2/bwa-mem2"
+        parameters_file = Path(__file__).parent / f"{Path(__file__).stem}.json"
+        parameters = parameters or parameters_file
         super().__init__(
             name=name,
             primary_binary=primary_binary,
@@ -231,6 +248,7 @@ class BWAMem2(External):
         *,
         output_dir: Path | None = None,
         prefix: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Element:
@@ -267,15 +285,16 @@ class BWAMem2(External):
         runner = self.index_reference(
             fasta_file=fasta_file, output_prefix=output_prefix, params=params, cfg=cfg
         )
-        tag = ElementTag(
+        default_tag = ElementTag(
             root=genome.name,
-            level=0,
+            level=1,
             omics=Omics.DNA,
             stage=Stage.PREP,
             method=Method.BWAMEM2,
             state=State.INDEX,
             ext=None,
         )
+        tag = merge_tag(default_tag, tag)
         index_files = self.index_filenames_for_prefix(output_prefix)
         key = f"{tag.default_name}_index_{self.version_name}"
         artifacts = {output_file.suffix[1:]: output_file for output_file in index_files}
@@ -289,12 +308,11 @@ class BWAMem2(External):
         result = Element(
             key,
             runner,
-            tat=tag,
-            name=None,  # f"{genome.name} index ({self.version_name})",
+            tag=tag,
             artifacts=artifacts,
             determinants=determinants,
             inputs=[fasta_file],
-            store_attributes={"multi_core": False},
+            name=None,  # f"{genome.name} index ({self.version_name})",
         )
         return result
 
@@ -361,15 +379,18 @@ class BWAMem2(External):
     @element
     def align(
         self,
-        sample: Element | Sample,
+        sample: NextGenSampleElement,
         index: Element,
         *,
-        output_bam: Path | str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
         read_group: str | None = None,
+        index_off: bool = False,
         post: list[Callable[[], CompletedProcess]] | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> Element:
         """
         Align FASTQ reads to a reference genome using BWA-MEM2.
 
@@ -379,14 +400,18 @@ class BWAMem2(External):
 
         Parameters
         ----------
-        sample : Element | Sample
-            Sample or element containing FASTQ file paths and a sample name.
+        sample : NextGenSampleElement
+            Element containing FASTQ file paths and a sample name.
         index : Element
             Index element containing the BWA-MEM2 index prefix and metadata.
         output_bam : Path | str | None
             Path to output BAM file.
         read_group : str | None
             Read group header line (e.g., "@RG\\tID:sample1\\tSM:sample1").
+        index_off : bool
+            If True, skip BAM indexing after alignment. By default, the
+            resulting BAM file will be indexed using Samtools, and the index
+            file will be included in the post-processing steps.
         post : list[Callable[[], CompletedProcess]] | None
             Optional list of parameterless callables that will be executed
             sequentially after the alignment has completed successfully.
@@ -397,6 +422,12 @@ class BWAMem2(External):
         cfg : ExternalRunConfig | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
+
+        Returns
+        -------
+        Element
+            The Element representing the aligned BAM file, with metadata and
+            post-processing steps defined.
 
         Examples
         --------
@@ -440,12 +471,19 @@ class BWAMem2(External):
         """
         index_prefix = index.index_prefix.absolute()
         fastq_r1, fastq_r2, sample_name, rg = sample_fastqs(sample)
-        output_bam = (
-            output_bam
-            or self.default_aligned_dir(sample_name, index.name)
-            / f"{sample_name}_aligned.bam"
-        ).resolve()
-
+        default_tag = from_prior(
+            sample.tag,
+            stage=Stage.ALIGN,
+            method=Method.BWAMEM2,
+            state=State.MAP,
+            omics=Omics.DNA,
+            ext="bam",
+            param=index.root,
+        )
+        tag = merge_tag(default_tag, tag)
+        outdir = Path(outdir or self.default_aligned_dir(sample.name, index.tag.root))
+        filename = filename or tag.default_output
+        output_bam = outdir / filename
         rg = read_group or self.rg(sample_name)
 
         runner = self.align_fastq(
@@ -454,23 +492,22 @@ class BWAMem2(External):
             fastq_r1=fastq_r1,
             fastq_r2=fastq_r2,
             read_group=rg,
+            index_off=index_off,
             post=post,
             params=params,
             cfg=cfg,
         )
-        name = f"{sample_name}_mapped_to_{index.name}_by_{self.name}"
-        key = f"{sample_name}_mapped_to_{index.index_prefix}_by_{self.version_name}_rg={rg}"  # noqa: E501
+        key = f"{tag.default_name}_mapped_to_{index.index_prefix}_by_{self.version_name}_rg={rg}"  # noqa: E501
         determinants = self.signature_determinants(params, subroutine="mem")
 
         result = MappedElement(
-            name,
             key,
             runner,
+            tag=tag,
             determinants=determinants,
             inputs=[fastq_r1] + ([fastq_r2] if fastq_r2 else []),
             artifacts={"bam": output_bam},
             pres=[index],
-            store_attributes={"multi_core": True},
         )
         return result
 
@@ -483,6 +520,7 @@ class BWAMem2(External):
         *,
         fastq_r2: Path | str | None = None,
         read_group: str | None = None,
+        index_off: bool = False,
         post: list[Callable[[], CompletedProcess]] | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
@@ -505,6 +543,10 @@ class BWAMem2(External):
             Path to R2 (reverse) FASTQ file for paired-end data.
         read_group : str | None
             Read group header line (e.g., "@RG\\tID:sample1\\tSM:sample1").
+        index_off : bool
+            If True, skip BAM indexing after alignment. By default, the
+            resulting BAM file will be indexed using Samtools, and the index
+            file will be included in the post-processing steps.
         post : list[Callable[[], CompletedProcess]] | None
             Optional list of parameterless callables that will be executed
             sequentially after the alignment has completed successfully.
@@ -562,28 +604,44 @@ class BWAMem2(External):
                 post=[sam_to_bam]
             )
         """
-        index_prefix = Path(index_prefix).absolute()
-        fastq_r1 = Path(fastq_r1).absolute()
-        output_bam = Path(output_bam).absolute()
+        index_prefix = Path(index_prefix)
+        fastq_r1 = Path(fastq_r1)
+        output_bam = Path(output_bam)
+
         # Build positional arguments: mem <index> <fastq_r1> [fastq_r2]
         arguments = ["mem"]
+
         # Add read group if provided
         if read_group:
             arguments.extend(["-R", read_group])
         # Add index and FASTQ files as positional arguments
+
         arguments.extend(
             [
-                str(index_prefix),
-                str(fastq_r1),
+                self.strabs(index_prefix),
+                self.strabs(fastq_r1),
             ]
         )
         if fastq_r2:
-            fastq_r2 = Path(fastq_r2).absolute()
-            arguments.append(str(fastq_r2))
+            arguments.append(self.strabs(fastq_r2))
 
+        output_bam = self.strabs(output_bam)
         # Output to BAM file
-        arguments.extend(["-o", str(output_bam)])
-        return arguments, [output_bam], None, None, None
+        arguments.extend(
+            [
+                "-o",
+                output_bam,
+            ]
+        )
+
+        if not index_off:
+            sam_index = Samtools().index_bam(
+                bam_file=output_bam,
+                bai_file=Path(str(output_bam) + ".bai"),
+            )
+            # calculate the index if needed. post however has priority
+            post = post or sam_index
+        return arguments, [output_bam], None, None, post
 
     ###########################################################################
     # Con   venience methods for common workflows
@@ -591,14 +649,15 @@ class BWAMem2(External):
 
     def alignsort(
         self,
-        sample: Sample,
+        sample: NextGenSampleElement,
         genome: Genome,
         indexer: Element,
         *,
-        output_bam: Path | str | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
         read_group: str | None = None,
         parameters: Mapping[str, Params] | None = None,
-        cfg: ExternalRunConfig | None = None,
+        cfgs: Mapping[str, ExternalRunConfig] | None = None,
     ) -> tuple[Element, Element]:
         """
         Align FASTQ reads to a reference genome and sort the resulting BAM file.
@@ -610,15 +669,18 @@ class BWAMem2(External):
         output Elements.
         Parameters
         ----------
-        sample : Sample
-            Sample containing FASTQ file paths and a sample name.
+        sample : NextGenSampleElement
+            NextGenSampleElement containing FASTQ file paths and a sample name.
         genome : Genome
             Genome reference for alignment.
         indexer : Element
             Indexer element for the reference genome.
-        output_bam : Optional[Path | str]
-            Optional path to the output BAM file. If not provided, a default
-            path will be used based on the sample and genome names.
+        outdir : Path | str | None
+            Optional output directory for the aligned BAM file. If not provided,
+            a default directory will be used based on the sample name and index.
+        filename : Path | str | None
+            Optional filename for the aligned BAM file. If not provided, a default
+            name will be generated based on the sample tag.
         read_group : Optional[str], optional
             Read group information for the alignment, by default None
         parameters : Mapping[str, Params] | None, optional
@@ -637,32 +699,37 @@ class BWAMem2(External):
             First return value is the final Element.
         """
         parameters = parameters or {}
-        output_bam = (
-            output_bam
-            or self.default_aligned_dir(sample.name, genome.name)
-            / f"{sample.name}_aligned.bam"
-        )
-        output_bam = Path(output_bam).resolve()
+        cfgs = cfgs or {}
+        # outdir is not None:
+        #     output_bam = Path(output_bam).absolute()
+        #     outdir = output_bam.parent
+        #     filename = output_bam.name
+        # else:
+        #     outdir = None
+
+        # output_bam = Path(output_bam).resolve()
         mapped = self.align(
             sample=sample,
             index=indexer,
-            output_bam=output_bam,
+            outdir=outdir,
+            filename=None,
             read_group=read_group,
-            params=parameters.get("mem", None),
-            cfg=cfg,
+            params=parameters.get("mem", Params(t=40)),
+            cfg=cfgs.get("mem", ExternalRunConfig(threads=40)),
         )
 
         st = Samtools()
-        sorted_bam = output_bam.parent / f"{sample.name}_sorted.bam"
+        # sorted_bam = output_bam.parent / f"{sample.name}_sorted.bam"
         mapped_sorted = st.sort(
             mapped=mapped,
-            output_bam_file=sorted_bam,
-            params=parameters.get("sort", Params(threads=10)),
-            cfg=ExternalRunConfig(cwd=output_bam.parent, threads=10),
+            outdir=outdir,
+            filename=filename,
+            params=parameters.get("sort", Params(threads=40)),
+            cfg=ExternalRunConfig(cwd=outdir, threads=40),
         )
         mapped_sorted_index = st.index(
             mapped=mapped_sorted,
             params=parameters.get("index", None),
-            cfg=cfg,
+            cfg=cfgs.get("index", None),
         )
-        return mapped_sorted, mapped_sorted_index
+        return mapped_sorted, mapped_sorted_index, mapped

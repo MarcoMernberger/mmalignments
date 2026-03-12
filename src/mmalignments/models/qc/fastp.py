@@ -8,9 +8,14 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
-from mmalignments.models.data import Sample, sample_fastqs
-from mmalignments.models.tasks import Element, element
-from mmalignments.services.io import ensure
+from mmalignments.models.elements import (
+    Element,
+    NextGenSampleElement,
+    element,
+    sample_fastqs,
+)
+from mmalignments.models.tags import ElementTag, Method, Stage, State, merge_tag
+from mmalignments.models.tags import PartialElementTag as Tag
 
 from ..externals import External, ExternalRunConfig, subroutine
 from ..parameters import Params, ParamSet
@@ -30,6 +35,7 @@ class FastP(External):
     Run fastp on paired-end reads::
 
         fastp = FastP()
+        from mmalignments.models.externals import ExternalRunConfig
         runner = fastp.run_fastp(
                 fastq_r1="sample_R1.fastq.gz",
                 fastq_r2="sample_R2.fastq.gz",
@@ -37,20 +43,22 @@ class FastP(External):
                 out_r2="cleaned_R2.fastq.gz",
                 json_out="fastp.json",
                 html_out="fastp.html",
-                threads=8
+                cfg=ExternalRunConfig(threads=8)
         )
         runner()  # Execute
 
     Run fastp on single-end reads::
 
         fastp = FastP()
+        from mmalignments.models.externals import ExternalRunConfig
         runner = fastp.run_fastp(
                 fastq_r1="sample.fastq.gz",
                 fastq_r2=None,
                 out_r1="cleaned.fastq.gz",
                 out_r2=None,
                 json_out="fastp.json",
-                html_out="fastp.html"
+                html_out="fastp.html",
+                cfg=ExternalRunConfig(threads=4)
         )
         runner()
 
@@ -58,13 +66,14 @@ class FastP(External):
 
         fastp = FastP()
         from mmalignments.models.data import Sample
+        from mmalignments.models.externals import ExternalRunConfig
         sample = Sample(
-                name="my_sample",
-                pairing="paired",
-                fastq_r1_path="raw_R1.fastq.gz",
-                fastq_r2_path="raw_R2.fastq.gz"
+            name="my_sample",
+            pairing="paired",
+            fastq_r1_path="raw_R1.fastq.gz",
+            fastq_r2_path="raw_R2.fastq.gz"
         )
-        fastp_elem = fastp.fastp(sample, threads=8)
+        fastp_elem = fastp.qc(sample, cfg=ExternalRunConfig(threads=8))
         fastp_elem.run()
     """
 
@@ -179,12 +188,13 @@ class FastP(External):
 
         Returns
         -------
-        Callable[[], subprocess.CompletedProcess]
+        Callable[[], CompletedProcess]
             Zero-argument callable that executes fastp.
 
         Examples
         --------
         >>> fastp = FastP()
+        >>> from mmalignments.models.externals import ExternalRunConfig
         >>> runner = fastp.run_fastp(
         ...     fastq_r1="sample_R1.fastq.gz",
         ...     fastq_r2="sample_R2.fastq.gz",
@@ -192,7 +202,7 @@ class FastP(External):
         ...     out_r2="cleaned_R2.fastq.gz",
         ...     json_out="fastp.json",
         ...     html_out="fastp.html",
-        ...     threads=8
+        ...     cfg=ExternalRunConfig(threads=8)
         ... )
         >>> runner()
         """
@@ -240,9 +250,11 @@ class FastP(External):
     @element
     def qc(
         self,
-        sample: Sample | Element,
+        sample: NextGenSampleElement,
         *,
-        folder: Path | str | None = None,
+        tag: Tag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Element:
@@ -256,10 +268,16 @@ class FastP(External):
         ----------
         sample : Sample | Element
             Sample or Element containing FASTQ file paths and metadata.
-        folder : Path | str | None
-            Output folder for fastp results. If not provided, defaults to
-            "results/qc/{sample_name}/fastp/".
-        parameters : Params | None
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default
+            naming. If not provided, a default tag will be generated based on
+            the input Element's name.
+        outdir : Path | str | None
+            Directory for the sorted BAM file. If not provided, defaults to
+            the same directory as the input BAM file.
+        filename : Path | str | None
+            Filename override. If not provided, defaults to ``tag.default_output``.
+        params : Params | None
             Additional fastp parameters.
         cfg : ExternalRunConfig | None
             Configuration for running the fastp command (e.g., working
@@ -278,28 +296,48 @@ class FastP(External):
         Examples
         --------
         >>> fastp = FastP()
+        >>> from mmalignments.models.externals import ExternalRunConfig
         >>> sample = Sample(name="my_sample", pairing="paired",
         ...                 fastq_r1_path="raw_R1.fastq.gz",
         ...                 fastq_r2_path="raw_R2.fastq.gz")
-        >>> fastp_elem = fastp.qc(sample, threads=8)
+        >>> fastp_elem = fastp.qc(sample, cfg=ExternalRunConfig(threads=8))
         >>> fastp_elem.run()
         """
-        params = params or Params(thread=10)
-        cfg = cfg or ExternalRunConfig(cwd=folder, threads=params.get("thread", 10))
-        # Extract FASTQ paths from Sample or Element
-        fastq_r1, fastq_r2, sample_name, _ = sample_fastqs(sample)
+        default_tag = ElementTag(
+            root=sample.root,
+            level=sample.tag.level + 1,
+            stage=Stage.PREP,
+            method=Method.FASTP,
+            state=State.TRIM,
+            omics=sample.tag.omics,
+            ext=".R1.fastq.gz",
+        )
+        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+        fastq_r1, fastq_r2, _, _ = sample_fastqs(sample)
 
-        # Determine output folder
-        if folder is None:
-            folder = sample.result_dir / "qc" / "fastp"
-        folder = folder.absolute()
-        ensure(folder)
+        outdir = outdir or sample.result_dir / "qc" / "fastp"
+        filename = filename or tag.default_output
+        params = params or Params(thread=10)
+        cfg = cfg or ExternalRunConfig(threads=params.get("thread", 10))
+        # Extract FASTQ paths from Sample or Element
 
         # Define output paths
-        out_r1 = folder / f"{sample_name}_cleaned_R1.fastq.gz"
-        out_r2 = folder / f"{sample_name}_cleaned_R2.fastq.gz" if fastq_r2 else None
-        json_out = folder / f"{sample_name}_fastp.json"
-        html_out = folder / f"{sample_name}_fastp.html"
+        out_r1 = outdir / filename
+        json_out = out_r1.with_name(out_r1.name.replace(".fastq.gz", ".json"))
+        html_out = out_r1.with_name(out_r1.name.replace(".fastq.gz", ".html"))
+        # Build artifacts
+        out_r2 = (
+            out_r1.with_name(out_r1.name.replace(".R1.", ".R2.")) if fastq_r2 else None
+        )
+        input_files = [fastq_r1]
+        artifacts = {
+            "fastq_r1": out_r1,
+            "json": json_out,
+            "html": html_out,
+        }
+        if fastq_r2:
+            artifacts["fastq_r2"] = out_r2
+            input_files.append(fastq_r2)
 
         # Build runner
         runner = self.run_fastp(
@@ -313,32 +351,15 @@ class FastP(External):
             cfg=cfg,
         )
 
-        # Build artifacts
-        artifacts = {
-            "fastq_r1": out_r1,
-            "json": json_out,
-            "html": html_out,
-        }
-        if out_r2:
-            artifacts["fastq_r2"] = out_r2
-
-        # Build input files list
-        input_files = [fastq_r1]
-        if fastq_r2:
-            input_files.append(fastq_r2)
-
         # Build prerequisites list
-        pres = []
-        if isinstance(sample, Element):
-            pres.append(sample)
-
+        pres = [sample] if isinstance(sample, Element) else []
+        # determinants
         determinants = self.signature_determinants(params)
-        name = f"{sample_name}.QC({self.name})"
-        key = f"{sample_name}_fastp_qc_{self.version_name}"
+        key = f"{tag.default_name}_fastp_qc_{self.version_name}"
         return Element(
-            name=name,
             key=key,
             run=runner,
+            tag=tag,
             determinants=determinants,
             inputs=input_files,
             artifacts=artifacts,

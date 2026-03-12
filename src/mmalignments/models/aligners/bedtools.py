@@ -8,8 +8,9 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Callable, Mapping, Union
 
-from mmalignments.models.tags import ElementTag, Method, State
-from mmalignments.models.tasks import Element, element
+from mmalignments.models.elements import Element, element
+from mmalignments.models.tags import ElementTag, Method, State, merge_tag
+from mmalignments.models.tags import Tag
 
 from ..externals import External, ExternalRunConfig, subroutine
 from ..parameters import Params, ParamSet
@@ -204,7 +205,7 @@ class Bedtools(External):
         self,
         bed_element: Element,
         *,
-        tag: ElementTag | None = None,
+        tag: Tag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -219,9 +220,10 @@ class Bedtools(External):
         ----------
         bed_element : Element
             Element containing the BED file to be sorted (expects 'bed' in artifacts).
-        tag : ElementTag | None
-            Mandatory tag for the output Element for default naming. If not provided, a
-            default tag will be generated based on the input Element's tag.
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default naming.
+            If not provided, a default tag will be generated based on the input
+            Element's tag.
         outdir : Path | str | None
             Directory for the sorted output BED file. If not provided, defaults to
             the same directory as the input BED file.
@@ -250,7 +252,7 @@ class Bedtools(External):
         """
         input_bed = bed_element.bed
         root = bed_element.tag.root or bed_element.bed.stem
-        tag = tag or ElementTag(
+        default_tag = ElementTag(
             root=root,
             level=bed_element.tag.level + 1,
             stage=bed_element.tag.stage,
@@ -259,6 +261,8 @@ class Bedtools(External):
             omics=bed_element.tag.omics,
             ext="bed",
         )
+        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+
         output_bed = self.build_outfile(outdir, filename, tag, input_bed)
         params = params or Params()
         cfg = cfg or ExternalRunConfig()
@@ -335,7 +339,7 @@ class Bedtools(External):
         bed_element: Element,
         genomesizes: Element,
         *,
-        tag: ElementTag | None = None,
+        tag: Tag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -354,9 +358,10 @@ class Bedtools(External):
             Element containing the BED file to extend (expects 'bed' in artifacts).
         genomesizes : Element
             Element containing the chromosome sizes information.
-        tag : ElementTag | None
-            Mandatory tag for the output Element for default naming. If not provided, a
-            default tag will be generated based on the input Element's tag.
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default naming.
+            If not provided, a default tag will be generated based on the input
+            Element's tag.
         outdir : Path | str | None
             Directory for the sorted output BED file. If not provided, defaults to
             the same directory as the input BED file.
@@ -386,17 +391,19 @@ class Bedtools(External):
         """
         input_bed = bed_element.bed
         genome_file = genomesizes.sizes
-        tag = tag or ElementTag(
+        default_tag = ElementTag(
             root=bed_element.tag.root or bed_element.bed.stem,
             level=bed_element.tag.level + 1,
             stage=bed_element.tag.stage,
             method=Method.BEDTOOLS,
-            state=State.SLOP,
+            state=State.PADDED,
             omics=bed_element.tag.omics,
             ext="bed",
         )
+        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
         output_bed = self.build_outfile(outdir, filename, tag, input_bed)
 
+        print(f"Slop parameters ", self.get_paramset("slop"))
         if slop_bp:
             if slop_bp > 0:
                 params = Params(b=slop_bp, **(params.to_dict() if params else {}))
@@ -414,6 +421,7 @@ class Bedtools(External):
         element = Element(
             key=f"{tag.default_name}_slop_{slop_bp}_{self.version_name}",
             run=runner,
+            tag=tag,
             determinants=determinants,
             inputs=[input_bed, genome_file],
             artifacts={"bed": output_bed},
@@ -485,7 +493,7 @@ class Bedtools(External):
         self,
         bed_element: Element,
         *,
-        tag: ElementTag | None = None,
+        tag: Tag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -501,9 +509,10 @@ class Bedtools(External):
         bed_element : Element
             Element containing the sorted BED file to merge
             (expects 'bed' in artifacts).
-        tag : ElementTag | None
-            Mandatory tag for the output Element for default naming. If not provided, a
-            default tag will be generated based on the input Element's tag.
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default naming.
+            If not provided, a default tag will be generated based on the input
+            Element's tag.
         outdir : Path | str | None
             Directory for the sorted output BED file. If not provided, defaults to
             the same directory as the input BED file.
@@ -531,15 +540,16 @@ class Bedtools(External):
         >>> merged_elem.run()  # Execute the merge
         """
         input_bed = bed_element.bed
-        tag = tag or ElementTag(
+        default_tag = ElementTag(
             root=bed_element.tag.root or bed_element.bed.stem,
             level=bed_element.tag.level + 1,
             stage=bed_element.tag.stage,
             method=Method.BEDTOOLS,
-            state=State.MERGE,
+            state=State.MERGED,
             omics=bed_element.tag.omics,
             ext="bed",
         )
+        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
         output_bed = self.build_outfile(outdir, filename, tag, input_bed)
         params = params or Params()
         cfg = cfg or ExternalRunConfig()
@@ -657,18 +667,18 @@ class Bedtools(External):
         >>> merged_elem = bt.mergesort(input_element, "targets.merged.bed")
         >>> merged_elem.run()  # Execute sort+merge
         """
-        tag, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "sort")
-        sort_element = self.sort(bed_element, tag=tag, params=params, cfg=cfg)
         tag, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "merge")
         merge_element = self.merge(
-            sort_element,
+            bed_element,
             tag=tag,
             outdir=outdir,
             filename=filename,
             params=params,
             cfg=cfg,
         )
-        return merge_element
+        tag, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "sort")
+        sort_element = self.sort(merge_element, tag=tag, params=params, cfg=cfg)
+        return sort_element
 
     def pad(
         self,
@@ -716,10 +726,11 @@ class Bedtools(External):
         Element
             New Element representing the padded BED file.
         """
-        tag, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "sort")
+        tag_sort, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "sort")
         sorted_element = self.sort(
             bed_element=targets,
-            tag=tag,
+            tag=tag_sort,
+            outdir=outdir,
             params=params,
             cfg=cfg,
         )
@@ -728,17 +739,19 @@ class Bedtools(External):
             bed_element=sorted_element,
             genomesizes=genomesizes,
             tag=tag,
+            outdir=outdir,
             params=params,
             cfg=cfg,
             slop_bp=slop_bp,
         )
-        tag, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "merge")
+        tag_merge, _, _ = self.get_tag_params_cfg(tags, parameters, cfgs, "merge")
+        tag_sort = Tag(tag_sort, state=State.PADDED)
         merged_element = self.mergesort(
             bed_element=slopped,
-            tag=tag,
             outdir=outdir,
             filename=filename,
-            params=params,
-            cfg=cfg,
+            tags={"sort": tag_sort, "merge": tag_merge},
+            parameters=parameters,
+            cfgs=cfgs,
         )
         return merged_element

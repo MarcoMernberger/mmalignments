@@ -25,27 +25,39 @@ how to build the command for it.
 
 from __future__ import annotations
 
-import datetime
 import logging
 import os
 import shlex
 import shutil
 import subprocess
 import traceback
-from dataclasses import dataclass
+from datetime import datetime
+from dataclasses import dataclass, field
 from functools import cached_property, wraps
 from inspect import signature
 from logging import FileHandler
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import IO, Any, Callable, Iterable, Mapping, TypeVar
-
-from mmalignments.models.parameters import Params, ParamSet, initialize_param_registry
+from typing import IO, Any, Callable, Iterable, Mapping
+from datetime import datetime
+from mmalignments.models.parameters import (
+    Params,
+    ParamSet,
+    initialize_param_registry,
+    ToolThreadSpec,
+)
 from mmalignments.services.errors import handle_called_process_error
 from mmalignments.services.io import ensure, open_target, parents
-from mmalignments.models.tasks import Element
+from mmalignments.services.time import TIMEFORMAT, str_to_timestamp, timestamp_to_str
+from mmalignments.models.resources import ResourceConfig  # type: ignore[import]
+from mmalignments.models.resources import current_resources
 
 logger = logging.getLogger(__name__)
+
+
+###############################################################################
+# Config
+###############################################################################
 
 
 @dataclass
@@ -57,12 +69,25 @@ class ExternalRunConfig:
     capture_output: bool = True
     check: bool = True
     timeout: float | None = None
-    threads: int = 1
+    threads: int = field(default_factory=lambda: ResourceConfig.detect().threads)
     multi: bool = True
     stdout: Path | None | IO = None
     stderr: Path | None | IO = None
     append: bool = False
     log_dir: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.stdout and self.stderr and self.stdout == self.stderr:
+            raise ValueError("stdout and stderr cannot be the same path or file object")
+        if self.log_dir and not self.log_dir.is_dir():
+            raise ValueError(f"log_dir must be a directory: {self.log_dir}")
+        if self.threads < 1:
+            raise ValueError("threads must be a positive integer")
+
+
+###############################################################################
+# External Wrapper
+###############################################################################
 
 
 class External:
@@ -121,10 +146,15 @@ class External:
             self._version = self.get_version(version)
         self._source = source
         self._loglevel = loglevel
+        if parameters is None:
+            parameters = (
+                Path(__file__).parent / f"{self.name}.json"
+            )  # default path  TODO: put it somewhere else
+
         self.__init_parameters(parameters)
 
     def __init_parameters(
-        self, parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None
+        self, parameters: Mapping[str, ParamSet] | ParamSet | str | Path
     ) -> None:
         """
         Initialize the parameters for the External tool.
@@ -136,9 +166,13 @@ class External:
         parameters : Mapping[str, ParamSet] | ParamSet | None
             Known parameters for the External tool.
         """
+
         self.param_registry = initialize_param_registry(self.name, parameters)
 
-    # --- properties -------------------------------------------------
+    ###########################################################################
+    # Properties
+    ###########################################################################
+
     @property
     def name(self) -> str:
         return self._name
@@ -148,7 +182,7 @@ class External:
         return self._primary_binary
 
     @property
-    def version(self) -> str:
+    def version(self) -> str | None:
         return self._version
 
     @property
@@ -179,6 +213,9 @@ class External:
             "default": self.param_registry.default,
             **self.param_registry.by_subcommand,
         }
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return f"<External name={self.name} binary={self.primary_binary}>"
 
     ###########################################################################
     # Helpers
@@ -247,14 +284,187 @@ class External:
 
         return fallback
 
+    def extract_timestamp_part(
+        self, current_base: str, cur_prefix: str
+    ) -> datetime | None:
+        """
+        Extract the timestamp part from a log filename base.
+
+        Parameters
+        ----------
+        current_base : str
+            The base name of the log file.
+        cur_prefix : str
+            The expected prefix of the log file (e.g. "{toolname}_").
+
+        Returns
+        -------
+        str | None
+            The extracted timestamp part, or None if it cannot be parsed.
+        """
+        cur_ts = None
+        try:
+            cur_ts_with_pid = current_base[len(cur_prefix) + 1 :]
+            cur_ts_str = cur_ts_with_pid.split("_")[0]
+            cur_ts = str_to_timestamp(cur_ts_str)
+        except Exception:
+            # if we cannot parse current timestamp return None
+            pass
+        return cur_ts
+
+    ###########################################################################
+    # Multi-Threading
+    ###########################################################################
+
+    def apply_threads(
+        self,
+        params: Params | None,
+        cfg: ExternalRunConfig | None,
+        resources: ResourceConfig | None = None,
+        subroutine: str | None = None,
+    ) -> tuple[Params, ExternalRunConfig]:
+        """Inject the resolved thread count into *params* and *cfg*.
+
+        This is the **single place** where machine resources × tool capability
+        → concrete thread values. Call it at the top of every high-level
+        method before building the runner.
+
+        Parameters
+        ----------
+        params : Params | None
+            Caller-supplied params. Thread flag is added unless already set.
+        cfg : ExternalRunConfig | None
+            Caller-supplied run config. ``cfg.available_threads`` is set.
+        resources : ResourceConfig | None
+            Machine resource config. Falls back to ``ResourceConfig.detect()``.
+        subroutine : str | None
+            Optional subroutine name for per-subroutine specs
+            (resolved via ``_thread_spec_for``).
+
+        Returns
+        -------
+        tuple[Params, ExternalRunConfig]
+            Updated (params, cfg) with thread values injected.
+        """
+        resources = resources or ResourceConfig.detect()
+        thread_spec = self._thread_spec_for(subroutine)
+        cfg = cfg or ExternalRunConfig()
+        params = params or Params()
+
+        if thread_spec is not None:
+            # get the specific parameter set for the subroutine or default
+            paramset = self.get_paramset(subroutine)
+            n_threads = thread_spec.resolve(resources)
+
+            # Always tell the scheduler how many CPUs this job needs
+            cfg = ExternalRunConfig(
+                **{
+                    **cfg.__dict__,
+                    "threads": n_threads,
+                }
+            )
+
+            # Only inject if the tool has a flag AND the caller hasn't set it already
+            if thread_spec.multi and thread_spec.flag is not None:
+                spec = paramset.get_spec(thread_spec.flag)
+                if spec and spec.flag and not (spec.flag in params):
+                    params = params.override(**{spec.name: n_threads})
+
+        return params, cfg
+
+    def _thread_spec_for(self, subroutine: str | None) -> ToolThreadSpec | None:
+        """Return the ToolThreadSpec for *subroutine* (or the default).
+
+        Override in subclasses to provide per-subroutine specs:
+
+        .. code-block:: python
+
+            _thread_specs = {
+                "align": ToolThreadSpec(param_flag="-t"),
+                "sort":  ToolThreadSpec(param_flag="-@", fraction=0.5),
+            }
+
+            def _thread_spec_for(self, subroutine):
+                return self._thread_specs.get(subroutine, self.thread_spec)
+        """
+        thread_spec = self.get_paramset(subroutine).get_spec(
+            "_thread_spec"
+        )  # ensure subroutine exists and has a spec
+        if isinstance(thread_spec, ToolThreadSpec):
+            return thread_spec
+        else:
+            return None
+
     ###########################################################################
     # Logging
     ###########################################################################
 
+    def _get_log_dir(self, cfg: ExternalRunConfig) -> Path:
+        """Determine the log directory based on the configuration.
+
+        Parameters
+        ----------
+        cfg : ExternalRunConfig
+            Configuration for the run, which may specify log_dir or cwd.
+
+        Returns
+        -------
+        Path
+            The directory where logs should be stored.
+        """
+        return (
+            cfg.log_dir
+            if cfg.log_dir is not None
+            else (Path(cfg.cwd) if cfg.cwd is not None else Path.cwd())
+        ) / ".logs"
+
+    def get_timestamp_with_pid(self, timestamp: datetime) -> str:
+        """Generate a timestamp string for log file naming."""
+        timestamp_pid = f"{timestamp_to_str(timestamp)}_{os.getpid()}"
+        return timestamp_pid
+
+    def _delete_associated_logs(
+        self, log_dir: Path, path: Path, timestamp: datetime
+    ) -> None:
+        stem = path.stem
+        combined, stdout, stderr = self._get_log_files_for_run(log_dir, stem, timestamp)
+        try:
+            combined.unlink()
+        except Exception as e:
+            logger.exception(
+                f"Failed to remove old combined log {path}\nException was: {e}"
+            )
+        try:
+            if stdout.exists():
+                stdout.unlink()
+        except Exception as e:
+            logger.exception(
+                f"Failed to remove old stdout log {stdout}\nException was: {e}"
+            )
+        try:
+            if stderr.exists():
+                stderr.unlink()
+        except Exception as e:
+            logger.exception(
+                f"Failed to remove old stderr log {stderr}\nException was: {e}"
+            )
+
+    def _get_log_files_for_run(
+        self, log_dir: Path, base: str, timestamp: datetime
+    ) -> tuple[Path, Path, Path]:
+        combined_log_path = (
+            log_dir / f"{base}_{timestamp_to_str(timestamp)}_{os.getpid()}.log"
+        )
+        stdout_log_path = combined_log_path.with_suffix(f".stdout.log")
+        stderr_log_path = combined_log_path.with_suffix(f".stderr.log")
+        return combined_log_path, stdout_log_path, stderr_log_path
+
     def _setup_run_logging(
         self,
-        cfg: ExternalRunConfig,
-    ) -> tuple[Path, Path, Path, FileHandler | None, str]:
+        log_dir: Path,
+        filebase: str,
+        timestamp: datetime,
+    ) -> tuple[Path, Path, Path, FileHandler | None]:
         """Set up log files and file handler for a run.
 
         Parameters
@@ -265,23 +475,12 @@ class External:
         Returns
         -------
         tuple[Path, Path, Path, FileHandler | None, str]
-            (combined_log_path, stdout_log_path, stderr_log_path, file_handler, base)
+            (combined_log_path, stdout_log_path, stderr_log_path, file_handler, filebase)
         """
-        log_dir = (
-            cfg.log_dir
-            if cfg.log_dir is not None
-            else (Path(cfg.cwd) if cfg.cwd is not None else Path.cwd())
-        )
         ensure(log_dir)
-
-        timestamp = (
-            f'{datetime.datetime.now().strftime("%Y-%m-%d_%H_%M_%S")}_{os.getpid()}'
+        combined_log_path, stdout_log_path, stderr_log_path = (
+            self._get_log_files_for_run(log_dir, filebase, timestamp)
         )
-        base = f"{self.name}_{timestamp}"
-        combined_log_path = log_dir / f"{base}.log"
-        stdout_log_path = log_dir / f"{base}.stdout.log"
-        stderr_log_path = log_dir / f"{base}.stderr.log"
-
         # Create file handler for logger messages
         with open(combined_log_path, "w", encoding="utf-8") as f:
             f.write("\n" + "=" * 80 + "\n")
@@ -295,7 +494,7 @@ class External:
         logger.addHandler(file_handler)
         # return the generated base (name + timestamp) so callers can
         # identify and manage related per-run files
-        return combined_log_path, stdout_log_path, stderr_log_path, file_handler, base
+        return combined_log_path, stdout_log_path, stderr_log_path, file_handler
 
     def _finalize_run_logging(
         self,
@@ -366,7 +565,12 @@ class External:
         except Exception:
             logger.exception("Failed while finalizing run log files")
 
-    def _cleanup_old_logs(self, cfg: ExternalRunConfig, current_base: str) -> None:
+    def _cleanup_old_logs(
+        self,
+        log_dir: Path,
+        current_prefix: str,
+        current_timestamp: datetime,
+    ) -> None:
         """
         Remove older per-run logs for this tool in *log_dir*.
 
@@ -379,60 +583,74 @@ class External:
         ----------
         log_dir : Path
             Directory where log files are stored.
-        current_base : str
-            Base name of the current log file.
+        current_prefix : str
+            The prefix used in log filenames for the current run (e.g. tool name).
+        current_timestamp : datetime
+            The timestamp of the current run, used to identify older logs.
         """
-        try:
-            log_dir = (
-                cfg.log_dir
-                if cfg.log_dir is not None
-                else (Path(cfg.cwd) if cfg.cwd is not None else Path.cwd())
-            )
-            cur_prefix = f"{self.name}_"
-            # extract timestamp part from current_base (strip pid suffix)
+
+        # extract timestamp part from current_base (strip pid suffix)
+        current_base = f"{current_prefix}_{timestamp_to_str(current_timestamp)}"
+        for p in Path(log_dir).glob(f"{current_prefix}_*.log"):
+            stem = p.stem  # base without suffix
+            if stem == current_base:
+                continue
+            ts = self.extract_timestamp_part(stem, current_prefix)
+            if ts is None:
+                logger.debug("Could not parse log timestamp '%s', skipping", stem)
+                continue
+            if ts < current_timestamp:
+                # remove combined and related per-stream logs
+                self._delete_associated_logs(log_dir=log_dir, path=p, timestamp=ts)
+            # except Exception:
+            #     logger.exception(f"Failed to process log file {p} for cleanup")
+            #     continue
+            #     raise
+
+    def _prepare_output_streams(
+        self,
+        cfg: ExternalRunConfig,
+        output: Path | None = None,
+        stdout_log_path: Path | None = None,
+        stderr_log_path: Path | None = None,
+    ) -> tuple[Any, Any]:
+        stdout_stream = None
+        stderr_stream = None
+        # decide stdout
+        # Open per-stream files if not capturing output
+        if cfg.capture_output:
+            if cfg.stdout is None:
+                stdout_stream = subprocess.PIPE
+            else:
+                stdout_stream = open_target(cfg.stdout, append=cfg.append)
+            if cfg.stderr is None:
+                stderr_stream = subprocess.PIPE
+            else:
+                stderr_stream = open_target(cfg.stderr, append=cfg.append)
+        else:
+            if stdout_log_path:
+                stdout_stream = open(stdout_log_path, "w", encoding="utf-8")
+            else:
+                stdout_stream = None
+            if stderr_log_path:
+                stderr_stream = open(stderr_log_path, "w", encoding="utf-8")
+            else:
+                stderr_stream = None
+        if output:
+            # If output file is specified, redirect to it always (append if specified)
+            stdout_stream = open_target(output, append=cfg.append)
+        return stdout_stream, stderr_stream
+
+    def _finalize_streams(self, stdout_fh: Any, stderr_fh: Any) -> None:
+        for fh in (stdout_fh, stderr_fh):
             try:
-                cur_ts_with_pid = current_base[len(cur_prefix) :]
-                cur_ts_str = cur_ts_with_pid.rsplit("_", 1)[0]
-                cur_ts = datetime.datetime.strptime(cur_ts_str, "%Y-%m-%d_%H:%M:%S")
+                if fh is None or fh is subprocess.PIPE:
+                    continue
+                close = getattr(fh, "close", None)
+                if callable(close):
+                    close()
             except Exception:
-                # if we cannot parse current timestamp, do not delete anything
-                logger.debug("Could not parse current log timestamp '%s'", current_base)
-                return
-
-            for p in Path(log_dir).glob(f"{self.name}_*.log"):
-                stem = p.stem  # base without suffix
-                if stem == current_base:
-                    continue
-                try:
-                    ts_with_pid = stem[len(cur_prefix) :]
-                    ts_str = ts_with_pid.rsplit("_", 1)[0]
-                    ts = datetime.datetime.strptime(ts_str, "%Y-%m-%d_%H:%M:%S")
-                except Exception:
-                    # skip files that don't conform
-                    continue
-
-                if ts < cur_ts:
-                    # remove combined and related per-stream logs
-                    try:
-                        p.unlink()
-                    except Exception:
-                        logger.exception("Failed to remove old combined log %s", p)
-                    try:
-                        stdout_p = Path(log_dir) / f"{stem}.stdout.log"
-                        if stdout_p.exists():
-                            stdout_p.unlink()
-                    except Exception:
-                        logger.exception("Failed to remove old stdout log for %s", stem)
-                    try:
-                        stderr_p = Path(log_dir) / f"{stem}.stderr.log"
-                        if stderr_p.exists():
-                            stderr_p.unlink()
-                    except Exception:
-                        logger.exception("Failed to remove old stderr log for %s", stem)
-        except Exception:
-            logger.exception(
-                "Unexpected error while cleaning up old logs in %s", log_dir
-            )
+                logger.exception("Failed to close stdout file object")
 
     ###########################################################################
     # Command-building helpers
@@ -519,54 +737,9 @@ class External:
         cli_arguments = paramset.to_cli(params)
         return cli_arguments
 
-    def _prepare_output_streams(
-        self,
-        cfg: ExternalRunConfig,
-        output: Path | None = None,
-        stdout_log_path: str | None = None,
-        stderr_log_path: str | None = None,
-    ) -> tuple[Any, Any]:
-        stdout_stream = None
-        stderr_stream = None
-        # decide stdout
-        # Open per-stream files if not capturing output
-        if cfg.capture_output:
-            if cfg.stdout is None:
-                stdout_stream = subprocess.PIPE
-            else:
-                stdout_stream = open_target(cfg.stdout, append=cfg.append)
-            if cfg.stderr is None:
-                stderr_stream = subprocess.PIPE
-            else:
-                stderr_stream = open_target(cfg.stderr, append=cfg.append)
-        else:
-            if stdout_log_path:
-                stdout_stream = open(stdout_log_path, "w", encoding="utf-8")
-            else:
-                stdout_stream = None
-            if stderr_log_path:
-                stderr_stream = open(stderr_log_path, "w", encoding="utf-8")
-            else:
-                stderr_stream = None
-        if output:
-            # If an output file is specified, redirect stdout to it always (append if specified)
-            stdout_stream = open_target(output, append=cfg.append)
-        return stdout_stream, stderr_stream
-
-    def _finalize_streams(self, stdout_fh: Any, stderr_fh: Any) -> None:
-        for fh in (stdout_fh, stderr_fh):
-            try:
-                if fh is None or fh is subprocess.PIPE:
-                    continue
-                close = getattr(fh, "close", None)
-                if callable(close):
-                    close()
-            except Exception:
-                logger.exception("Failed to close stdout file object")
-
     def build_cmd(
         self,
-        arguments: list[str] | None = None,
+        arguments: Iterable[str] | None = None,
         params: Params | None = None,
     ) -> list[str]:
         """Build the command-line to execute.
@@ -600,6 +773,13 @@ class External:
             cli_args = self.to_cli(params, subroutine=subcommand)
             cmd.extend(cli_args)
         return cmd
+
+    ###########################################################################
+    # Runner
+    ###########################################################################
+    # External.run expects a single callable(post(cp)). Wrap the list
+    # of zero-argument post-callables in a single function that will be
+    # called with the CompletedProcess after the subprocess finished.
 
     def runnable(
         self,
@@ -670,6 +850,10 @@ class External:
             success = False
             stdout_stream = None
             stderr_stream = None
+            log_file_stem = output.stem if output else self.name
+            now = datetime.now()
+            log_dir = self._get_log_dir(cfg)
+
             try:
                 # Set up log files and file handler
                 try:
@@ -678,15 +862,22 @@ class External:
                         stdout_log_path,
                         stderr_log_path,
                         file_handler,
-                        base,
-                    ) = self._setup_run_logging(cfg)
+                    ) = self._setup_run_logging(
+                        log_dir, filebase=log_file_stem, timestamp=now
+                    )
                     # cleanup older logs in same directory (if any)
                     try:
-                        self._cleanup_old_logs(cfg, base)
+                        self._cleanup_old_logs(
+                            log_dir,
+                            log_file_stem,
+                            current_timestamp=now,
+                        )
                     except Exception:
                         logger.exception("Failed to cleanup old logs in %s", cfg.cwd)
+                        raise
                 except Exception:
                     logger.exception("Failed to set up logging")
+                    raise
                 # cmd = self.build_cmd(arguments, params)
                 # Build and log command
                 logger.info("Running external command: %s\n", shlex.join(cmd))
@@ -745,15 +936,13 @@ class External:
                             logfile=combined_log_path,
                             trace=full_trace,
                         )
-                        # logger.error("Traceback\n%s\n", full_trace)
-                        # traceback.print_stack()
                 # Execute post-callback
                 if post:
                     try:
-                        post(cp)
+                        post()
                     except Exception:
                         logger.exception("post-callback raised an exception")
-
+                        raise
                 # Mark as successful
                 success = True
 
@@ -791,12 +980,10 @@ class External:
         _runner.last_result = None
         return _runner
 
-    def __repr__(self) -> str:  # pragma: no cover - trivial
-        return f"<External name={self.name} binary={self.primary_binary}>"
 
-        # External.run expects a single callable(post(cp)). Wrap the list
-        # of zero-argument post-callables in a single function that will be
-        # called with the CompletedProcess after the subprocess finished.
+###############################################################################
+# Decorator
+###############################################################################
 
 
 def _first_path_parent(paths: list[str | Path]) -> Path | None:
@@ -828,20 +1015,34 @@ def subroutine(
 
     @wraps(fn)
     def wrapper(self, *args, **kwargs) -> Callable[[], CompletedProcess]:
+        # get the bound parameters from signature
         bound = sig.bind(self, *args, **kwargs)
         bound.apply_defaults()
+
         # get cfg and params supplied and make sure they are not None
         params = bound.arguments.get("params", None)
-        cfg = bound.arguments.get("cfg", None)
         params = params or Params()
+        cfg = bound.arguments.get("cfg", None)
         cfg = cfg or ExternalRunConfig()
+        # what yre our ressources?
+        resources = current_resources()
+
         # ensure output dirs
         arguments, paths, output, pre, post = fn(*bound.args, **bound.kwargs)
+        sub = self.subcommand(arguments)
         if output:
             paths = paths + [output]
+
+        # make sure the folders exist
         parents(*paths)
+
+        # make sure a log_dir exists
         if cfg.log_dir is None:
             cfg.log_dir = _first_path_parent(paths)
+
+        params, cfg = self.apply_threads(
+            params, cfg=cfg, resources=resources, subroutine=sub
+        )
         arguments = [str(arg) for arg in arguments]
         runner = self.runnable(
             arguments=arguments,
@@ -851,10 +1052,7 @@ def subroutine(
             post=post,
             cfg=cfg,
         )
-
+        runner.threads = cfg.threads
         return runner
 
     return wrapper
-
-
-# F = TypeVar("F", bound=Callable[..., "Element"])

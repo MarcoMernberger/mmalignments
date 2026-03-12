@@ -4,8 +4,15 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
-from mmalignments.models.tags import ElementTag, Method, State
-from mmalignments.models.tasks import Element, element
+from mmalignments.models.elements import Element, element
+from mmalignments.models.tags import (
+    ElementTag,
+    Method,
+    State,
+    merge_tag,
+    PartialElementTag,
+    from_prior,
+)
 from mmalignments.services.io import absolutize, parents
 
 
@@ -13,8 +20,8 @@ def ensemblmap_bed(
     input_bed: Path | str,
     output_bed: Path | str,
     *,
-    mapping: dict[str, str] | None = None,
-) -> Callable[[], CompletedProcess]:
+    mapping: Mapping[str, str] | None = None,
+) -> Callable[[], None]:
     """
     Fix a BED file by renaming chromosomes using a mapping or removing the
     'chr' prefix.
@@ -76,7 +83,7 @@ def ensemblmap_bed(
 def ensemblmap(
     bed_element: Element,
     *,
-    tag: ElementTag | None = None,
+    tag: PartialElementTag | ElementTag | None = None,
     outdir: Path | str | None = None,
     filename: Path | str | None = None,
     mapping: Mapping[str, str] | None = None,
@@ -91,9 +98,9 @@ def ensemblmap(
         Element containing the input BED file.
     output_bed : Path | str
         Path to the output BED file.
-    tag : ElementTag | None
-        Mandatory tag for the output Element for default naming. If not provided, a
-        default tag will be generated based on the input Element's tag.
+    tag : Tag | ElementTag | None
+        Partial or full Element tag for the output Element, used for default naming. If
+        not provided, a default tag will be generated based on the input Element's tag.
     outdir : Optional[Union[Path, str]]
         Directory for the sorted output BED file. If not provided, defaults to
         the same directory as the input BED file.
@@ -110,29 +117,31 @@ def ensemblmap(
         New Element representing the fixed BED file.
     """
     input_bed = bed_element.bed
-    tag = tag or ElementTag(
-        root=bed_element.tag.root or input_bed.stem,
-        level=bed_element.tag.level + 1,
-        omics=bed_element.tag.omics,
-        stage=bed_element.tag.stage,
+    tag = from_prior(
+        bed_element.tag,
+        tag,
         method=Method.CONTIGMAP,
         state=State.HARMONIZED,
         ext="bed",
     )
-    outdir = outdir or input_bed.parent
+    # else: full ElementTag passed – use as-is
+    outdir = Path(outdir or input_bed.parent)
     filename = filename or tag.default_output
-    output_bed = Path(outdir) / filename
+    output_bed = outdir / filename
 
     runner = ensemblmap_bed(
         input_bed=input_bed,
         output_bed=output_bed,
         mapping=mapping,
     )
-    determinants = (
+    runner.command = ["ensemblmap_bed"]
+    runner.threads = 1
+    determinants = [
         "".join([f"{k}={v}" for k, v in (mapping or {}).items()]) if mapping else []
-    )
+    ]
+    key = f"{tag.default_name}_mapped_chromosomes_to_ensembl"
     element = Element(
-        key=f"{tag.default_name}_mapped_chromosomes_to_ensembl",
+        key=key,
         run=runner,
         tag=tag,
         determinants=determinants,

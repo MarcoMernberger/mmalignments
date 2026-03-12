@@ -2,7 +2,7 @@
   "index": {
     "prefix": {
       "flag": "-p",
-      "dtype": ["str", "path"],
+      "dtype": "str",
       "default": null,
       "required": false,
       "affects_output": true,
@@ -11,16 +11,22 @@
     }
   },
   "mem": {
+    "_thread_spec": {
+      "flag": "t",
+      "max_threads": null,
+      "fraction": 1.0,
+      "multi": true
+    },
     "output": {
       "flag": "-o",
-      "dtype": ["str", "path"],
+      "dtype": "str",
       "default": null,
       "required": false,
       "affects_output": true,
       "render": "value",
       "description": "Output SAM file name. If not set, writes SAM to stdout."
     },
-    "threads": {
+    "t": {
       "flag": "-t",
       "dtype": ["int"],
       "default": 1,
@@ -204,7 +210,7 @@
     },
     "header": {
       "flag": "-H",
-      "dtype": ["str", "path"],
+      "dtype": "str",
       "default": null,
       "required": false,
       "affects_output": true,

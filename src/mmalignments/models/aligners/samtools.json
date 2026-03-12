@@ -1,5 +1,19 @@
 {
+  "flagstat": {
+      "_thread_spec": {
+        "flag": "threads",
+        "max_threads": null,
+        "fraction": 1.0,
+        "multi": false
+      }
+    },
   "sort": {
+      "_thread_spec": {
+        "flag": "threads",
+        "max_threads": null,
+        "fraction": 1.0,
+        "multi": true
+      },
     "compression_level": {
       "flag": "-l",
       "dtype": ["int"],
@@ -208,8 +222,13 @@
       "description": "Set level of verbosity."
     }
   },
-
   "index": {
+    "_thread_spec": {
+        "flag": "threads",
+        "max_threads": null,
+        "fraction": 1.0,
+        "multi": true
+      },
     "bai": {
       "flag": "-b",
       "dtype": ["bool"],
@@ -265,8 +284,13 @@
       "description": "Sets the number of threads [none]."
     }
   },
-
   "faidx": {
+    "_thread_spec": {
+        "flag": "threads",
+        "max_threads": null,
+        "fraction": 1.0,
+        "multi": true
+      },
     "output": {
       "flag": "-o",
       "dtype": "str",
@@ -349,8 +373,13 @@
       "description": "File and index in FASTQ format."
     }
   },
-
   "stats": {
+    "_thread_spec": {
+        "flag": "threads",
+        "max_threads": null,
+        "fraction": 1.0,
+        "multi": false
+      },
     "coverage": {
       "flag": "-c",
       "dtype": "str",

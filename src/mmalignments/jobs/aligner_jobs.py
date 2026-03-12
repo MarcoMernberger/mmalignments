@@ -1,16 +1,19 @@
 """A module to serve as an interface to pypipegraph for alignment jobs."""
 
 import logging
+import inspect
 from pathlib import Path
+from typing import Mapping, Any
 
 from pypipegraph2 import (  # type: ignore
     FileGeneratingJob,
     Job,
     MultiFileGeneratingJob,
     ParameterInvariant,
+    FileInvariant,
 )
-from typing import Mapping
-from mmalignments.models.tasks import Element
+
+from mmalignments.models.elements import Element, FilesElement
 from mmalignments.services.io import parents
 
 logger = logging.getLogger(__name__)
@@ -45,13 +48,15 @@ def jobify(
     ValueError
         If the Element has no output files, a ValueError is raised.
     """
-    if isinstance(elements, Element):
-        elements = [elements]
-    return jobify_multi(elements, job_cache=job_cache, dependencies=dependencies)
+    elements_for_job = elements if isinstance(elements, tuple) else (elements,)
+
+    return jobify_multi(
+        elements_for_job, job_cache=job_cache, dependencies=dependencies
+    )
 
 
 def jobify_multi(
-    elements: list[Element],
+    elements: tuple[Element, ...],
     job_cache: Mapping[str, Job] | None = None,
     dependencies: list[Job] | Job | None = None,
 ) -> list[Job]:
@@ -110,11 +115,11 @@ def jobify_single(
         If the Element has no output files, a ValueError is raised.
     """
     logger.info("Jobyfing %s\n ...", runner)
-    if runner.skip():
-        logger.info("Skipping %s because skip() returned True", runner)
+    skip, reason = runner.skip()
+    if skip:
+        logger.info(f"Skipping %s because {reason}", runner)
         return []
-    if job_cache is None:
-        job_cache = {}
+    job_cache = job_cache or {}
 
     # reuse existing job
     if runner.key in job_cache:
@@ -124,30 +129,28 @@ def jobify_single(
         return job
 
     # build prerequisite jobs first
-    pre_jobs = [
-        jobify(pre, job_cache=job_cache) for pre in runner.pres if not pre.skip()
-    ]
-
-    # --- outputs ---
-    output_files = [Path(f) for f in runner.output_files]
-    if output_files:
-        parents(*output_files)
+    pre_jobs = []
+    for pre in runner.pres:
+        skip, _ = pre.skip()
+        if not skip:
+            pre_job = jobify(pre, job_cache=job_cache)
+            pre_jobs.extend(pre_job)
+    jobclass = _select_appropriate_job_class(runner)
+    args = _build_class_arguments(runner, jobclass)
 
     try:
-        output_files = [f.relative_to(Path.cwd()) for f in output_files]
-    except ValueError:
-        cwd = Path.cwd()
-        output_files = [
-            Path(cwd.name) / ".." / f.relative_to(cwd.anchor) for f in output_files
-        ]
-
-    jobclass = _select_appropriate_job_class(runner)
-    job = jobclass(output_files, lambda _, runner=runner: runner.run)
-    print(runner.name)
-    # print(f"Created job:\n{job.job_id} for {runner.name} with {output_files}\n")
-    # signature invariant (skip logic in ppg form)
-    signature_dep = ParameterInvariant(runner.key, runner.signature)
-    job.depends_on(signature_dep)
+        print(args)
+        job = jobclass(*args)
+        print(runner.name, jobclass.__name__, runner.skip(), runner.artifacts)
+        print("")
+    except TypeError as e:
+        raise TypeError(
+            f"Error creating job for {runner.name} with output files {runner.output_files}: {e}"
+        ) from e
+    if not (jobclass is FileInvariant):
+        # signature invariant (skip logic in ppg form)
+        signature_dep = ParameterInvariant(runner.key, runner.signature)
+        job.depends_on(signature_dep)
 
     # depends on prerequisites
     if pre_jobs:
@@ -165,15 +168,21 @@ def jobify_single(
 
 def _select_appropriate_job_class(runner: Element) -> type:
     """Select the appropriate Job class based on the number of output files."""
-    output_files = [Path(f) for f in runner.output_files]
-    if len(output_files) == 0:
-        raise NotImplementedError(
-            f"Element {runner.key} has no output_files; cannot create FileGeneratingJob"
-        )
-    elif len(output_files) == 1:
-        return FileGeneratingJob
+    if isinstance(runner, FilesElement):
+        return FileInvariant
+    elif runner.output_files:
+        if len(runner.output_files) == 0:
+            raise NotImplementedError(
+                f"Element {runner.key} has no output_files; cannot create FileGeneratingJob"
+            )
+        elif len(runner.output_files) == 1:
+            return FileGeneratingJob
+        else:
+            return MultiFileGeneratingJob
     else:
-        return MultiFileGeneratingJob
+        raise NotImplementedError(
+            f"Element {runner.key} has no output_files; cannot determine job class"
+        )
 
 
 def _set_cores(job: Job, runner: Element) -> None:
@@ -311,3 +320,47 @@ def write_lengths(
     return FileGeneratingJob(cache_chromosome_lengths_file, _write_lengths).depends_on(
         mbfgenome.download_genome()
     )
+
+
+def get_job_func(runner: Element) -> Any:
+    """Get the function to run for a given Element."""
+    if hasattr(runner, "run") and callable(runner.run):
+
+        def func(*args, runner=runner, **kwargs):
+            return runner.run()
+
+        return func
+    else:
+        raise NotImplementedError(f"Element {runner.key} has no callable 'run' method.")
+
+
+def _build_class_arguments(runner: Element, jobclass: type) -> Any:
+    """Convert runner.output_files to relative paths."""
+    if jobclass is FileGeneratingJob:
+        if runner.output_files is None:
+            raise ValueError(
+                f"Element {runner.key} has no output_files; cannot create FileGeneratingJob"
+            )
+        args = _relative_path(runner.output_files[0]), get_job_func(runner)
+
+    elif jobclass is MultiFileGeneratingJob:
+        if runner.output_files is None:
+            raise ValueError(
+                f"Element {runner.key} has no output_files; cannot create MultiFileGeneratingJob"
+            )
+        args = [_relative_path(f) for f in runner.output_files], get_job_func(runner)
+    elif jobclass is FileInvariant:
+        return runner.inputs[0]
+    else:
+        raise NotImplementedError(f"Unsupported job class: {jobclass}")
+    return args
+
+
+def _relative_path(filepath: Path) -> Path:
+    filepath = filepath.resolve()
+    try:
+        res = filepath.relative_to(Path.cwd())
+    except ValueError:
+        cwd = Path.cwd()
+        res = Path(cwd.name) / ".." / filepath.relative_to(cwd.anchor)
+    return res

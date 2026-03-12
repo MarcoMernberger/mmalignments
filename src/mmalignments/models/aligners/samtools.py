@@ -9,7 +9,9 @@ from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
 from mmalignments.models.data import Genome
-from mmalignments.models.tasks import Element, MappedElement, element
+from mmalignments.models.elements import Element, MappedElement, element
+from mmalignments.models.tags import ElementTag, Method, Stage, State, merge_tag
+from mmalignments.models.tags import PartialElementTag, from_prior
 from mmalignments.services.io import parents
 
 from ..externals import External, ExternalRunConfig, subroutine
@@ -62,7 +64,7 @@ class Samtools(External):
         primary_binary: str = "samtools",
         version: str | None = None,
         source: str = "https://github.com/samtools/samtools",
-        parameters: Mapping[str, ParamSet] | ParamSet | None = None,
+        parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None = None,
     ) -> None:
         """Initialize Samtools wrapper.
 
@@ -135,7 +137,9 @@ class Samtools(External):
         self,
         mapped: MappedElement,
         *,
-        output_bam_file: str = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> MappedElement:
@@ -149,9 +153,16 @@ class Samtools(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file to be sorted.
-            Name of the output BAM file (default: "<mapped.name>_sorted.bam").
-        output_folder : Optional[Path]
-            Folder for the output BAM file (default: parent of input BAM file).
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default
+            naming. If not provided, a default tag will be generated based on
+            the input Element's name.
+        outdir : Path | str | None
+            Directory for the sorted BAM file. If not provided, defaults to
+            the same directory as the input BAM file.
+        filename : Path | str | None
+            Filename override. If not provided, defaults to
+            ``tag.default_output``.
         params : Params | None
             Parameters for sorting call.
         cfg : ExternalRunConfig | None
@@ -172,7 +183,8 @@ class Samtools(External):
         >>> sort_runner()  # Execute the sort
         """
         input_bam = mapped.bam
-        sorted_bam = output_bam_file or input_bam.parent / f"{mapped.name}.sorted.bam"
+        tag = from_prior(mapped.tag, tag, method=Method.SAMTOOLS, state=State.SORT)
+        sorted_bam = Path(outdir or input_bam.parent) / (filename or tag.default_output)
 
         # Create the runner by calling External.run
         runner = self.sort_bam(
@@ -185,6 +197,7 @@ class Samtools(External):
             name=f"{mapped.name}.sorted",
             key=f"{mapped.name}.({self.name}.sort).{self.version_name}",
             run=runner,
+            tag=tag,
             determinants=self.signature_determinants(params, subroutine="sort"),
             inputs=[input_bam],
             artifacts={"bam": sorted_bam},
@@ -243,6 +256,7 @@ class Samtools(External):
         self,
         mapped: MappedElement,
         *,
+        tag: PartialElementTag | ElementTag | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Element:
@@ -256,6 +270,10 @@ class Samtools(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file to index.
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default
+            naming. If not provided, a default tag will be generated based on
+            the input Element's name.
         params : Params | None
             Parameters for indexing call.
         cfg : ExternalRunConfig | None
@@ -274,6 +292,15 @@ class Samtools(External):
         >>> index_runner()  # Execute the index
         """
         bam_file = mapped.bam
+        tag = from_prior(
+            mapped.tag,
+            tag=tag,
+            level=mapped.tag.level,
+            method=Method.SAMTOOLS,
+            state=State.INDEX,
+            ext="bai",
+        )
+        # must always be the same as the sorted file
         bai_file = bam_file.with_suffix(bam_file.suffix + ".bai")
 
         runner = self.index_bam(
@@ -283,13 +310,14 @@ class Samtools(External):
             cfg=cfg,
         )
 
+        key = f"{tag.default_name}_index_{self.version_name}"
         element = Element(
-            name=f"{mapped.name}.bai",
-            key=f"{mapped.name}_index_{self.version_name}",
+            key=key,
             run=runner,
+            tag=tag,
             determinants=self.signature_determinants(params, subroutine="index"),
             inputs=[bam_file],
-            artifacts={"bai": bai_file},
+            artifacts={tag.ext: bai_file},
             pres=[mapped],
         )
         return element
@@ -344,9 +372,11 @@ class Samtools(External):
     def faidx(
         self,
         genome: Genome,
-        output: Path | str = None,
-        cut2: bool = True,
         *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+        cut2: bool = True,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Element:
@@ -357,8 +387,16 @@ class Samtools(External):
         ----------
         genome : Genome
             Genome-like object containing the reference FASTA file.
-        output_file : Optional[Path  |  str], optional
-            Output two-column genome file (chr\tlength), by default None
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default
+            naming. If not provided, a default tag will be generated based on
+            the genome name.
+        outdir : Path | str | None
+            Directory for the output genome file. If not provided, defaults to
+            the FASTA file's parent directory.
+        filename : Path | str | None
+            Filename override. If not provided, defaults to
+            ``tag.default_output``.
         cut2 : bool, optional
             Whether to cut the .fai output to create a .genome file
             (default: True).
@@ -377,11 +415,17 @@ class Samtools(External):
             Element representing the faidx operation.
         """
         fasta = (genome.fasta).absolute()
-        output = (
-            Path(output).absolute()
-            if output is not None
-            else fasta.parent / f"{genome.name}.genome"
-        )  # noqa: E501
+        default_tag = ElementTag(
+            root=genome.name,
+            level=1,
+            stage=Stage.PREP,
+            method=Method.SAMTOOLS,
+            state=State.INDEX,
+            omics=None,
+            ext="genome",
+        )
+        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+        output = Path(outdir or fasta.parent) / (filename or tag.default_output)
 
         runner = self.faidx_fasta(
             fasta=fasta, output_file=output, cut2=cut2, params=params, cfg=cfg
@@ -393,6 +437,7 @@ class Samtools(External):
             name=f"{genome.name}.faidx",
             key=f"{self.name}_faidx_{self.version_name}_{cut2}",
             run=runner,
+            tag=tag,
             determinants=self.signature_determinants(params, subroutine="faidx"),
             inputs=[fasta],
             artifacts=artifacts,
@@ -477,7 +522,9 @@ class Samtools(External):
         self,
         mapped: MappedElement,
         *,
-        output_file: Path | str = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> "Element":
@@ -490,9 +537,16 @@ class Samtools(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file.
-        output_file : Path | str
-            Output file for stats results. If not provided, defaults to
-            "qc/samtools/{bam_stem}_stats.txt" in the BAM's parent directory.
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default
+            naming. If not provided, a default tag will be generated based on
+            the input Element's name.
+        outdir : Path | str | None
+            Directory for the output stats file. If not provided, defaults to
+            "qc/samtools/" relative to the BAM file's directory.
+        filename : Path | str | None
+            Filename override. If not provided, defaults to
+            ``tag.default_output``.
         params : Params | None
             Parameters for the stats call.
         cfg : ExternalRunConfig | None
@@ -511,8 +565,17 @@ class Samtools(External):
         >>> stats_elem.run()
         """
         input_bam = mapped.bam
-        qc_dir = input_bam.parent / "qc" / "samtools"
-        output_file = Path(output_file or qc_dir / f"{input_bam.stem}_stats.txt")
+        tag = from_prior(
+            mapped.tag,
+            tag,
+            level=1,
+            stage=Stage.QC,
+            method=Method.SAMTOOLS,
+            state=State.RAW,
+            ext="txt",  # may be tsv or json
+        )
+        default_outdir = input_bam.parent / "qc" / "samtools"
+        output_file = Path(outdir or default_outdir) / (filename or tag.default_output)
 
         runner = self.stats_bam(
             input_bam=input_bam,
@@ -525,11 +588,11 @@ class Samtools(External):
             name=f"{input_bam.stem}_stats_{self.name}",
             key=f"{input_bam.stem}_stats_{self.version_name}",
             run=runner,
+            tag=tag,
             determinants=self.signature_determinants(params, subroutine="stats"),
             inputs=[input_bam],
             artifacts={"stats": output_file},
             pres=[mapped],
-            store_attributes={"multi_core": False},
         )
 
     @subroutine
@@ -570,7 +633,7 @@ class Samtools(External):
         """
         # samtools stats input.bam > output.txt
         arguments = ["stats", self.strabs(input_bam)]
-        return arguments, [output_file], None, None, None
+        return arguments, [output_file], output_file, None, None
 
     ###########################################################################
     # Flagstat (High-level and Low-level wrapper)
@@ -580,8 +643,10 @@ class Samtools(External):
     def flagstat(
         self,
         mapped: MappedElement,
-        output_file: Path | str | None = None,
         *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> "Element":
@@ -594,9 +659,16 @@ class Samtools(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file.
-        output_file : Optional[Union[Path, str]]
-            Output file for flagstat results. If not provided, defaults to
-            "qc/samtools/{bam_stem}_flagstat.txt" in the BAM's parent directory.
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default
+            naming. If not provided, a default tag will be generated based on
+            the input Element's name.
+        outdir : Path | str | None
+            Directory for the output flagstat file. If not provided, defaults
+            to "qc/samtools/" relative to the BAM file's directory.
+        filename : Path | str | None
+            Filename override. If not provided, defaults to
+            ``tag.default_output``.
         params : Params | None
             Parameters for the flagstat call.
         cfg : ExternalRunConfig | None
@@ -615,11 +687,18 @@ class Samtools(External):
         >>> flagstat_elem.run()
         """
         input_bam = mapped.bam
-        qc_dir = input_bam.parent / "qc" / "samtools"
-        output_file = Path(
-            output_file or qc_dir / f"{input_bam.stem}.flagstat.txt"
-        ).absolute()
-
+        tag = from_prior(
+            mapped.tag,
+            tag,
+            stage=Stage.QC,
+            method=Method.SAMTOOLS,
+            state=State.STAT,
+            ext="json",
+        )
+        outdir = Path(outdir or input_bam.parent / "qc" / "samtools")
+        filename = filename or tag.default_output
+        output_file = outdir / filename
+        # generate runner
         runner = self.flagstat_bam(
             input_bam=input_bam,
             output_file=output_file,
@@ -628,14 +707,13 @@ class Samtools(External):
         )
 
         return Element(
-            name=f"{mapped.name}.flagstat",
-            key=f"{mapped.name}_flagstat_{self.version_name}",
+            key=f"{tag.default_name}_{mapped.name}_flagstat_{self.version_name}",
             run=runner,
+            tag=tag,
             determinants=self.signature_determinants(params, subroutine="flagstat"),
             inputs=[input_bam],
             artifacts={"flagstat": output_file},
             pres=[mapped],
-            store_attributes={"multi_core": False},
         )
 
     @subroutine
@@ -674,11 +752,13 @@ class Samtools(External):
         >>> flagstat = st.flagstat_bam("sample.bam", "qc/flagstat.txt")
         >>> flagstat()
         """
-        input_bam = Path(input_bam).absolute()
-        output_file = Path(output_file).absolute()
-
-        output_file.parent.mkdir(parents=True, exist_ok=True)
+        suffix = Path(output_file).suffix.lower()
+        if suffix not in [".json", ".tsv"]:
+            raise ValueError(
+                f"Output file extension {suffix} not supported for samtools stats. "
+                "Use .json or .tsv."
+            )
 
         # samtools flagstat input.bam > output.txt
-        arguments = ["flagstat", str(input_bam)]
-        return arguments, [output_file], None, None, None
+        arguments = ["flagstat", str(input_bam), "-O", suffix[1:]]
+        return arguments, [output_file], output_file, None, None

@@ -7,13 +7,14 @@ into a single workflow, similar to the alignsort pattern in BWAMem2.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 from mmalignments.models.aligners.samtools import Samtools
 from mmalignments.models.callers.gatk import GATK
-from mmalignments.models.data import Genome, Sample
+from mmalignments.models.data import Genome
+from mmalignments.models.elements import Element, MappedElement, NextGenSampleElement
 from mmalignments.models.externals import ExternalRunConfig
 from mmalignments.models.parameters import Params
 from mmalignments.models.qc.fastp import FastP
@@ -21,17 +22,53 @@ from mmalignments.models.qc.fastqc import FastQC
 from mmalignments.models.qc.mosdepth import Mosdepth
 from mmalignments.models.qc.multiqc import MultiQC
 from mmalignments.models.qc.parsers import build_qc_summary
-from mmalignments.models.tasks import Element, MappedElement
+from mmalignments.models.tags import ElementTag, Method, Stage, State, merge_tag
+from mmalignments.models.tags import PartialElementTag as Tag
 from mmalignments.services.io import (
     ensure,
     open_fastq,
     write_fastq_check_results,
     write_json,
 )
+from mmalignments.models.resources import ResourceConfig  # type: ignore[import]
 
 from .parsers import parse_fastq_record
 
 logger = logging.getLogger(__name__)
+
+###############################################################################
+# Configs
+###############################################################################
+
+
+@dataclass(frozen=True)
+class PreQCConfig:
+    qc_root: Path | None = None
+    threads: int = field(default_factory=lambda: ResourceConfig.detect().threads)
+    n_records: int = 10_000
+    run_sanity_check: bool = True
+    run_fastp: bool = True
+    run_fastqc_raw: bool = True
+    run_fastqc_cleaned: bool = True
+    run_summary: bool = True
+
+
+@dataclass(frozen=True)
+class PostQCConfig:
+    qc_root: Path | None = None
+    threads: int = field(default_factory=lambda: ResourceConfig.detect().threads)
+    run_alignment_summary: bool = True
+    run_insert_size: bool = True
+    run_hs_metrics: bool = True
+    run_mosdepth: bool = True
+    run_samtools_flagstat: bool = True
+    run_samtools_stats: bool = True
+    multiqc: bool = True
+
+
+########################################################################################
+# Helpers
+########################################################################################
 
 
 def _extract_read_id(header: str) -> str:
@@ -47,7 +84,29 @@ def _validate_record(
     plus: str,
     qual: str,
 ) -> list[str]:
-    """Validate a single FASTQ record and return error messages (if any)."""
+    """
+    Validate a single FASTQ record and return error messages (if any).
+
+    Parameters
+    ----------
+    read_label : str
+        Label for the read (e.g., "R1" or "R2")
+    record_index : int
+        Index of the record in the FASTQ file
+    header : str
+        Header line of the FASTQ record
+    seq : str
+        Sequence line of the FASTQ record
+    plus : str
+        Plus line of the FASTQ record
+    qual : str
+        Quality line of the FASTQ record
+
+    Returns
+    -------
+    list[str]
+        List of error messages, empty if no errors
+    """
     errs: list[str] = []
     n = record_index + 1  # human-friendly
 
@@ -69,7 +128,26 @@ def _scan_fastq(
     read_label: str,
     n_records: int,
 ) -> tuple[list[str], int, list[str]]:
-    """Scan up to n_records from a FASTQ and return IDs, record count, and errors."""
+    """
+    Scan up to n_records from a FASTQ and return IDs, record count, and errors.
+
+    Parameters
+    ----------
+    path : Path | str
+        Path to the FASTQ file
+    read_label : str
+        Label for the read (e.g., "R1" or "R2")
+    n_records : int
+        Maximum number of records to scan
+
+    Returns
+    -------
+    tuple[list[str], int, list[str]]
+        Tuple containing:
+        - List of read IDs
+        - Number of records checked
+        - List of error messages
+    """
     ids: list[str] = []
     errors: list[str] = []
     count = 0
@@ -92,7 +170,25 @@ def _scan_fastq(
 def _pairing_mismatches(
     r1_ids: list[str], r2_ids: list[str], *, max_examples: int = 5
 ) -> tuple[int, list[str]]:
-    """Compare paired IDs and return mismatch count and warning examples."""
+    """
+    Compare paired IDs and return mismatch count and warning examples.
+
+    Parameters
+    ----------
+    r1_ids : list[str]
+        List of read IDs from R1
+    r2_ids : list[str]
+        List of read IDs from R2
+    max_examples : int, optional
+        Maximum number of mismatch examples to include in warnings, by default 5
+
+    Returns
+    -------
+    tuple[int, list[str]]
+        Tuple containing:
+        - Number of mismatches
+        - List of warning messages
+    """
     mismatches = 0
     warnings: list[str] = []
 
@@ -105,25 +201,85 @@ def _pairing_mismatches(
     return mismatches, warnings
 
 
-def build_input_check(
-    sample: "Sample",
-    out_dir: Path | str | None = None,
-    n_records: int = 10000,
-) -> "Element":
-    """Create Element that performs FASTQ sanity checks."""
-    out_dir_path = (
-        (sample.result_dir / "qc" / "input_check") if out_dir is None else Path(out_dir)
-    )
-    out_dir_path = out_dir_path.absolute()
-    ensure(out_dir_path)
+def _validate_targets_baits(
+    cfg: PostQCConfig, targets: Element, baits: Element
+) -> tuple[Element, Element]:
+    """
+    Validate and prepare targets and baits for HS metrics and mosdepth.
 
-    out_json = out_dir_path / f"{sample.name}_input_check.json"
-    out_txt = out_dir_path / f"{sample.name}_input_check.txt"
+    Parameters
+    ----------
+    cfg : PostQCConfig
+        Configuration for post-alignment QC.
+    targets : Element
+        Target intervals for HS metrics and mosdepth.
+    baits : Element
+        Bait intervals for HS metrics.
+
+    Returns
+    -------
+    tuple[Element, Element]
+        Validated and prepared target and bait intervals.
+
+    Raises
+    ------
+    ValueError
+        If required targets or baits are not provided when HS metrics or mosdepth are
+        enabled.
+    """
+    if cfg.run_hs_metrics:
+        if targets is None:
+            raise ValueError(
+                "run_hs_metrics=True requires either "
+                "(bait_intervals and target_intervals) or targets to be provided"
+            )
+        if baits is None:
+            logger.warning(
+                "bait_intervals and/or target_intervals not provided, "
+                "using targets for both. This may not be ideal for HS metrics."
+            )
+            baits = targets
+
+    if cfg.run_mosdepth and targets is None:
+        raise ValueError("run_mosdepth=True requires targets to be provided")
+
+    return targets, baits
+
+
+########################################################################################
+# Elements
+########################################################################################
+
+
+def build_input_check(
+    sample: NextGenSampleElement,
+    n_records: int = 10000,
+    *,
+    tag: Tag | ElementTag | None = None,
+    outdir: Path | str | None = None,
+    filename: Path | str | None = None,
+) -> Element:
+    """Create Element that performs FASTQ sanity checks."""
+    default_tag = ElementTag(
+        root=sample.tag.root,
+        level=sample.tag.level + 1,
+        stage=Stage.QC,
+        method=Method.CUSTOM,
+        state=State.STAT,
+        omics=sample.tag.omics,
+        ext="json",
+    )
+    tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+    outdir = Path(outdir or sample.fastq1.parent / "qc" / "input_check")
+
+    json_filename = filename or tag.default_output
+    out_json = outdir / json_filename
+    out_txt = out_json.with_suffix(".txt")
 
     def _check_fastq() -> None:
         results: dict[str, Any] = {
             "sample_name": sample.name,
-            "pairing": sample.pairing,
+            "pairing": sample.pairing.value,
             "checks": {},
             "errors": [],
             "warnings": [],
@@ -168,14 +324,13 @@ def build_input_check(
     input_files = [sample.fastq_r1] + ([sample.fastq_r2] if sample.fastq_r2 else [])
     _check_fastq.command = ["build_input_check"]
     return Element(
-        name=f"{sample.name}.QC(sanity)",
-        key=f"{sample.name}_build_input_check",
+        key=f"{tag.default_name}_build_input_check",
         run=_check_fastq,
+        tag=tag,
         determinants=[f"n_records={n_records}"],
         inputs=input_files,
         artifacts={"input_check_json": out_json, "input_check_txt": out_txt},
         pres=[],
-        store_attributes={"multi": False},
     )
 
 
@@ -184,24 +339,16 @@ def build_input_check(
 ###############################################################################
 
 
-@dataclass(frozen=True)
-class PreQCConfig:
-    qc_root: Path | None = None
-    threads: int = 47
-    n_records: int = 10_000
-
-    run_sanity_check: bool = True
-    run_fastp: bool = True
-    run_fastqc_raw: bool = True
-    run_fastqc_cleaned: bool = True
-    run_summary: bool = True
-
-
 def pre_alignment_qc(
-    sample: Sample,
+    sample: NextGenSampleElement,
+    *,
+    tags: Mapping[str, Tag] | None = None,
+    outdir: Path | str | None = None,
+    filename: Path | str | None = None,
     parameters: Mapping[str, Params] | None = None,
-    cfg: PreQCConfig | None = None,
-) -> tuple[Element]:
+    preqc_cfg: PreQCConfig | None = None,
+    cfgs: Mapping[str, ExternalRunConfig] | None = None,
+) -> tuple[Element, ...]:
     """Run comprehensive pre-alignment quality control workflow.
 
     Orchestrates a complete QC workflow for FASTQ files including:
@@ -215,107 +362,102 @@ def pre_alignment_qc(
     ----------
     sample : Sample
         Sample object containing FASTQ file paths and metadata.
-    parameters : Mapping[str, Params]
+    parameters : Mapping[str, Params] | None
         Dictionary of parameter overrides for each QC step, keyed by step
         name.
-    cfg : PreQCConfig | None
+    preqc_cfg : PreQCConfig | None
         Configuration object for pre-alignment QC. If None, defaults will
         be used.
 
     Returns
     -------
-    tuple[Element]
-        tuple of QC Elements in dependency order:
-        input_check, fastp, fastqc_raw, fastqc_cleaned, qc_summary
-        the first element is the last in the dependency chain (qc_summary
-        depends on all previous steps).
-
+    tuple[Element, ...]
+        Tuple of QC Elements in dependency order: input_check, fastp,
+        fastqc_raw, fastqc_cleaned, qc_summary. The first element is the last
+        in the dependency chain (qc_summary depends on all previous steps).
 
     Examples
     --------
     >>> from mmalignments.models.data import Sample
+    >>> from mmalignments.models.externals import ExternalRunConfig
     >>> sample = Sample(name="sample1", pairing="paired",
     ...                 fastq_r1_path="raw_R1.fastq.gz",
     ...                 fastq_r2_path="raw_R2.fastq.gz")
     >>> qc_elements = pre_alignment_qc(
-    ...     sample, "results/qc", PreQCConfig(threads=8)
+    ...     sample,
+    ...     outdir="results/qc",
+    ...     preqc_cfg=PreQCConfig(threads=8),
     ... )
     >>> for elem in qc_elements:
     ...     elem.run()
     """
-    cfg = cfg or PreQCConfig()
-    if cfg.qc_root:
-        qc_root = Path(cfg.qc_root).absolute()
-        sample_qc_dir = qc_root / sample.name
-        ensure(sample_qc_dir)
-    else:
-        sample_qc_dir = sample.result_dir / "qc"
-
+    preqc_cfg = preqc_cfg or PreQCConfig()
+    outdir = outdir or preqc_cfg.qc_root or (sample.result_dir / "qc")
     qc_elements = []
+    tags = tags or {}
+    parameters = parameters or {}
+    cfgs = cfgs or {}
 
     # 1. Input check
     logger.info(f"Creating input check for {sample.name}")
-    if cfg.run_sanity_check:
+    if preqc_cfg.run_sanity_check:
         logger.info(f"Adding input sanity check for {sample.name}")
         input_check = build_input_check(
             sample=sample,
-            out_dir=sample_qc_dir,
-            n_records=cfg.n_records,
+            outdir=outdir,
+            n_records=preqc_cfg.n_records,
         )
         qc_elements.insert(0, input_check)
+
     # 2. fastp Element
-    if cfg.run_fastp:
+    if preqc_cfg.run_fastp:
         logger.info(f"Creating fastp QC for {sample.name}")
         fastp = FastP()
-        params = parameters.get("fastp", Params()) if parameters else Params()
         fastp_elem = fastp.qc(
             sample=sample,
-            folder=sample_qc_dir,
-            params=params,
-            cfg=ExternalRunConfig(threads=cfg.threads),
+            tag=tags.get("fastp", None),
+            outdir=outdir,
+            params=parameters.get("fastp", Params()),
+            cfg=cfgs.get("fastp", ExternalRunConfig(threads=preqc_cfg.threads)),
         )
         qc_elements.insert(0, fastp_elem)
 
     # 3. FastQC on raw FASTQs
     fastqc = FastQC()
-    params = parameters.get("fastqc", Params()) if parameters else Params()
-    if cfg.run_fastqc_raw:
+    if preqc_cfg.run_fastqc_raw:
         logger.info(f"Creating FastQC for raw reads of {sample.name}")
         fastqc_raw = fastqc.qc(
             sample=sample,
-            folder=sample_qc_dir,
             label="raw",
-            params=params,
-            cfg=ExternalRunConfig(threads=cfg.threads),
+            tag=tags.get("fastqc_raw", None),
+            outdir=outdir,
+            params=parameters.get("fastqc_raw", Params()),
+            cfg=cfgs.get("fastqc_raw", ExternalRunConfig(threads=preqc_cfg.threads)),
         )
         qc_elements.insert(0, fastqc_raw)
 
     # 4. FastQC on cleaned FASTQs
-    if cfg.run_fastqc_cleaned:
+    if preqc_cfg.run_fastqc_cleaned:
         logger.info(f"Creating FastQC for cleaned reads of {sample.name}")
         fastqc_cleaned = fastqc.qc(
             sample=fastp_elem,  # Use fastp element as input (has cleaned FASTQs)
-            folder=sample_qc_dir,
             label="cleaned",
-            params=params,
-            cfg=ExternalRunConfig(threads=cfg.threads),
+            tag=tags.get("fastqc_cleaned", None),
+            outdir=outdir,
+            params=parameters.get("fastqc_cleaned", Params()),
+            cfg=cfgs.get(
+                "fastqc_cleaned", ExternalRunConfig(threads=preqc_cfg.threads)
+            ),  # noqa: E501
         )
         qc_elements.insert(0, fastqc_cleaned)
 
     # 5. QC summary Element (pres=[fastp, fastqc_raw, fastqc_cleaned])
-    if cfg.run_summary:
+    if preqc_cfg.run_summary:
         logger.info(f"Creating QC summary for {sample.name}")
-        params = parameters.get("qc_summary", Params()) if parameters else Params()
         qc_summary = build_qc_summary(
             sample=sample,
-            fastp_json=fastp_elem.json,
-            fastqc_raw_r1_zip=fastqc_raw.zip_r1,
-            fastqc_raw_r2_zip=fastqc_raw.zip_r2,
-            fastqc_cleaned_r1_zip=fastqc_cleaned.zip_r1,
-            fastqc_cleaned_r2_zip=fastqc_cleaned.zip_r2,
-            out_dir=sample_qc_dir or sample.result_dir / "qc",
-            out_json=f"{sample.name}_qc.json",
-            out_tsv=f"{sample.name}_qc.tsv",
+            elements_to_summary=[fastp_elem, fastqc_raw, fastqc_cleaned],
+            outdir=outdir,
         )
         qc_elements.insert(0, qc_summary)
 
@@ -325,30 +467,25 @@ def pre_alignment_qc(
     return tuple(qc_elements)
 
 
-@dataclass(frozen=True)
-class PostQCConfig:
-    qc_root: Path | None = None
-    run_alignment_summary: bool = True
-    run_insert_size: bool = True
-    run_hs_metrics: bool = True
-    run_mosdepth: bool = True
-    run_samtools_flagstat: bool = True
-    run_samtools_stats: bool = True
-    multiqc: bool = True
+########################################################################################
+# PostAlignment QC workflow
+########################################################################################
 
 
 def post_mapping_qc_with_multiqc(
     mapped: MappedElement,
     reference: Genome,
     *,
+    refdict_element: Element | None = None,
     targets: Element | Path | str | None = None,
     baits: Element | Path | str | None = None,
+    tags: Mapping[str, Tag | ElementTag] | None = None,
+    outdir: Path | str | None = None,
+    filename: Path | str | None = None,
     main_qc_dir: Path | str | None = None,
-    multiqc_output_dir: Path | str | None = None,
-    multiqc_report_name: str | None = "pre_alignment_multiqc.html",
     parameters: Mapping[str, Params] | None = None,
     externalruncfgs: Mapping[str, ExternalRunConfig | None] | None = None,
-    cfg: PostQCConfig | None = None,
+    postqc_cfg: PostQCConfig | None = None,
 ) -> tuple[Element, ...]:
     """Run post-mapping QC and aggregate results with MultiQC.
 
@@ -367,14 +504,14 @@ def post_mapping_qc_with_multiqc(
         Interval list for bait regions (Picard format).
     main_qc_dir : Path | str | None
         Base directory for QC outputs. If None, defaults to BAM parent / "qc".
-    multiqc_output_dir : Path | str | None
-        Output directory for MultiQC report (default: "results/qc/multiqc").
-    multiqc_report_name : str | None
+    outdir : Path | str | None
+        Output directory for MultiQC report.
+    filename : str | None
         Custom name for the MultiQC report HTML file
         (default: "pre_alignment_multiqc.html").
     parameters : Mapping[str, Params] | None
         Dictionary of parameters for QC steps and MultiQC, keyed by step name.
-    cfg : PostQCConfig | None, optional
+    postqc_cfg : PostQCConfig | None, optional
         Configuration object for post-mapping QC, by default PostQCConfig()
     multiqc_output_dir : Path | str | None
         Output directory for MultiQC report (default: "results/qc/multiqc").
@@ -419,34 +556,42 @@ def post_mapping_qc_with_multiqc(
     >>> # Generate MultiQC report
     >>> multiqc_elem.run()
     """
-    main_qc_dir = mapped.bam.parent / "qc"
-    cfg = cfg or PostQCConfig(qc_root=main_qc_dir)
+    postqc_cfg = postqc_cfg or PostQCConfig(qc_root=main_qc_dir)
+    analysis_dir = main_qc_dir or postqc_cfg.qc_root or mapped.bam.parent / "qc"
     parameters = parameters or {}
-    qc_elements = post_mapping_qc(
-        mapped=mapped,
-        reference=reference,
-        targets=targets,
-        baits=baits,
-        parameters=parameters,
-        externalruncfgs=externalruncfgs,
-        cfg=cfg,
-    )
-    # Create MultiQC aggregation element
-    multiqc = MultiQC()
+    tag = tags.pop("multiqc", None) if tags else None
     cfg = (
         externalruncfgs.get("multiqc", ExternalRunConfig())
         if externalruncfgs
         else ExternalRunConfig()
     )
-    cfg.qc_root = main_qc_dir
+    params = (
+        parameters.pop("multiqc", Params(force=True))
+        if parameters
+        else Params(force=True)
+    )
+    qc_elements = post_mapping_qc(
+        mapped=mapped,
+        reference=reference,
+        refdict_element=refdict_element,
+        targets=targets,
+        baits=baits,
+        tags=tags,
+        outdir=main_qc_dir,
+        parameters=parameters,
+        externalruncfgs=externalruncfgs,
+        postqc_cfg=postqc_cfg,
+    )
+
+    # Create MultiQC aggregation element
+    multiqc = MultiQC()
     params = parameters.get("multiqc", Params()) if parameters else Params()
-    analysis_dir = main_qc_dir
     multiqc_elem = multiqc.aggregate(
-        mapped_element_or_analysis_dir=analysis_dir,
+        analysis_dir=analysis_dir,
         qc_elements=qc_elements,
-        output_dir=multiqc_output_dir or Path("results/qc/multiqc"),
-        report_name=multiqc_report_name,
-        force=True,
+        tag=tag,
+        outdir=outdir,
+        filename=filename,
         params=params,
         cfg=cfg,
     )
@@ -456,7 +601,7 @@ def post_mapping_qc_with_multiqc(
         f"and MultiQC aggregation for {mapped.name}"
     )
 
-    return multiqc_elem, *qc_elements
+    return multiqc_elem, qc_elements
 
 
 # post alignment qc
@@ -464,12 +609,15 @@ def post_mapping_qc(
     mapped: MappedElement,
     reference: Genome,
     *,
+    refdict_element: Element | None = None,
     targets: Element | Path | str | None = None,
     baits: Element | Path | str | None = None,
+    tags: Mapping[str, Tag] | None = None,
+    outdir: Path | str | None = None,
     parameters: Mapping[str, Params] | None = None,
     externalruncfgs: Mapping[str, ExternalRunConfig | None] | None = None,
-    cfg: PostQCConfig | None = None,
-) -> tuple[Element, ...]:
+    postqc_cfg: PostQCConfig | None = None,
+) -> Mapping[str, Element]:
     """
     Run comprehensive post-mapping quality control on a mapped sample.
 
@@ -488,42 +636,49 @@ def post_mapping_qc(
     Parameters
     ----------
     mapped : MappedElement
-            MappedElement containing the BAM file and metadata.
+        MappedElement containing the BAM file and metadata.
     reference : Genome
-            Reference genome object with FASTA file path.
+        Reference genome object with FASTA file path.
     targets : Optional[Union[Element, Path, str]]
-            BED file or Element containing target regions for mosdepth.
-            Required if run_mosdepth=True or run_hs_metrics=True (and intervals not
-            provided).
+       BED file or Element containing target regions for mosdepth.
+        Required if run_mosdepth=True or run_hs_metrics=True (and intervals not
+        provided).
     baits : Optional[Union[Element, Path, str]]
-            Interval list for bait regions (Picard format).
-            Required if run_hs_metrics=True. If not provided but targets is,
-            will attempt to use targets.
-            Run Picard CollectAlignmentSummaryMetrics (default: True).
+        Interval list for bait regions (Picard format).
+        Required if run_hs_metrics=True. If not provided but targets is,
+        will attempt to use targets.
+        Run Picard CollectAlignmentSummaryMetrics (default: True).
+    tags : Optional[Mapping[str, Tag]], optional
+        Dictionary of Tag overrides for each QC step, keyed by step name.
+    outdir : Optional[Path | str], optional
+        Base directory for QC outputs. If None, defaults to BAM parent / "qc".
+    filename : Optional[Path | str], optional
+        Base filename for QC outputs. If None, defaults to using BAM stem with
+        appropriate suffixes for each QC step.
     parameters : Optional[Mapping[str, Params]]
-            Dictionary of parameter overrides for each QC step, keyed by step name.
-            For example:
-            {
-                "gatk": Params(...),
-                "mosdepth": Params(...),
-                "samtools": Params(...),
-            }
-    exterbnalruncfgs : Optional[Mapping[str, ExternalRunConfig | None]]
-            Dictionary of ExternalRunConfig overrides for each QC step, keyed by step name.
-
-    cfg : Optional[PostQCConfig], optional
+        Dictionary of parameter overrides for each QC step, keyed by step name.
+        For example:
+        {
+            "gatk": Params(...),
+            "mosdepth": Params(...),
+            "samtools": Params(...),
+        }
+    externalruncfgs : Optional[Mapping[str, ExternalRunConfig | None]]
+        Dictionary of ExternalRunConfig overrides for each QC step, keyed by step
+        name.
+    postqccfg : Optional[PostQCConfig], optional
         Configuration object for post-mapping QC, by default PostQCConfig()
 
     Returns
     -------
     tuple[Element, ...]
-            Tuple of QC Elements that were created. Each Element represents
-            a QC step and can be executed independently or as part of a DAG.
+        Tuple of QC Elements that were created. Each Element represents
+        a QC step and can be executed independently or as part of a DAG.
 
     Raises
     ------
     ValueError
-            If required parameters are missing for enabled QC steps.
+        If required parameters are missing for enabled QC steps.
 
     Examples
     --------
@@ -565,18 +720,18 @@ def post_mapping_qc(
     - mosdepth typically works with BED files, while Picard tools require
       interval_list format. Use GATK's BedToIntervalList to convert if needed.
     """
-    cfg = cfg or PostQCConfig()
+    postqc_cfg = postqc_cfg or PostQCConfig()
     parameters = parameters or {}
     external_cfgs = externalruncfgs or {}
-    output_dir = cfg.qc_root or (mapped.bam.parent / "qc")
+    tags = tags or {}
+    output_dir = outdir or postqc_cfg.qc_root or (mapped.bam.parent / "qc")
     picard_dir = output_dir / "picard"
     mosdepth_dir = output_dir / "mosdepth"
     samtools_dir = output_dir / "samtools"
-    ensure(picard_dir, mosdepth_dir, samtools_dir)
     # threads_mosdepth = cfg.threads_mosdepth or 1
     # no_per_base = cfg.no_per_base or True
 
-    qc_elements = []
+    qc_elements = {}
 
     # tools
     gatk = GATK()
@@ -584,54 +739,57 @@ def post_mapping_qc(
     st = Samtools()
 
     # Validate baits/targets for HS metrics and mosdepth
-    targets, baits = _validate_targets_baits(cfg, targets, baits)
+    targets, baits = _validate_targets_baits(postqc_cfg, targets, baits)
 
     # 1. Picard CollectAlignmentSummaryMetrics
-    if cfg.run_alignment_summary:
+    if postqc_cfg.run_alignment_summary:
         logger.info(f"Creating alignment summary metrics QC for {mapped.name}")
-        alignment_elem = gatk.alignment_summary(
+        alignment_elem = gatk.alignmetrics(
             mapped=mapped,
             reference=reference,
-            output_metrics=(
-                picard_dir / f"{mapped.bam.stem}_alignment_summary.txt"
-            ).absolute(),
-            params=parameters.get("alignment_summary", Params()),
-            cfg=external_cfgs.get("alignment_summary"),
+            tag=tags.get("alignmetrics", None),
+            outdir=picard_dir,
+            params=parameters.get("alignmetrics", Params()),
+            cfg=external_cfgs.get("alignmetrics", ExternalRunConfig()),
         )
-        qc_elements.insert(0, alignment_elem)
+        qc_elements["alignmetrics"] = alignment_elem
 
     # 2. Picard CollectInsertSizeMetrics
-    if cfg.run_insert_size:
+    if postqc_cfg.run_insert_size:
         logger.info(f"Creating insert size metrics QC for {mapped.name}")
-        insert_elem = gatk.insertsize(
+        insert_elem = gatk.insertmetrics(
             mapped=mapped,
-            output_metrics=(
-                picard_dir / f"{mapped.bam.stem}_insert_size.txt"
-            ).absolute(),
-            output_histogram=(picard_dir / f"{mapped.bam.stem}_insert_size.pdf"),
-            params=parameters.get("insertsize", Params()),
-            cfg=external_cfgs.get("insertsize", ExternalRunConfig()),
+            tag=tags.get("insertmetrics", None),
+            outdir=picard_dir,
+            params=parameters.get("insertmetrics", Params()),
+            cfg=external_cfgs.get("insertmetrics", ExternalRunConfig()),
         )
-        qc_elements.insert(0, insert_elem)
+        qc_elements["insertmetrics"] = insert_elem
 
     # 3. Picard CollectHsMetrics
-    if cfg.run_hs_metrics:
-        sequence_dict = gatk.sequence_dict(
-            reference=reference,
-            output_dict=f"cache/picard/{reference.name}.dict",
-        )
+    if postqc_cfg.run_hs_metrics:
+        # create a sequence dict ... once!
+        if refdict_element is None:
+            raise ValueError(
+                "run_hs_metrics=True requires a sequence dictionary for the reference. "
+                "Please provide refdict_element or create one using GATK's CreateSequenceDictionary."
+            )
+        # create intervals from bed
         targets_intervals = gatk.bed2interval(
-            element=targets,
-            sequence_dict=sequence_dict,
-            params=parameters.get("bed2interval", Params()),
-            cfg=external_cfgs.get("bed2interval", ExternalRunConfig()),
+            bed_element=targets,
+            sequence_dict=refdict_element,
+            tag=tags.get("targets2interval", None),
+            params=parameters.get("targets2interval", Params()),
+            cfg=external_cfgs.get("targets2interval", ExternalRunConfig()),
         )
         if baits is not None:
+            # create another interval list for baits (Picard format)
             bait_intervals = gatk.bed2interval(
-                element=baits,
-                sequence_dict=sequence_dict,
-                params=parameters.get("bed2interval", Params()),
-                cfg=external_cfgs.get("bed2interval", ExternalRunConfig()),
+                bed_element=baits,
+                sequence_dict=refdict_element,
+                tag=tags.get("targets2interval", None),
+                params=parameters.get("targets2interval", Params()),
+                cfg=external_cfgs.get("targets2interval", ExternalRunConfig()),
             )
         else:
             bait_intervals = None
@@ -641,71 +799,53 @@ def post_mapping_qc(
             reference=reference,
             baits=bait_intervals,
             targets=targets_intervals,
-            output_metrics=(
-                picard_dir / f"{mapped.bam.stem}_hs_metrics.txt"
-            ).absolute(),  # Use default path
-            params=parameters.get("hs_metrics", Params()),
-            cfg=external_cfgs.get("hs_metrics", ExternalRunConfig()),
+            tag=tags.get("hs", None),
+            outdir=picard_dir,
+            params=parameters.get("hs", Params()),
+            cfg=external_cfgs.get("hs", ExternalRunConfig()),
         )
-        qc_elements.insert(0, hs_elem)
+        qc_elements["hs"] = hs_elem
+
     # 4. mosdepth coverage
-    if cfg.run_mosdepth:
+    if postqc_cfg.run_mosdepth:
         logger.info(f"Creating mosdepth coverage QC for {mapped.name}")
+        params = parameters.get("mosdepth", Params(threads=47, no_per_base=True))
+        if targets and not "by" in params:
+            params = params.override(by=targets.bed)
         depth_elem = mosdepth.coverage(
             mapped=mapped,
             targets=targets,
-            output_file_prefix=mosdepth_dir
-            / f"{mapped.bam.stem}.targets",  # Use default path
-            params=parameters.get("mosdepth", Params(threads=47, no_per_base=True)),
+            tag=tags.get("mosdepth", None),
+            outdir=mosdepth_dir,  # Use default path
+            params=parameters.get("mosdepth", params),
             cfg=external_cfgs.get("mosdepth", ExternalRunConfig()),
         )
-        qc_elements.insert(0, depth_elem)
+        print(depth_elem.run.command_display)
+        qc_elements["mosdepth"] = depth_elem
 
     # 5. samtools flagstat
-    if cfg.run_samtools_flagstat:
+    if postqc_cfg.run_samtools_flagstat:
         logger.info(f"Creating samtools flagstat QC for {mapped.name}")
         flagstat_elem = st.flagstat(
             mapped=mapped,
-            output_file=(
-                samtools_dir / f"{mapped.bam.stem}_flagstat.txt"
-            ).absolute(),  # Use default path
-            params=parameters.get("samtools_flagstat", Params()),
-            cfg=external_cfgs.get("samtools_flagstat", ExternalRunConfig()),
+            tag=tags.get("flagstat", None),
+            outdir=samtools_dir,  # Use default path
+            params=parameters.get("flagstat", Params()),
+            cfg=external_cfgs.get("flagstat", ExternalRunConfig()),
         )
-        qc_elements.insert(0, flagstat_elem)
+        qc_elements["flagstat"] = flagstat_elem
 
     # 6. samtools stats
-    if cfg.run_samtools_stats:
+    if postqc_cfg.run_samtools_stats:
         logger.info(f"Creating samtools stats QC for {mapped.name}")
         stats_elem = st.stats(
             mapped=mapped,
-            output_file=(
-                samtools_dir / f"{mapped.bam.stem}_stats.txt"
-            ).absolute(),  # Use default path
-            params=parameters.get("samtools_stats", Params()),
-            cfg=external_cfgs.get("samtools_stats", ExternalRunConfig()),
+            outdir=samtools_dir,
+            tag=tags.get("stats", None),
+            params=parameters.get("stats", Params()),
+            cfg=external_cfgs.get("stats", ExternalRunConfig()),
         )
-        qc_elements.insert(0, stats_elem)
+        qc_elements["stats"] = stats_elem
 
     logger.info(f"Created {len(qc_elements)} QC elements for {mapped.name}")
     return qc_elements
-
-
-def _validate_targets_baits(cfg, targets, baits):
-    if cfg.run_hs_metrics:
-        if targets is None:
-            raise ValueError(
-                "run_hs_metrics=True requires either "
-                "(bait_intervals and target_intervals) or targets to be provided"
-            )
-        if baits is None:
-            logger.warning(
-                "bait_intervals and/or target_intervals not provided, "
-                "using targets for both. This may not be ideal for HS metrics."
-            )
-            baits = targets
-
-    if cfg.run_mosdepth and targets is None:
-        raise ValueError("run_mosdepth=True requires targets to be provided")
-
-    return targets, baits

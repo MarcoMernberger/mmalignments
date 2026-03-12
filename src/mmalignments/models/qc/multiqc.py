@@ -5,11 +5,20 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
+from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
+from mmalignments.models.elements import Element, element
 from mmalignments.models.externals import External, ExternalRunConfig, subroutine
 from mmalignments.models.parameters import Params, ParamSet
-from mmalignments.models.tasks import Element, element
+from mmalignments.models.tags import (
+    ElementTag,
+    PartialElementTag,
+    Method,
+    Stage,
+    State,
+    from_prior,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +73,7 @@ class MultiQC(External):
         primary_binary: str = "multiqc",
         version: str | None = None,
         source: str = "https://multiqc.info/",
-        parameters: Mapping[str, ParamSet] | ParamSet | None = None,
+        parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None = None,
     ) -> None:
         """Initialize MultiQC wrapper.
 
@@ -74,7 +83,7 @@ class MultiQC(External):
             Tool name (default: "multiqc").
         primary_binary : str
             Path to MultiQC executable (default: "multiqc").
-        version : Optional[str]
+        version : str | None
             Version string override.
         source : str
             URL/source for the tool.
@@ -139,6 +148,10 @@ class MultiQC(External):
 
         return fallback
 
+    ####################################################################################
+    # Elements and Subroutines
+    ####################################################################################
+
     @subroutine
     def run_multiqc(
         self,
@@ -146,10 +159,9 @@ class MultiQC(External):
         output_dir: Path | str,
         *,
         report_name: str = "multiqc_report.html",
-        force: bool = True,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], None]:
+    ) -> Callable[[], CompletedProcess]:
         """Run MultiQC to aggregate QC reports (low-level).
 
         Creates a zero-argument callable that runs MultiQC on a directory
@@ -164,8 +176,6 @@ class MultiQC(External):
                 Output directory for MultiQC report.
         report_name : str
                 Name for the report HTML file (default: "multiqc_report.html").
-        force : bool
-                If True, overwrite existing reports (default: True).
         params : Params | None
                 Additional MultiQC parameters (e.g., {"--module": "fastqc"}).
         cfg : ExternalRunConfig | None
@@ -174,16 +184,18 @@ class MultiQC(External):
 
         Returns
         -------
-        Callable[[], None]
-                Zero-argument callable that executes MultiQC.
+        Callable[[], CompletedProcess]
+            Zero-argument callable that executes MultiQC.
 
         Examples
         --------
         >>> multiqc = MultiQC()
+        >>> from mmalignments.models.externals import ExternalRunConfig
         >>> runner = multiqc.run_multiqc(
         ...     analysis_dir="results/qc",
         ...     output_dir="results/qc/multiqc",
-        ...     report_name="project_qc.html"
+        ...     report_name="project_qc.html",
+        ...     cfg=ExternalRunConfig(threads=2),
         ... )
         >>> runner()
         """
@@ -198,10 +210,6 @@ class MultiQC(External):
             report_name,  # set report title to match report name
         ]
 
-        # Add force flag if requested
-        # if force:
-        #     arguments.append("--force")
-
         # Add analysis directory
         arguments.append(str(analysis_dir))
         return arguments, [output_dir], None, None, None
@@ -209,13 +217,12 @@ class MultiQC(External):
     @element
     def aggregate(
         self,
-        mapped_element_or_analysis_dir: Element | Path | str,
-        qc_elements: list[Element],
+        analysis_dir: Path | str,
+        qc_elements: Mapping[str, Element],
         *,
-        output_dir: Path | str | None = None,
-        report_name: str = "pre_alignment_multiqc.html",
-        force: bool = True,
-        pres: list[Element] | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Element:
@@ -226,24 +233,27 @@ class MultiQC(External):
 
         Parameters
         ----------
-        mapped_element_or_analysis_dir : Element | Path | str
-            An Element that produces the mapped BAM file. This is used to infer the
-            default QC root directory if not provided in cfg or as an argument.
-            Alternatively, a Path or string can be provided directly as analysis_dir,
-            directory to search for QC reports. MultiQC will recursively search this
+        analysis_dir : Path | str
+            Directory to search for QC reports. MultiQC will recursively search this
             directory.
         qc_elements : list[Element]
             List of QC Elements whose outputs should be aggregated.
             Their input files are extracted for signature tracking.
-        output_dir : Path | str | None
-            Output directory for MultiQC report. If not provided, defaults
-            to "{qc_root}/multiqc/".
+                tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default
+            naming. If not provided, a default tag will be generated based on
+            the input Element's name.
+        tag : Tag | ElementTag | None
+            Partial or full Element tag for the output Element, used for default
+            naming. If not provided, a default tag will be generated based on
+            the input Element's name and level.
+        outdir : Path | str | None
+            Directory for the sorted BAM file. If not provided, defaults to
+            the same directory as the input BAM file.
+        filename : Path | str | None
+            Filename override. If not provided, defaults to ``tag.default_output``.
         report_name : str
             Name for the report HTML file (default: "pre_alignment_multiqc.html").
-        force : bool
-            If True, overwrite existing reports (default: True).
-        pres : list[Element] | None
-            Additional prerequisite Elements (default: None, uses qc_elements).
         params : Params | None
             Additional MultiQC parameters.
         cfg : ExternalRunConfig | None
@@ -260,62 +270,70 @@ class MultiQC(External):
         Examples
         --------
         >>> multiqc = MultiQC()
+        >>> from mmalignments.models.externals import ExternalRunConfig
         >>> qc_elems = [fastp_elem, fastqc_raw_elem, fastqc_cleaned_elem]
         >>> report_elem = multiqc.aggregate(
-        ...     qc_root="results/qc",
+        ...     analysis_dir="results/qc",
         ...     qc_elements=qc_elems,
-        ...     output_dir="results/qc/multiqc",
-        ...     report_name="sample_qc.html"
+        ...     outdir="results/qc/multiqc",
+        ...     filename="sample_qc.html",
+        ...     cfg=ExternalRunConfig(threads=2),
         ... )
         >>> report_elem.run()
         """
-        params = params or Params(force=force)
-        qc_root = cfg.qc_root if cfg and hasattr(cfg, "qc_root") else None
-        if isinstance(mapped_element_or_analysis_dir, str | Path):
-            analysis_dir = Path(mapped_element_or_analysis_dir).absolute()
-        else:
-            analysis_dir = analysis_dir or qc_root
-        if analysis_dir is None:
+        params = params or Params(force=True)  # If True, overwrite existing reports
+        prior = next(iter(qc_elements.values())).tag
+        tag = from_prior(
+            prior,
+            tag,
+            level=(
+                max([el.tag.level for el in qc_elements.values()]) + 1
+                if qc_elements
+                else 1
+            ),
+            stage=Stage.QC,
+            method=Method.MULTIQC,
+            state=State.REPORT,
+            ext="html",
+        ).merge(tag)
+
+        if not analysis_dir:
             raise ValueError(
-                "Analysis directory must be provided either through "
-                "mapped_element_or_analysis_dir or cfg.qc_root"
+                "Analysis directory with qc reports must be provided to search."
             )
-        # Default output directory
-        if output_dir is None:
-            output_dir = cfg.qc_root / "multiqc"
-        output_dir = Path(output_dir).absolute()
+        outdir = outdir or (
+            cfg.qc_root
+            if cfg and hasattr(cfg, "qc_root")
+            else Path(analysis_dir) / "multiqc_report"
+        )
+        filename = filename or tag.default_output
         # Collect input files from QC elements
         input_files = []
-        for elem in qc_elements:
+        for elem in qc_elements.values():
             input_files.extend(elem.output_files)
 
         # Build runner
         runner = self.run_multiqc(
             analysis_dir=analysis_dir,
-            output_dir=output_dir,
-            report_name=report_name,
-            force=force,
+            output_dir=outdir,
+            report_name=filename,
             params=params,
             cfg=cfg,
         )
 
+        report_file = outdir / filename
         # MultiQC output files
         artifacts = {
-            "multiqc_html": output_dir / report_name,
-            "multiqc_data_dir": output_dir / "multiqc_data",
+            "multiqc_html": report_file,
+            "multiqc_data_dir": Path(str(report_file.stem) + "_data"),
         }
-
-        # Use provided pres or default to qc_elements
-        if pres is None:
-            pres = qc_elements
-
         determinants = self.signature_determinants(params)
         return Element(
-            name=f"{self.name}_aggregate",
-            key=f"{self.name}_aggregate_{len(qc_elements)}_elements",
+            key=f"{tag.default_name}_aggregate_{len(qc_elements)}_elements",
+            tag=tag,
             run=runner,
             determinants=determinants,
             inputs=input_files,
             artifacts=artifacts,
-            pres=pres,
+            pres=tuple(qc_elements.values()),
         )

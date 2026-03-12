@@ -9,18 +9,38 @@ from __future__ import annotations
 import json
 import logging
 import zipfile
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
 from inspect import signature
-from mmalignments.models.data import Sample
-from mmalignments.models.tasks import Element
-from mmalignments.services.io import ensure
+from pathlib import Path
+from typing import Any, TextIO
+
+from mmalignments.models.data import Pairing
+from mmalignments.models.elements import Element, NextGenSampleElement
+from mmalignments.models.tags import (
+    ElementTag,
+    Method,
+    PartialElementTag,
+    Stage,
+    State,
+    merge_tag,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def parse_fastq_record(fh):
-    """Parse one FASTQ record (4 lines)."""
+def parse_fastq_record(fh: TextIO) -> tuple[str, str, str, str] | None:
+    """Parse one FASTQ record (4 lines).
+
+    Parameters
+    ----------
+    fh : TextIO
+        Open file-handle positioned at the start of a FASTQ record.
+
+    Returns
+    -------
+    tuple[str, str, str, str] | None
+        A tuple of `(header, seq, plus, qual)` for the record, or ``None``
+        when end-of-file is reached.
+    """
     header = fh.readline().strip()
     if not header:
         return None
@@ -30,31 +50,24 @@ def parse_fastq_record(fh):
     return (header, seq, plus, qual)
 
 
-def parse_fastp_json(json_path: Union[Path, str]) -> Dict[str, Any]:
+def parse_fastp_json(json_path: Path | str) -> dict[str, Any]:
     """Parse fastp JSON output and extract key QC metrics.
 
     Parameters
     ----------
-    json_path : Union[Path, str]
-            Path to fastp JSON output file.
+    json_path : Path | str
+        Path to the fastp JSON output file.
 
     Returns
     -------
-    Dict[str, Any]
-            Dictionary containing extracted metrics:
-            - total_reads_before: Total reads before filtering
-            - total_reads_after: Total reads after filtering
-            - total_bases_before: Total bases before filtering
-            - total_bases_after: Total bases after filtering
-            - q20_rate_before: Q20 rate before filtering
-            - q20_rate_after: Q20 rate after filtering
-            - q30_rate_before: Q30 rate before filtering
-            - q30_rate_after: Q30 rate after filtering
-            - gc_content_before: GC content before filtering
-            - gc_content_after: GC content after filtering
-            - duplication_rate: Duplication rate
-            - adapter_trimmed_reads: Number of reads with adapters trimmed
-            - adapter_trimmed_bases: Number of bases trimmed from adapters
+    dict[str, Any]
+        Dictionary containing extracted metrics, e.g.:
+        - total_reads_before, total_reads_after
+        - total_bases_before, total_bases_after
+        - q20_rate_before/after, q30_rate_before/after
+        - gc_content_before/after
+        - duplication_rate
+        - adapter_trimmed_reads, adapter_trimmed_bases
 
     Examples
     --------
@@ -118,31 +131,21 @@ def parse_fastp_json(json_path: Union[Path, str]) -> Dict[str, Any]:
         return {}
 
 
-def parse_fastqc_zip(zip_path: Union[Path, str]) -> Dict[str, Any]:
+def parse_fastqc_zip(zip_path: Path | str) -> dict[str, Any]:
     """Parse FastQC ZIP output and extract key QC metrics from summary.txt.
 
     Parameters
     ----------
-    zip_path : Union[Path, str]
-            Path to FastQC ZIP file (e.g., sample_fastqc.zip).
+    zip_path : Path | str
+        Path to the FastQC ZIP file (e.g., sample_fastqc.zip).
 
     Returns
     -------
-    Dict[str, Any]
-            Dictionary containing extracted metrics:
-            - basic_statistics: PASS/WARN/FAIL status
-            - per_base_sequence_quality: PASS/WARN/FAIL status
-            - per_sequence_quality_scores: PASS/WARN/FAIL status
-            - per_base_sequence_content: PASS/WARN/FAIL status
-            - per_sequence_gc_content: PASS/WARN/FAIL status
-            - per_base_n_content: PASS/WARN/FAIL status
-            - sequence_length_distribution: PASS/WARN/FAIL status
-            - sequence_duplication_levels: PASS/WARN/FAIL status
-            - overrepresented_sequences: PASS/WARN/FAIL status
-            - adapter_content: PASS/WARN/FAIL status
-            - total_sequences: Total number of sequences
-            - sequence_length: Sequence length range
-            - gc_content: %GC content
+    dict[str, Any]
+        Dictionary containing extracted metrics, for example module PASS/WARN/FAIL
+        statuses from ``summary.txt`` and basic statistics such as
+        ``total_sequences``, ``sequence_length`` and ``gc_content`` from
+        ``fastqc_data.txt`` when available.
 
     Examples
     --------
@@ -227,16 +230,56 @@ def parse_fastqc_zip(zip_path: Union[Path, str]) -> Dict[str, Any]:
         return {}
 
 
+def write_build_qc_tsv(
+    out_tsv: Path | str, sample: NextGenSampleElement, summary: dict[str, Any]
+) -> Path:
+    """Write a flattened TSV summary from the QC summary dict.
+
+    Parameters
+    ----------
+    out_tsv : Path | str
+        Path to the output TSV file to write.
+    sample : NextGenSampleElement
+        Sample element providing sample metadata (name, pairing, ...).
+    summary : dict[str, Any]
+        QC summary dictionary as produced by :func:`build_qc_summary`.
+
+    Returns
+    -------
+    Path
+        The path to the written TSV file.
+    """
+    out_tsv = Path(out_tsv)
+    with open(out_tsv, "w") as f:
+        f.write("sample\tmetric\tvalue\n")
+        f.write(f"{sample.name}\tsample_name\t{sample.name}\n")
+        f.write(f"{sample.name}\tpairing\t{sample.pairing}\n")
+
+        # Write fastp metrics
+        if "fastp" in summary:
+            for key, value in summary["fastp"].items():
+                f.write(f"{sample.name}\tfastp_{key}\t{value}\n")
+
+        # Write FastQC metrics
+        for qc_type in [
+            "fastqc_raw_r1",
+            "fastqc_raw_r2",
+            "fastqc_cleaned_r1",
+            "fastqc_cleaned_r2",
+        ]:
+            if qc_type in summary:
+                for key, value in summary[qc_type].items():
+                    f.write(f"{sample.name}\t{qc_type}_{key}\t{value}\n")
+    return out_tsv
+
+
 def build_qc_summary(
-    sample: Sample,
-    fastp_json: Optional[Union[Path, str]],
-    fastqc_raw_r1_zip: Optional[Union[Path, str]],
-    fastqc_raw_r2_zip: Optional[Union[Path, str]],
-    fastqc_cleaned_r1_zip: Optional[Union[Path, str]],
-    fastqc_cleaned_r2_zip: Optional[Union[Path, str]],
-    out_dir: Union[Path, str],
-    out_json: str,
-    out_tsv: str,
+    sample: NextGenSampleElement,
+    elements_to_summary: tuple[Element, ...],
+    *,
+    tag: PartialElementTag | ElementTag | None = None,
+    outdir: Path | str | None,
+    filename: str | None = None,
 ) -> Element:
     """Build QC summary from fastp and FastQC outputs (pure Python Element).
 
@@ -245,31 +288,26 @@ def build_qc_summary(
 
     Parameters
     ----------
-    sample : Sample
-            Sample object containing metadata.
-    fastp_json : Optional[Union[Path, str]]
-            Path to fastp JSON output.
-    fastqc_raw_r1_zip : Optional[Union[Path, str]]
-            Path to FastQC ZIP for raw R1.
-    fastqc_raw_r2_zip : Optional[Union[Path, str]]
-            Path to FastQC ZIP for raw R2 (if paired-end).
-    fastqc_cleaned_r1_zip : Optional[Union[Path, str]]
-            Path to FastQC ZIP for cleaned R1.
-    fastqc_cleaned_r2_zip : Optional[Union[Path, str]]
-            Path to FastQC ZIP for cleaned R2 (if paired-end).
-    out_dir : Union[Path, str]
-            Output directory for summary files.
-    out_json : Union[Path, str]
-            Output JSON summary file path.
-    out_tsv : Union[Path, str]
-            Output TSV summary file path.
+    sample : NextGenSampleElement
+        NextGenSampleElement object representing a sample and containing metadata.
+    elements_to_summary : tuple[Element, ...]
+        Tuple of QC Elements whose outputs should be included in the QC summary.
+    tag : Tag | ElementTag | None
+        Partial or full Element tag for the output Element, used for default
+        naming. If not provided, a default tag will be generated based on
+        the input Element's name and level.
+    outdir : Path | str | None
+        Directory for the sorted BAM file. If not provided, defaults to
+        the same directory as the input BAM file.
+    filename : Path | str | None
+        Filename override. If not provided, defaults to ``tag.default_output``.
 
     Returns
     -------
     Element
-            An Element that generates QC summary when run. Artifacts include:
-            - qc_summary_json: JSON summary file
-            - qc_summary_tsv: TSV summary file
+        An Element that generates QC summary when run. Artifacts include:
+        - qc_summary_json: JSON summary file
+        - qc_summary_tsv: TSV summary file
 
     Examples
     --------
@@ -285,83 +323,67 @@ def build_qc_summary(
     ... )
     >>> summary_elem.run()
     """
-    ensure(out_dir)
-    out_json = (Path(out_dir) / out_json).absolute()
-    out_tsv = (Path(out_dir) / out_tsv).absolute()
-
-    # Collect input files
+    default_tag = ElementTag(
+        root=sample.tag.root,
+        level=max([el.tag.level for el in elements_to_summary]) + 1,
+        stage=Stage.QC,
+        method=Method.MULTIQC,
+        state=State.REPORT,
+        omics=sample.tag.omics,
+        ext="json",
+    )
+    tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+    outdir = Path(outdir) or sample.result_dir / "qc"
+    out_json = outdir / (filename or (tag.default_name + ".json"))
+    out_tsv = out_json.with_suffix(".tsv")
     input_files = []
-    if fastp_json:
-        input_files.append(Path(fastp_json))
-    if fastqc_raw_r1_zip:
-        input_files.append(Path(fastqc_raw_r1_zip))
-    if fastqc_raw_r2_zip:
-        input_files.append(Path(fastqc_raw_r2_zip))
-    if fastqc_cleaned_r1_zip:
-        input_files.append(Path(fastqc_cleaned_r1_zip))
-    if fastqc_cleaned_r2_zip:
-        input_files.append(Path(fastqc_cleaned_r2_zip))
+    for qc_element in elements_to_summary:
+        input_files.extend(qc_element.output_files)
 
     def _build_summary() -> None:
         """Generate QC summary files."""
         summary = {
             "sample_name": sample.name,
-            "pairing": sample.pairing,
+            "pairing": sample.pairing.value,
         }
+        for qc_element in elements_to_summary:
+            # parse FastP json
+            method = qc_element.tag.method
+            if method == Method.FASTP:
+                fastp_metrics = parse_fastp_json(qc_element.json)
+                summary["fastp"] = fastp_metrics
 
-        # Parse fastp JSON
-        if fastp_json:
-            fastp_metrics = parse_fastp_json(fastp_json)
-            summary["fastp"] = fastp_metrics
-
-        # Parse FastQC ZIPs
-        if fastqc_raw_r1_zip:
-            summary["fastqc_raw_r1"] = parse_fastqc_zip(fastqc_raw_r1_zip)
-        if fastqc_raw_r2_zip:
-            summary["fastqc_raw_r2"] = parse_fastqc_zip(fastqc_raw_r2_zip)
-        if fastqc_cleaned_r1_zip:
-            summary["fastqc_cleaned_r1"] = parse_fastqc_zip(fastqc_cleaned_r1_zip)
-        if fastqc_cleaned_r2_zip:
-            summary["fastqc_cleaned_r2"] = parse_fastqc_zip(fastqc_cleaned_r2_zip)
-
+            elif method == Method.FASTQC:
+                # # Parse FastQC ZIPs
+                label = qc_element.tag.param
+                summary[f"fastqc_{label}_r1"] = parse_fastqc_zip(
+                    qc_element.artifacts["zip_r1"]
+                )
+                if sample.pairing == Pairing.PAIRED:
+                    summary[f"fastqc_{label}_r2"] = parse_fastqc_zip(
+                        qc_element.artifacts["zip_r2"]
+                    )
+            else:
+                raise NotImplementedError(f"Unsupported QC method: {method}")
         # Write JSON summary
         with open(out_json, "w") as f:
             json.dump(summary, f, indent=2)
 
         # Write TSV summary (flattened)
-        with open(out_tsv, "w") as f:
-            f.write("sample\tmetric\tvalue\n")
-            f.write(f"{sample.name}\tsample_name\t{sample.name}\n")
-            f.write(f"{sample.name}\tpairing\t{sample.pairing}\n")
-
-            # Write fastp metrics
-            if "fastp" in summary:
-                for key, value in summary["fastp"].items():
-                    f.write(f"{sample.name}\tfastp_{key}\t{value}\n")
-
-            # Write FastQC metrics
-            for qc_type in [
-                "fastqc_raw_r1",
-                "fastqc_raw_r2",
-                "fastqc_cleaned_r1",
-                "fastqc_cleaned_r2",
-            ]:
-                if qc_type in summary:
-                    for key, value in summary[qc_type].items():
-                        f.write(f"{sample.name}\t{qc_type}_{key}\t{value}\n")
-
+        write_build_qc_tsv(out_tsv, sample, summary)
         logger.info(f"QC summary written to {out_json} and {out_tsv}")
 
     _build_summary.command = [str(signature(_build_summary))]  # type: ignore[attr-defined]
     _build_summary.command_display = f"Build QC summary for {sample.name}"
+    key = f"{tag.default_name}_qc_summary"
     return Element(
-        name=f"{sample.name}.QC(summary)",
-        key=f"{sample.name}_qc_summary",
+        key=key,
         run=_build_summary,
+        tag=tag,
         inputs=input_files,
         artifacts={
             "qc_summary_json": out_json,
             "qc_summary_tsv": out_tsv,
         },
-        pres=[],
+        pres=elements_to_summary,
     )

@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from logging import Logger
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def ensure(*files: Path | str) -> bool:
@@ -106,39 +106,6 @@ def write_fastq_check_results(
                 f.write(f"  - {warn}\n")
 
 
-def initlog() -> Logger:
-    timestamp = get_timestamp()
-    return setup_run_logger(timestamp)
-
-
-def get_timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def setup_run_logger(timestamp: str) -> Logger:
-    log_dir = Path("logs")
-    ensure(log_dir)
-
-    run_log = log_dir / f"run_{timestamp}.log"
-
-    logger = logging.getLogger("pipeline.run")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False  # do not propagate to root logger
-
-    if not any(
-        isinstance(h, logging.FileHandler) and h.baseFilename == str(run_log)
-        for h in logger.handlers
-    ):
-        fh = logging.FileHandler(run_log)
-        fh.setLevel(logging.INFO)
-        fh.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
-        logger.addHandler(fh)
-
-    return logger
-
-
 def from_json(infile: Path, encoding="utf-8") -> dict[str, str | int | float]:
     if not infile.exists():
         raise FileNotFoundError(f"JSON file not found: {infile}")
@@ -170,7 +137,7 @@ def open_target(target, *, append: bool):
     return target
 
 
-def absolutize(*paths: Path | str) -> tuple[Path]:
+def absolutize(*paths: Path | str) -> tuple[Path, ...]:
     """Convert one or more paths to absolute Path objects.
 
     Parameters
@@ -186,7 +153,16 @@ def absolutize(*paths: Path | str) -> tuple[Path]:
     return tuple(Path(p).absolute() for p in paths)
 
 
-def exists(path: Path | str) -> bool:
+def paths_exists(*paths: Path | str) -> Callable[[], bool]:
+    """Check if all given paths exist."""
+
+    def check():
+        return all(Path(p).exists() for p in paths)
+
+    return check
+
+
+def exists(path: Path | str) -> Callable[[], bool]:
     """Check if a file or directory exists at the given path."""
 
     def check():
