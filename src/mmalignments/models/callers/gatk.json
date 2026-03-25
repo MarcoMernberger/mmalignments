@@ -612,7 +612,7 @@
     "_thread_spec": {
       "flag": "native_pair_hmm_threads",
       "max_threads": null,
-      "fraction": 1.0,
+      "fraction": 1,
       "multi": true,
       "required": false,
       "affects_output": false,

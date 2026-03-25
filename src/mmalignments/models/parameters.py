@@ -54,6 +54,12 @@ class Params:
     def __str__(self) -> str:
         return self.__repr__()
 
+    def __getattr__(self, key: str) -> Any:
+        try:
+            return self._override_params[key]
+        except KeyError:
+            raise AttributeError(f"Params has no attribute '{key}'")
+
 
 ###############################################################################
 # Rendering

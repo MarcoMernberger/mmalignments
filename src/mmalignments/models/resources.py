@@ -14,7 +14,7 @@ def _detect_cpus() -> int:
             except ValueError:
                 pass
     cpus = os.cpu_count() or 1
-    return max(1, cpus // 2)
+    return max(1, int(cpus * 0.75))
 
 
 # ContextVar: wird vom Executor gesetzt, von External gelesen

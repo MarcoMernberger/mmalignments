@@ -10,19 +10,19 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from mmalignments.models.callers import GATK
 from mmalignments.models.data import HardFilterThresholds
-from mmalignments.models.elements import Element, VcfElement, element
+from mmalignments.models.elements import Element, VcfElement, element, generate_element_key_name
 from mmalignments.models.tags import (
     ElementTag,
-    PartialElementTag,
     Method,
+    PartialElementTag,
     Stage,
     State,
-    merge_tag,
+    from_prior,
 )
-from mmalignments.models.tags import ElementTag, from_prior
 from mmalignments.services.io import ensure, from_json
-from mmalignments.models.callers import GATK
+
 from ..externals import External, ExternalRunConfig, subroutine
 from ..parameters import Params, ParamSet
 
@@ -155,7 +155,7 @@ class BCFtools(External):
     @element
     def view(
         self,
-        called: VcfElement | Path | str,
+        called: VcfElement,
         *,
         targets: Element | Path | str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
@@ -172,9 +172,8 @@ class BCFtools(External):
 
         Parameters
         ----------
-        called : VcfElement | Path | str
-            Input VCF element (uses ``element.artifacts["vcf"]``) or a plain
-            path to a VCF file.
+        called : VcfElement
+            Input VCF element (uses ``element.artifacts["vcf"]``).
         targets : Element | Path | str | None
             BED file element for target-region restriction.
         tag : Tag | ElementTag | None
@@ -217,8 +216,10 @@ class BCFtools(External):
         out_vcf = Path(outdir or vcf.parent) / (filename or tag.default_output)
 
         targets_bed = targets.bed if isinstance(targets, Element) else targets
-        samples = samples or [called.name]
-
+        samples = samples or [called.tag.root]
+        if not samples:
+            raise ValueError("No samples specified for bcftools view.")
+        
         runner = self.view_vcf(
             input_vcf=vcf,
             output_vcf=out_vcf,
@@ -230,14 +231,14 @@ class BCFtools(External):
             params=params,
             cfg=cfg,
         )
-        tag_str = "view"
-        tag_str += "_pass" if pass_only else ""
-        tag_str += "_biallelic" if biallelic else ""
-
-        key = f"{tag.default_name}_bcfview_{called.key}_{tag_str}_{self.version_name}"
-        pres = [called, targets] if isinstance(targets, Element) else [called]
-        if targets_bed:
-            key += f"_targets_{Path(targets_bed).stem}"
+        tag_str = None
+        if pass_only or biallelic:
+            tag_str = "pass" if pass_only else ""
+            tag_str += "_biallelic" if biallelic else ""
+        
+        suffix = f"{Path(targets_bed).stem}" if targets_bed else None
+        key, name = generate_element_key_name(tag, self.version_name, "view", suffix=suffix, params=tag_str)
+        pres = (called, targets) if isinstance(targets, Element) else (called,)
         determinants = self.signature_determinants(params)
         return VcfElement(
             key=key,
@@ -247,6 +248,7 @@ class BCFtools(External):
             inputs=[vcf],
             artifacts={"vcf": out_vcf},
             pres=pres,
+            name=name
         )
 
     @subroutine
@@ -389,12 +391,9 @@ class BCFtools(External):
             params=params,
             cfg=cfg,
         )
-        key = f"{tag.default_name}_filtered_{self.version_name}"
-        if include_expr is not None:
-            key += f"_incl-{include_expr}"
-        elif exclude_expr is not None:
-            key += f"_excl-{exclude_expr}"
-        pres = [called]
+
+        key, name = generate_element_key_name(tag, self.version_name, "filter", include_expr=include_expr, exclude_expr=exclude_expr)
+        pres = (called,)
         determinants = self.signature_determinants(params)
 
         return VcfElement(
@@ -957,7 +956,7 @@ class BCFtools(External):
         vcf = called.vcf
         thresholds = thresholds or HardFilterThresholds()
         outdir = Path(outdir or vcf.parent)
-        samples = samples or [called.name]
+        samples = samples or [called.tag.root]
         view = self.view(
             called,
             targets=targets,
@@ -971,9 +970,10 @@ class BCFtools(External):
             cfg=cfg_view,
         )
 
+        include_expr = "&&".join([thresholds.as_expression(s) for s in samples]) if len(samples) > 1 else thresholds.as_expression()
         filtered = self.filter(
             view,
-            include_expr=thresholds.as_expression(),
+            include_expr=include_expr,
             tag=tag,
             outdir=outdir,
             filename=filename,

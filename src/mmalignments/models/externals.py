@@ -8,9 +8,9 @@ source (e.g. an url, github or anything), a primary binary, a dictionary of
 parameters as a property, and a method to build the command for execution.
 
 Some tools will need to call other tools in a sequential manner.
-if so, the run method allows for specifying a callback function that will be called
-before and/or after the execution of the main command. This allows for chaining
-multiple tools together in a flexible way.
+if so, the run method allows for specifying a callback function that will be
+called before and/or after the execution of the main command. This allows for
+chaining multiple tools together in a flexible way.
 
 Mostly that involves running a command in a subprocess, capturing stdout and
 stderr, and checking the return code to determine if the execution was
@@ -31,27 +31,69 @@ import shlex
 import shutil
 import subprocess
 import traceback
-from datetime import datetime
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import cached_property, wraps
 from inspect import signature
 from logging import FileHandler
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import IO, Any, Callable, Iterable, Mapping
-from datetime import datetime
+from typing import IO, Any, Callable, Iterable, Mapping, TypeAlias
+
 from mmalignments.models.parameters import (
     Params,
     ParamSet,
-    initialize_param_registry,
     ToolThreadSpec,
+    initialize_param_registry,
+)
+from mmalignments.models.resources import (
+    ResourceConfig,  # type: ignore[import]
+    current_resources,
 )
 from mmalignments.services.errors import handle_called_process_error
 from mmalignments.services.io import ensure, open_target, parents
-from mmalignments.models.resources import ResourceConfig  # type: ignore[import]
-from mmalignments.models.resources import current_resources
+from .elements import ElementTag, generate_element_key_name
 
 logger = logging.getLogger(__name__)
+
+
+###############################################################################
+# Forwarding handler
+###############################################################################
+
+
+class ForwardingHandler(logging.Handler):
+    """Forward WARNING and above records to a target logger (e.g. the Executor
+    main logger) without re-entering the source logger.
+
+    Attach this to the External module logger so that warnings/errors that
+    happen inside any External tool are also visible in the pipeline's central
+    log / console output, while INFO-level chatter stays in the per-run file
+    only.
+
+    Usage::
+
+        # in Executor.build() or wherever the main logger is available:
+        External.add_main_logger(captain)
+
+        # tear down when the pipeline finishes:
+        External.remove_main_logger()
+    """
+
+    def __init__(
+        self, target: logging.Logger, level: int = logging.WARNING
+    ) -> None:  # noqa: E501
+        super().__init__(level)
+        self._target = target
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Avoid infinite loops if target and source share a handler chain
+        if record.name == self._target.name:
+            return
+        try:
+            self._target.handle(record)
+        except Exception:
+            self.handleError(record)
 
 
 ###############################################################################
@@ -68,7 +110,9 @@ class ExternalRunConfig:
     capture_output: bool = True
     check: bool = True
     timeout: float | None = None
-    threads: int = field(default_factory=lambda: ResourceConfig.detect().threads)
+    threads: int = field(
+        default_factory=lambda: ResourceConfig.detect().threads
+    )  # noqa: E501
     multi: bool = True
     stdout: Path | None | IO = None
     stderr: Path | None | IO = None
@@ -77,7 +121,9 @@ class ExternalRunConfig:
 
     def __post_init__(self) -> None:
         if self.stdout and self.stderr and self.stdout == self.stderr:
-            raise ValueError("stdout and stderr cannot be the same path or file object")
+            raise ValueError(
+                "stdout and stderr cannot be the same path or file object"
+            )  # noqa: E501
         if self.log_dir and not self.log_dir.is_dir():
             raise ValueError(f"log_dir must be a directory: {self.log_dir}")
         if self.threads < 1:
@@ -123,7 +169,8 @@ class External:
         folder: Path | None
             Optional path to a folder where the tool should write its output
         version : str | None
-            Optional version string (used as a cache/fallback for get_version()).
+            Optional version string (used as a cache/fallback for
+            get_version()).
         source : str | None
             Optional human-readable source/URL for the tool (documentation
             or homepage).
@@ -194,7 +241,7 @@ class External:
 
     @property
     def version_name(self) -> str:
-        """Convenience property for versioned tool names, e.g. "bwa-mem2_2.2.1"."""
+        """Convenience property for versioned tool names, e.g. "bwa-mem2_2.2.1"."""  # noqa: E501
         if self._version:
             return f"{self._name}_{self._version}"
         return self._name
@@ -227,6 +274,47 @@ class External:
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return f"<External name={self.name} binary={self.primary_binary}>"
+
+    ###########################################################################
+    # Main-logger forwarding (class-level, shared across all External instances)
+    ###########################################################################
+
+    _forwarding_handler: ForwardingHandler | None = None
+
+    @classmethod
+    def add_main_logger(
+        cls,
+        main_logger: logging.Logger,
+        level: int = logging.WARNING,
+    ) -> None:
+        """Attach a :class:`ForwardingHandler` to the External module logger.
+
+        After this call every WARNING / ERROR / CRITICAL record emitted by any
+        ``External`` subclass (or the module-level ``logger``) is forwarded to
+        *main_logger* — typically the ``Executor`` captain logger — so that
+        problems are visible in the central pipeline log and on the console
+        without duplicating INFO noise.
+
+        Parameters
+        ----------
+        main_logger:
+            The target logger to forward records to (e.g. ``captain``).
+        level:
+            Minimum level to forward; defaults to ``logging.WARNING``.
+        """
+        # Remove any previously registered forwarding handler first
+        cls.remove_main_logger()
+        handler = ForwardingHandler(main_logger, level=level)
+        handler.setLevel(level)
+        logger.addHandler(handler)
+        cls._forwarding_handler = handler
+
+    @classmethod
+    def remove_main_logger(cls) -> None:
+        """Detach the forwarding handler installed by :meth:`add_main_logger`."""
+        if cls._forwarding_handler is not None:
+            logger.removeHandler(cls._forwarding_handler)
+            cls._forwarding_handler = None
 
     ###########################################################################
     # Helpers
@@ -356,6 +444,8 @@ class External:
         ret = datetime.strptime(cur_ts_str, self.ts_format)
         return ret
 
+    def build_element_name(self, tag: ElementTag, subcommand: str | None = None, suffix: str | None = None, **param_str: Any) -> str:
+        return generate_element_key_name(tag, self.name, self.version, subcommand, suffix, **param_str)
     ###########################################################################
     # Multi-Threading
     ###########################################################################
@@ -407,11 +497,10 @@ class External:
                     "threads": n_threads,
                 }
             )
-
-            # Only inject if the tool has a flag AND the caller hasn't set it already
+            # Only inject if the tool has a flag AND the caller hasn't set it already   #   noqa: E501
             if thread_spec.multi and thread_spec.flag is not None:
                 spec = paramset.get_spec(thread_spec.flag)
-                if spec and spec.flag and not (spec.flag in params):
+                if spec and spec.flag and spec.flag not in params:
                     params = params.override(**{spec.name: n_threads})
 
         return params, cfg
@@ -475,23 +564,17 @@ class External:
         try:
             combined.unlink()
         except Exception as e:
-            logger.exception(
-                f"Failed to remove old combined log {path}\nException was: {e}"
-            )
+            logger.info(f"Failed to remove old combined log {path} with {timestamp}\nException was: {e}")
         try:
             if stdout.exists():
                 stdout.unlink()
         except Exception as e:
-            logger.exception(
-                f"Failed to remove old stdout log {stdout}\nException was: {e}"
-            )
+            logger.info(f"Failed to remove old stdout log {stdout} with {timestamp}\nException was: {e}")
         try:
             if stderr.exists():
                 stderr.unlink()
         except Exception as e:
-            logger.exception(
-                f"Failed to remove old stderr log {stderr}\nException was: {e}"
-            )
+            logger.info(f"Failed to remove old stderr log {stderr} with {timestamp}\nException was: {e}")
 
     def _get_log_files_for_run(
         self, log_dir: Path, base: str, timestamp: datetime
@@ -499,8 +582,8 @@ class External:
         combined_log_path = (
             log_dir / f"{base}_{self._timestamp_to_str(timestamp)}_{os.getpid()}.log"
         )
-        stdout_log_path = combined_log_path.with_suffix(f".stdout.log")
-        stderr_log_path = combined_log_path.with_suffix(f".stderr.log")
+        stdout_log_path = combined_log_path.with_suffix(".stdout.log")
+        stderr_log_path = combined_log_path.with_suffix(".stderr.log")
         return combined_log_path, stdout_log_path, stderr_log_path
 
     def _setup_run_logging(
@@ -696,9 +779,9 @@ class External:
             except Exception:
                 logger.exception("Failed to close stdout file object")
 
-    ###########################################################################
+    ####################################################################################
     # Command-building helpers
-    ###########################################################################
+    ####################################################################################
 
     def subcommand(self, arguments: list[str] | None) -> str | None:
         if not arguments:
@@ -732,7 +815,7 @@ class External:
 
     def signature_determinants(
         self, params: Params | None, subroutine: str | None = None
-    ) -> list[str]:
+    ) -> tuple[str, ...]:
         """
         Return a list of command-line tokens that represent the run signature
         based on the provided parameters. This can be used for checking
@@ -752,11 +835,11 @@ class External:
                 List of command-line tokens representing the tool's signature.
         """
         if not params:
-            return []
+            return ()
         paramset = self.param_registry.for_subcommand(subroutine)
         # Include parameters that affect output in a deterministic order
         signature_determinants = paramset.signature_determinants(params)
-        return signature_determinants
+        return tuple([str(d) for d in signature_determinants])
 
     def to_cli(self, params: Params, subroutine: str | None = None) -> list[str]:
         """
@@ -829,6 +912,7 @@ class External:
         self,
         *,
         arguments: Iterable[str] | None = None,
+        subcommand: str | None = None,
         output: Path | None = None,
         pre: Callable[[], CompletedProcess] | None = None,
         post: Callable[[], CompletedProcess] | None = None,
@@ -847,6 +931,8 @@ class External:
         arguments : Iterable[str] | None
             Positional arguments to the command call appended after the
             primary binary.
+        subcommand : str | None
+            Optional subcommand name for selecting parameter sets and thread specs.
         output : Path | None
             Optional path to a file where the command's output should be written.
             This is intended for commands that write to stdout and allows
@@ -894,7 +980,7 @@ class External:
             success = False
             stdout_stream = None
             stderr_stream = None
-            log_file_stem = output.stem if output else self.name
+            log_file_stem = f"{self.name}_{subcommand}" if subcommand else self.name
             now = datetime.now()
             log_dir = self._get_log_dir(cfg)
 
@@ -968,7 +1054,9 @@ class External:
                     except subprocess.CalledProcessError as e:
                         stack = "".join(traceback.format_stack())
                         exc = "".join(
-                            traceback.format_exception(type(e), e, e.__traceback__)
+                            traceback.format_exception(
+                                type(e), e, e.__traceback__
+                            )  # noqa: E501
                         )
                         full_trace = stack + "\n--- Exception ---\n" + exc
                         handle_called_process_error(
@@ -980,6 +1068,7 @@ class External:
                             logfile=combined_log_path,
                             trace=full_trace,
                         )
+                        raise
                 # Execute post-callback
                 if post:
                     try:
@@ -1038,18 +1127,21 @@ def _first_path_parent(paths: list[str | Path]) -> Path | None:
     return None
 
 
+SubroutineIn: TypeAlias = tuple[
+    list[str],  # arguments
+    list[str | Path],  # paths
+    str | Path | None,  # output if piped
+    Callable[[], CompletedProcess | None] | None,  # pre
+    Callable[[], CompletedProcess | None] | None,  # post
+]
+
+
 def subroutine(
     fn: Callable[
         ...,
-        tuple[
-            list[str],  # arguments
-            list[str | Path],  # paths
-            str | Path | None,  # output if piped
-            Callable[[], CompletedProcess] | None,  # pre
-            Callable[[], CompletedProcess] | None,  # post
-        ],
+        SubroutineIn,
     ],
-):
+) -> Callable[..., Callable[[], CompletedProcess]]:
     """
     Decorator: wrapped function returns (arguments, outputs).
     wrapper returns a runner callable (Callable[[], CompletedProcess])
@@ -1090,6 +1182,7 @@ def subroutine(
         arguments = [str(arg) for arg in arguments]
         runner = self.runnable(
             arguments=arguments,
+            subcommand=sub,
             output=output,
             params=params,
             pre=pre,
@@ -1098,5 +1191,9 @@ def subroutine(
         )
         runner.threads = cfg.threads
         return runner
+
+    return wrapper
+
+    return wrapper
 
     return wrapper

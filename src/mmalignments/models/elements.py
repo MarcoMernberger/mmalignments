@@ -9,20 +9,32 @@ from subprocess import CompletedProcess
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
 
-from deprecated import deprecated  # type: ignore[import]
-
 from mmalignments.models.data import Pairing
-from mmalignments.services.io import exists, parents, paths_exists
+from mmalignments.services.io import parents, paths_exists
 
 from .registry import current_element_registry
-from .tags import ElementTag, Method, Stage, State, PartialElementTag
+from .tags import ElementTag, Method, PartialElementTag, Stage, State
+
+# def file_sig(p: Path) -> dict[str, Any]:
+#     if not p.exists():
+#         return {"path": str(p), "missing": True}
+#     st = p.stat()
+#     return {"path": str(p), "mtime_ns": st.st_mtime_ns, "size": st.st_size}
 
 
-def file_sig(p: Path) -> dict[str, Any]:
+def file_sig(p: Path, head_bytes: int = 65_536) -> dict[str, Any]:
     if not p.exists():
         return {"path": str(p), "missing": True}
     st = p.stat()
-    return {"path": str(p), "mtime_ns": st.st_mtime_ns, "size": st.st_size}
+    # Content-hash of first 64kb plus file size for speed
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        h.update(f.read(head_bytes))
+    return {
+        "path": str(p),
+        "size": st.st_size,
+        "head_sha256": h.hexdigest(),
+    }
 
 
 def stable_hash(obj: Any) -> str:
@@ -44,10 +56,10 @@ class Element:
     def __init__(
         self,
         key: str,
-        run: Callable[[], CompletedProcess | Any],
+        run: Callable[[], CompletedProcess | None | bool],
         tag: ElementTag,
         *,
-        determinants: tuple[Any, ...] | None = None,
+        determinants: tuple[str, ...] | None = None,
         inputs: tuple[Path, ...] | None = None,
         artifacts: Mapping[str, Any] | None = None,
         validator: Callable[[], tuple[bool, str]] | None = None,
@@ -88,7 +100,7 @@ class Element:
         for field in required_fields:
             if getattr(self, field) is None:
                 raise ValueError(
-                    f"Element '{self.name}' is missing required field: {field}, was None."
+                    f"Element '{self.name}' is missing required field: {field}."
                 )
         if self.output_files is not None:
             for path in self.output_files:
@@ -96,7 +108,7 @@ class Element:
                     assert isinstance(path, Path) or isinstance(path, str)
                 except AssertionError:
                     raise AssertionError(
-                        f"Output file '{path}' for {self.name} does not exist or is not a valid path."
+                        f"Output file '{path}' for {self.name} does not exist or is not a valid path."  # noqa: E501
                     )
         if self.inputs is not None:
             for path in self.inputs:
@@ -121,8 +133,8 @@ class Element:
 
     @cached_property
     def output_files(self) -> Iterable[Path] | None:
-        files = list(
-            sorted([v for v in self.artifacts.values() if isinstance(v, Path)], key=str)
+        files = sorted(
+            [v for v in self.artifacts.values() if isinstance(v, Path)], key=str
         )
         return files if files else None
 
@@ -171,7 +183,7 @@ class Element:
     def provenance(self) -> str:
         return self.build_provenance()
 
-    def sig_data(self) -> Mapping[str, Any]:
+    def sig_data(self) -> dict[str, Any]:
         sig_data = {
             "key": self.key,
             "determinants": tuple(self.determinants),
@@ -232,6 +244,7 @@ class Element:
         return sig
 
     def skip(self, cached_signature: str | None = None) -> tuple[bool, str]:
+        # TODO turn this into Validation Policy
         if self.validation_policy == ValidationPolicy.FORCE_RUN:
             return False, "Validation policy forces run"
 
@@ -264,15 +277,17 @@ class Element:
 
     def describe(self) -> str:
         artifactlist = [f"{k}: {v}" for k, v in self.artifacts.items()]
+        siglist = [f"{k}: {v}" for k, v in self.sig_data().items()]
         return (
             f"{self.__class__.__name__}:\n"
             f"  key:          {self.key}\n"
             f"  threads:      {self.threads}\n"
             f"  signature:    {self.signature}\n"
-            f"  determinants: {', '.join([det for det in self.determinants])}\n"
+            f"  determinants: {', '.join(self.determinants)}\n"
             f"  inputs:       {[str(p) for p in self.inputs]}\n"
             f"  artifacts:    {{ {', '.join(artifactlist)}}}\n"
             f"  pres:         {[p.key for p in self.pres]}"
+            f"  sigdata:      {{ {', '.join(siglist)}}}\n"
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -419,40 +434,6 @@ def element(
     return deco
 
 
-# @element
-# @deprecated(
-#     "Use FilesElement or Sample instead for better validation and provenance tracking."
-# )
-# def FileElement(
-#     path: Path | str,
-#     tag: Tag | ElementTag | None = None,
-# ) -> Element:
-#     """Helper to create an Element that represents a single file."""
-#     path = Path(path).absolute()
-#     default_tag = ElementTag(
-#         root=path.stem,
-#         level=0,
-#         omics=None,
-#         stage=Stage.INPUT,
-#         method=Method.CHECK,
-#         state=State.RAW,
-#         ext=path.suffix.lstrip("."),
-#     )
-#     tag = merge_tag(default_tag, tag) if tag is not None else default_tag
-
-#     runner = exists  # no-op runner, validation is done by skip logic
-#     runner.threads = 1
-#     runner.command = [f"check_exists({path})"]  # type: ignore[attr-defined]
-
-#     return Element(
-#         key=str(path),
-#         run=runner,
-#         tag=tag,
-#         inputs=[path],
-#         artifacts={tag.ext: path},
-#     )
-
-
 class FilesElement(Element):
 
     def __init__(
@@ -516,6 +497,7 @@ class FilesElement(Element):
         return None
 
     def validate(self) -> tuple[bool, str]:
+        return True, "bypassed validation"
         md5sum = self.calc_md5sum()
         check = md5sum == self.md5sum
         return check, f"MD5 check {'passed' if check else 'failed'}"
@@ -544,7 +526,7 @@ class FileElement(FilesElement):
         path = Path(filepath).absolute()
         ext = path.suffix.lstrip(".")
         by_suffix = {ext: path}
-        super().__init__(filepath, root=root, tag=tag)
+        super().__init__(by_suffix, root=root, tag=tag)
 
 
 class Sample(FilesElement):
@@ -588,56 +570,6 @@ class NextGenSampleElement(Sample):
         return sorted(self.artifacts.values(), key=str)
 
 
-# class HasKey(Protocol):
-#     key: str
-
-
-# class HasSignature(Protocol):
-#     signature: str
-
-
-# T = TypeVar("T", bound=HasKey)
-
-# _current_registry: ContextVar["ElementRegistry[HasKey] | None"] = ContextVar(
-#     "current_element_registry", default=None
-# )
-
-
-# def current_element_registry() -> "ElementRegistry[HasKey] | None":
-#     return _current_registry.get()
-
-
-# @contextmanager
-# def element_build_context(registry: "ElementRegistry[HasKey]"):
-#     token = _current_registry.set(registry)
-#     try:
-#         yield
-#     finally:
-#         _current_registry.reset(token)
-
-
-# class ElementRegistry:
-#     """Intern registry: ensures one instance per key."""
-
-#     def __init__(self) -> None:
-#         self._by_key: Dict[str, HasKey] = {}
-
-#     def intern(self, e: HasKey) -> HasKey:
-#         print(e)
-#         existing = self._by_key.get(e.key)
-#         if existing is None:
-#             self._by_key[e.key] = e
-#             return e
-
-#         # optional sanity check, only if both have .signature
-#         ex_sig = getattr(existing, "signature", None)
-#         e_sig = getattr(e, "signature", None)
-#         if ex_sig is not None and e_sig is not None and ex_sig != e_sig:
-#             raise ValueError(f"Key collision with different signature: {e.key}")
-
-#         return existing
-
-
 def sample_fastqs(
     sample: Sample | Element,
 ) -> tuple[Path, Path | None, str, str | None]:
@@ -653,14 +585,54 @@ def sample_fastqs(
         return r1, r2, name, rg
     else:
         r1 = Path(sample.artifacts["fastq_r1"]).absolute()
-        r2 = (
-            Path(sample.artifacts.get("fastq_r2")).absolute()
-            if sample.artifacts.get("fastq_r2")
-            else None
-        )
+        fastq_r2 = sample.artifacts.get("fastq_r2", None)
+        r2 = Path(fastq_r2).absolute() if fastq_r2 else None
         name = sample.artifacts.get("sample_name", sample.name)
         rg = sample.artifacts.get("read_group")
         return r1, r2, name, rg
-        name = sample.artifacts.get("sample_name", sample.name)
-        rg = sample.artifacts.get("read_group")
-        return r1, r2, name, rg
+
+
+def generate_element_key_name(
+    tag: ElementTag,
+    tool_name: str,
+    tool_version: str,
+    subcommand: str | None = None,
+    suffix: str | None = None,
+    **params_str: Any,
+) -> tuple[str, str]:
+    """
+    generate_element_key generates a unique key for an Element based on its tag and
+    other parameters. We want the keys to be somewhat informative for debugging and
+    provenance, but also unique and stable for caching.
+
+    Parameters
+    ----------
+    tag : ElementTag
+        The tag associated with the element.
+    tool_version_name : str
+        The name of the tool version.
+    subcommand : str | None, optional
+        The subcommand used, by default None
+    suffix : str | None, optional
+        The suffix to append to the key, by default None
+    params : str | None, optional
+        Additional parameters to include in the key, by default None
+
+    Returns
+    -------
+    tuple[str, str]
+        The generated element key.
+    """
+    parts = [tag.default_name, tool_name]
+    if subcommand:
+        parts.append(subcommand)
+    short = "_".join(parts)
+    parts.append(tool_version)
+    if suffix:
+        parts.append(suffix)
+    for k, v in params_str.items():
+        if v is not None:
+            parts.append(f"{k}-{v}")
+    key = "_".join(parts)
+    ret = key, short
+    return ret

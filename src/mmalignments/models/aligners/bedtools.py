@@ -8,9 +8,8 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Callable, Mapping, Union
 
-from mmalignments.models.elements import Element, element
-from mmalignments.models.tags import ElementTag, Method, State, merge_tag
-from mmalignments.models.tags import Tag
+from mmalignments.models.elements import Element, element, generate_element_key_name
+from mmalignments.models.tags import ElementTag, Method, State, Tag, merge_tag
 
 from ..externals import External, ExternalRunConfig, subroutine
 from ..parameters import Params, ParamSet
@@ -275,14 +274,15 @@ class Bedtools(External):
             cfg=cfg,
         )
         # build element
+        key, name = generate_element_key_name(tag, self.version_name, "sort")
         element = Element(
             key=f"{tag.default_name}_sorted_{self.version_name}",
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bed],
+            inputs=(input_bed,),
             artifacts={"bed": output_bed},
-            pres=[bed_element],
+            pres=(bed_element,),
         )
         return element
 
@@ -403,7 +403,6 @@ class Bedtools(External):
         tag = merge_tag(default_tag, tag) if tag is not None else default_tag
         output_bed = self.build_outfile(outdir, filename, tag, input_bed)
 
-        print(f"Slop parameters ", self.get_paramset("slop"))
         if slop_bp:
             if slop_bp > 0:
                 params = Params(b=slop_bp, **(params.to_dict() if params else {}))

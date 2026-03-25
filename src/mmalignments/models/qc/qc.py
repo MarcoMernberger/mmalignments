@@ -234,10 +234,10 @@ def _validate_targets_baits(
                 "(bait_intervals and target_intervals) or targets to be provided"
             )
         if baits is None:
-            logger.warning(
-                "bait_intervals and/or target_intervals not provided, "
-                "using targets for both. This may not be ideal for HS metrics."
-            )
+            # logger.warning(
+            #     "bait_intervals and/or target_intervals not provided, "
+            #     "using targets for both. This may not be ideal for HS metrics."
+            # )
             baits = targets
 
     if cfg.run_mosdepth and targets is None:
@@ -820,7 +820,6 @@ def post_mapping_qc(
             params=parameters.get("mosdepth", params),
             cfg=external_cfgs.get("mosdepth", ExternalRunConfig()),
         )
-        print(depth_elem.run.command_display)
         qc_elements["mosdepth"] = depth_elem
 
     # 5. samtools flagstat

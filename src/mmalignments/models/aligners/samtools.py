@@ -5,16 +5,26 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
 from mmalignments.models.data import Genome
-from mmalignments.models.elements import Element, MappedElement, element
-from mmalignments.models.tags import ElementTag, Method, Stage, State, merge_tag
-from mmalignments.models.tags import PartialElementTag, from_prior
+from mmalignments.models.elements import (
+    Element,
+    MappedElement,
+    element,
+    generate_element_key_name,
+)
+from mmalignments.models.tags import (
+    ElementTag,
+    Method,
+    PartialElementTag,
+    Stage,
+    State,
+    from_prior,
+)
 from mmalignments.services.io import parents
 
-from ..externals import External, ExternalRunConfig, subroutine
+from ..externals import External, ExternalRunConfig, SubroutineIn, subroutine
 from ..parameters import Params, ParamSet
 
 logger = logging.getLogger(__name__)
@@ -193,15 +203,20 @@ class Samtools(External):
             cfg=cfg,
             params=params,
         )
+        key, name = generate_element_key_name(
+            tag,
+            self.version_name,
+            "sort",
+        )
         element = MappedElement(
-            name=f"{mapped.name}.sorted",
-            key=f"{mapped.name}.({self.name}.sort).{self.version_name}",
+            key=key,
             run=runner,
             tag=tag,
             determinants=self.signature_determinants(params, subroutine="sort"),
-            inputs=[input_bam],
+            inputs=(input_bam,),
             artifacts={"bam": sorted_bam},
-            pres=[mapped],
+            pres=(mapped,),
+            name=name,
         )
         return element
 
@@ -213,7 +228,7 @@ class Samtools(External):
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Sort a BAM file using samtools sort.
 
         Creates a zero-argument callable that sorts the input BAM file and
@@ -310,15 +325,20 @@ class Samtools(External):
             cfg=cfg,
         )
 
-        key = f"{tag.default_name}_index_{self.version_name}"
+        key, name = generate_element_key_name(
+            tag,
+            self.version_name,
+            "index",
+        )
         element = Element(
             key=key,
             run=runner,
             tag=tag,
             determinants=self.signature_determinants(params, subroutine="index"),
-            inputs=[bam_file],
-            artifacts={tag.ext: bai_file},
-            pres=[mapped],
+            inputs=(bam_file,),
+            artifacts={"bai": bai_file},
+            pres=(mapped,),
+            name=name,
         )
         return element
 
@@ -330,7 +350,7 @@ class Samtools(External):
         bai_file: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Create a BAM index (.bai) using samtools index.
 
         Creates a zero-argument callable that indexes the BAM file, producing
@@ -415,7 +435,7 @@ class Samtools(External):
             Element representing the faidx operation.
         """
         fasta = (genome.fasta).absolute()
-        default_tag = ElementTag(
+        tag = ElementTag(
             root=genome.name,
             level=1,
             stage=Stage.PREP,
@@ -423,8 +443,7 @@ class Samtools(External):
             state=State.INDEX,
             omics=None,
             ext="genome",
-        )
-        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+        ).merge(tag)
         output = Path(outdir or fasta.parent) / (filename or tag.default_output)
 
         runner = self.faidx_fasta(
@@ -433,15 +452,18 @@ class Samtools(External):
         artifacts = {"fai": output}
         if cut2:
             artifacts["faicut"] = output.with_suffix(".faicut")
+        key, name = generate_element_key_name(
+            tag, self.version_name, "faidx", params=f"{cut2}"
+        )
         element = Element(
-            name=f"{genome.name}.faidx",
-            key=f"{self.name}_faidx_{self.version_name}_{cut2}",
+            key=key,
             run=runner,
             tag=tag,
             determinants=self.signature_determinants(params, subroutine="faidx"),
-            inputs=[fasta],
+            inputs=(fasta,),
             artifacts=artifacts,
-            pres=[],
+            pres=(),
+            name=name,
         )
         return element
 
@@ -454,7 +476,7 @@ class Samtools(External):
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Create a fasta index (.fai) with samtools faidx and write a two-column genome
         file.
 
@@ -481,7 +503,7 @@ class Samtools(External):
         """
 
         def _faidx_and_cut_callable(genome_out: Path) -> Callable:
-            fai_path = fasta.with_suffix(fasta.suffix + ".fai")
+            fai_path = Path(str(fasta) + ".fai")
             """Create genome file from the .fai after indexing."""
 
             def __post_call():
@@ -511,7 +533,7 @@ class Samtools(External):
             call_afterwards = _faidx_and_cut_callable(
                 output_file.with_suffix(".faicut")
             )
-        return arguments, [output_file], None, None, {"post:": call_afterwards}
+        return arguments, [output_file], None, None, call_afterwards
 
     ###########################################################################
     # Stats (High-level and Low-level wrapper)
@@ -583,16 +605,20 @@ class Samtools(External):
             params=params,
             cfg=cfg,
         )
-
+        key, name = generate_element_key_name(
+            tag,
+            self.version_name,
+            "stats",
+        )
         return Element(
-            name=f"{input_bam.stem}_stats_{self.name}",
-            key=f"{input_bam.stem}_stats_{self.version_name}",
+            key=key,
             run=runner,
             tag=tag,
             determinants=self.signature_determinants(params, subroutine="stats"),
-            inputs=[input_bam],
+            inputs=(input_bam,),
             artifacts={"stats": output_file},
-            pres=[mapped],
+            pres=(mapped,),
+            name=name,
         )
 
     @subroutine
@@ -603,7 +629,7 @@ class Samtools(External):
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Run samtools stats on a BAM file.
 
         Creates a zero-argument callable that runs samtools stats to
@@ -705,15 +731,21 @@ class Samtools(External):
             params=params,
             cfg=cfg,
         )
+        key, name = generate_element_key_name(
+            tag,
+            self.version_name,
+            "sort",
+        )
 
         return Element(
-            key=f"{tag.default_name}_{mapped.name}_flagstat_{self.version_name}",
+            key=key,
             run=runner,
             tag=tag,
             determinants=self.signature_determinants(params, subroutine="flagstat"),
-            inputs=[input_bam],
+            inputs=(input_bam,),
             artifacts={"flagstat": output_file},
-            pres=[mapped],
+            pres=(mapped,),
+            name=name,
         )
 
     @subroutine
@@ -723,7 +755,7 @@ class Samtools(External):
         output_file: Path | str,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Element:
+    ) -> SubroutineIn:
         """Run samtools flagstat on a BAM file.
 
         Creates an Element that runs samtools flagstat to

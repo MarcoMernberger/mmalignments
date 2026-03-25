@@ -1,0 +1,2 @@
+test if signatures change on rerun
+test if all faiulures are caught

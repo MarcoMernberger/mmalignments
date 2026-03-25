@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Dict, Iterator, TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, Iterator
 
 if TYPE_CHECKING:
     from .elements import Element
@@ -79,3 +80,9 @@ class ElementRegistry:
                 print(f"  {key}  [{sig}]")
             else:
                 print(f"  {key}")
+
+    def write_registry(self, outfile: Path) -> None:
+        with open(outfile, "w") as outp:
+            for key, element in sorted(self._by_key.items()):
+                sig = getattr(element, "signature", None)
+                outp.write(f"{key}:\n{element.describe()}\nSignature={sig}\n\n")

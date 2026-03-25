@@ -23,6 +23,7 @@ class NodeState(Enum):
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"
+    UPSTREAM_FAILED = "upstream_failed"
 
 
 _STYLE = {
@@ -31,6 +32,7 @@ _STYLE = {
     NodeState.RUNNING: Style(color="yellow", bold=True),
     NodeState.DONE: Style(color="green"),
     NodeState.FAILED: Style(color="red"),
+    NodeState.UPSTREAM_FAILED: Style(color="dark_orange"),
 }
 
 _ICON = {
@@ -39,6 +41,7 @@ _ICON = {
     NodeState.RUNNING: "◎",
     NodeState.DONE: "✓",
     NodeState.FAILED: "✗",
+    NodeState.UPSTREAM_FAILED: "↯",
 }
 
 
@@ -62,6 +65,10 @@ class NodeProgress:
 
     def skip(self, reason: str = "") -> None:
         self.state = NodeState.SKIPPED
+        self.reason = reason
+
+    def upstream_failed(self, reason: str = "upstream failed") -> None:
+        self.state = NodeState.UPSTREAM_FAILED
         self.reason = reason
 
     def fmt_elapsed(self) -> str:
@@ -175,6 +182,11 @@ class ProgressReporter:
             if key in self._nodes:
                 self._nodes[key].finish(failed=True)
 
+    def mark_upstream_failed(self, key: str, reason: str = "upstream failed") -> None:
+        with self._lock:
+            if key in self._nodes:
+                self._nodes[key].upstream_failed(reason)
+
     def start_live(self) -> None:
         self._renderable = _LiveLayout(self)
         self.layout = Layout()
@@ -208,6 +220,7 @@ class ProgressReporter:
             (NodeState.DONE, "done"),
             (NodeState.SKIPPED, "skipped"),
             (NodeState.FAILED, "failed"),
+            (NodeState.UPSTREAM_FAILED, "upstream failed"),
             (NodeState.RUNNING, "running"),
             (NodeState.PENDING, "pending"),
         ]:
