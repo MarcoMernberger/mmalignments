@@ -248,8 +248,9 @@ class GATK(External):
         >>> mark_dups()
         """
         # Build command: gatk MarkDuplicates -I input.bam -O output.bam -M metrics.txt
+        subcommand = "MarkDuplicates"
         arguments = [
-            "MarkDuplicates",
+            subcommand,
             "-I",
             self.abs(input_bam),
             "-O",
@@ -260,7 +261,9 @@ class GATK(External):
         post = self.index_by_sam(output_bam) if not index_off else None
         return (
             arguments,
-            [input_bam, output_bam, metrics_file],
+            subcommand,
+            [input_bam],
+            [output_bam, metrics_file],
             None,
             None,
             post,
@@ -400,11 +403,12 @@ class GATK(External):
             f1r2_files = [Path(f1r2_tar_gz)]
 
         # Build command: gatk LearnReadOrientationModel -I f1r2.tar.gz -O model.tar.gz
-        arguments = ["LearnReadOrientationModel"]
+        subcommand = "LearnReadOrientationModel"
+        arguments = [subcommand]
         for f in f1r2_files:
             arguments.extend(["-I", self.strabs(f)])
         arguments.extend(["-O", self.strabs(output_model)])
-        return arguments, [*f1r2_files, output_model], None, None, None
+        return arguments, subcommand, [*f1r2_files], [output_model], None, None, None
 
     @element
     def readorientation(
@@ -554,38 +558,39 @@ class GATK(External):
         >>> mutect()
         """
         # Build command: gatk Mutect2 -R ref.fa -I tumor.bam -I normal.bam ...
-        arguments = ["Mutect2", "-R", self.strabs(reference)]
-        all_paths = [reference, output_vcf]
+        subcommand = "Mutect2"
+        arguments = [subcommand, "-R", self.strabs(reference)]
+        in_paths = [reference]
         names = []
 
         for name, bam in input_bams_tumor.items():
             arguments.extend(["-I", self.strabs(bam)])
             names.extend(["-tumor", name])
-            all_paths.append(bam)
+            in_paths.append(bam)
         if input_bams_normal:
             for name, bam in input_bams_normal.items():
                 arguments.extend(["-I", self.strabs(bam)])
                 names.extend(["-normal", name])
-                all_paths.append(bam)
+                in_paths.append(bam)
 
         if targets_padded_bed:
             arguments.extend(["-L", self.strabs(targets_padded_bed)])
-            all_paths.append(targets_padded_bed)
+            in_paths.append(targets_padded_bed)
         if germline_resource:
             arguments.extend(["--germline-resource", self.strabs(germline_resource)])
-            all_paths.append(germline_resource)
+            in_paths.append(germline_resource)
         if panel_of_normals:
             arguments.extend(["--panel-of-normals", self.strabs(panel_of_normals)])
-            all_paths.append(panel_of_normals)
+            in_paths.append(panel_of_normals)
         if f1r2_tar_gz:
             arguments.extend(["--f1r2-tar-gz", self.strabs(f1r2_tar_gz)])
-            all_paths.append(f1r2_tar_gz)
+            in_paths.append(f1r2_tar_gz)
 
         output = self.strabs(output_vcf)
         arguments.extend(["-O", output])
         # by default also calculate an index
         post = self.index_feature_file(output) if not index_off else None
-        return arguments, all_paths, None, None, post
+        return arguments, subcommand, in_paths, [output_vcf], None, None, post
 
     @element
     def mutect2(
@@ -721,9 +726,7 @@ class GATK(External):
         )
         determinants = self.signature_determinants(params, "Mutect2")
         tumor_str = ",".join([m.tag.default_name for m in marked_tumor.values()])
-        key, name = self.build_element_name(
-            tag, "Mutect2", on=f"{tumor_str}{suffix}"
-        )
+        key, name = self.build_element_name(tag, "Mutect2", on=f"{tumor_str}{suffix}")
         pres += tuple(
             x
             for x in [targets_padded, germline_resource, panel_of_normals]
@@ -796,8 +799,9 @@ class GATK(External):
         >>> pileup()
         """
         # gatk GetPileupSummaries -I input.bam -V sites.vcf -O output.table
+        subcommand = "GetPileupSummaries"
         arguments = [
-            "GetPileupSummaries",
+            subcommand,
             "-I",
             self.strabs(input_bam),
             "-V",
@@ -808,10 +812,10 @@ class GATK(External):
         if intervals:
             arguments.extend(["-L", self.strabs(intervals)])
 
-        all_paths = [input_bam, variant_sites, output_table]
+        in_paths = [input_bam, variant_sites]
         if intervals:
-            all_paths.append(intervals)
-        return arguments, all_paths, None, None, None
+            in_paths.append(intervals)
+        return arguments, subcommand, in_paths, [output_table], None, None, None
 
     @element
     def pilesum(
@@ -965,8 +969,9 @@ class GATK(External):
         >>> contamination()
         """
         # gatk CalculateContamination -I tumor_pileup -O contamination.table
+        subcommand = "CalculateContamination"
         arguments = [
-            "CalculateContamination",
+            subcommand,
             "-I",
             self.strabs(tumor_pileup),
             "-O",
@@ -977,12 +982,13 @@ class GATK(External):
         if output_segments:
             arguments.extend(["--tumor-segmentation", self.strabs(output_segments)])
 
-        all_paths = [tumor_pileup, output_table]
+        in_paths = [tumor_pileup]
         if normal_pileup:
-            all_paths.append(normal_pileup)
+            in_paths.append(normal_pileup)
+        out_paths = [output_table]
         if output_segments:
-            all_paths.append(output_segments)
-        return arguments, all_paths, None, None, None
+            out_paths.append(output_segments)
+        return arguments, subcommand, in_paths, out_paths, None, None, None
 
     @element
     def contamination(
@@ -1143,8 +1149,9 @@ class GATK(External):
         >>> filter_calls()
         """
         # Build command: gatk FilterMutectCalls -R ref.fa -V input.vcf -O output.vcf
+        subcommand = "FilterMutectCalls"
         arguments = [
-            "FilterMutectCalls",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-V",
@@ -1159,17 +1166,17 @@ class GATK(External):
         if tumor_segmentation:
             arguments.extend(["--tumor-segmentation", self.strabs(tumor_segmentation)])
 
-        all_paths = [reference, input_vcf, output_vcf]
+        in_paths = [reference, input_vcf]
         if contamination:
-            all_paths.append(contamination)
+            in_paths.append(contamination)
         if orientation:
-            all_paths.append(orientation)
+            in_paths.append(orientation)
         if tumor_segmentation:
-            all_paths.append(tumor_segmentation)
+            in_paths.append(tumor_segmentation)
         post = (
             self.index_feature_file(output_vcf, params, cfg) if not index_off else None
         )
-        return arguments, all_paths, None, None, post
+        return arguments, subcommand, in_paths, [output_vcf], None, None, post
 
     @element
     def filter(
@@ -1265,14 +1272,18 @@ class GATK(External):
         if tumor_segmentation:
             pres.append(tumor_segmentation)
             inputs.append(tumor_segmentation.segments)
-        
+
         params_str = mutect_element.key
         con = contamination.key if contamination else None
         ori = orientation.key if orientation else None
         seg = tumor_segmentation.key if tumor_segmentation else None
         key, name = self.build_element_name(
-            tag, "FilterMutectCalls", on=mutect_element.key, contamination=con, 
-            orientation=ori, segmentation=seg
+            tag,
+            "FilterMutectCalls",
+            on=mutect_element.key,
+            contamination=con,
+            orientation=ori,
+            segmentation=seg,
         )
         return Element(
             key=key,
@@ -1339,8 +1350,9 @@ class GATK(External):
         >>> recal()
         """
         # gatk BaseRecalibrator -R ref.fa -I input.bam --known-sites sites.vcf -O recal.table  # noqa: E501
+        subcommand = "BaseRecalibrator"
         arguments = [
-            "BaseRecalibrator",
+            subcommand,
             "-R",
             self.strabs(reference),
             "--sequence-dictionary",
@@ -1349,22 +1361,24 @@ class GATK(External):
         for bam in input_bams:
             arguments.extend(["-I", self.strabs(bam)])
 
-        all_paths = [reference, *input_bams, output_table]
+        in_paths = [reference, *input_bams]
+        if sequence_dictionary:
+            in_paths.append(sequence_dictionary)
 
         if known_sites:
             if isinstance(known_sites, (list, tuple)):
                 for ks in known_sites:
                     arguments.extend(["--known-sites", self.strabs(ks)])
-                    all_paths.append(ks)
+                    in_paths.append(ks)
             else:
                 arguments.extend(["--known-sites", self.strabs(known_sites)])
-                all_paths.append(known_sites)
+                in_paths.append(known_sites)
         if intervals:
             arguments.extend(["-L", self.strabs(intervals)])
-            all_paths.append(intervals)
+            in_paths.append(intervals)
 
         arguments.extend(["-O", self.strabs(output_table)])
-        return arguments, all_paths, None, None, None
+        return arguments, subcommand, in_paths, [output_table], None, None, None
 
     @element
     def modelbsqr(
@@ -1534,8 +1548,9 @@ class GATK(External):
         >>> apply()
         """
         # gatk ApplyBQSR -R ref.fa -I input.bam --bqsr-recal-file recal.table -O output.bam  # noqa: E501
+        subcommand = "ApplyBQSR"
         arguments = [
-            "ApplyBQSR",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-I",
@@ -1548,12 +1563,12 @@ class GATK(External):
         if intervals:
             arguments.extend(["-L", self.strabs(intervals)])
 
-        all_paths = [reference, input_bam, recal_table, output_bam]
+        in_paths = [reference, input_bam, recal_table]
         if intervals:
-            all_paths.append(intervals)
+            in_paths.append(intervals)
 
         post = None if index_off else GATK.index_by_sam(output_bam)
-        return arguments, all_paths, None, None, post
+        return arguments, subcommand, in_paths, [output_bam], None, None, post
 
     @element
     def applybsqr(
@@ -1797,12 +1812,13 @@ class GATK(External):
         >>> pon()
         """
         # gatk CreateSomaticPanelOfNormals -vcfs n1.vcf -vcfs n2.vcf -O pon.vcf.gz
-        arguments = ["CreateSomaticPanelOfNormals"]
+        subcommand = "CreateSomaticPanelOfNormals"
+        arguments = [subcommand]
         input_vcfs = sorted(input_vcfs, key=str)
         for vcf in input_vcfs:
             arguments.extend(["-V", self.strabs(vcf)])
         arguments.extend(["-O", self.strabs(output_pon)])
-        return arguments, [*input_vcfs, output_pon], None, None, None
+        return arguments, subcommand, [*input_vcfs], [output_pon], None, None, None
 
     @element
     def pons(
@@ -1869,8 +1885,8 @@ class GATK(External):
         all_normals = sorted(
             all_normals, key=lambda e: e.name
         )  # we need sorting for the name
-        #cfg_mutect2 = cfg_mutect2 or ExternalRunConfig()
-        #params_mutect2 = params_mutect2 or Params()
+        # cfg_mutect2 = cfg_mutect2 or ExternalRunConfig()
+        # params_mutect2 = params_mutect2 or Params()
         tag = ElementTag(
             root=f"{reference.name}",
             level=all_normals[0].tag.level + 1,
@@ -1962,14 +1978,16 @@ class GATK(External):
         >>> create_dict()
         """
         # Build command: gatk CreateSequenceDictionary -R ref.fa -O ref.dict
+        print("cfg we got", cfg)
+        subcommand = "CreateSequenceDictionary"
         arguments = [
-            "CreateSequenceDictionary",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-O",
             self.strabs(output_dict),
         ]
-        return arguments, [reference, output_dict], None, None, None
+        return arguments, subcommand, [reference], [output_dict], None, None, None
 
     @element
     def seqdict(
@@ -2096,8 +2114,9 @@ class GATK(External):
         >>> converter()
         """
         # Build command: gatk BedToIntervalList -I bed -O interval_list -SD dict
+        subcommand = "BedToIntervalList"
         arguments = [
-            "BedToIntervalList",
+            subcommand,
             "-I",
             self.strabs(input_bed),
             "-O",
@@ -2107,7 +2126,9 @@ class GATK(External):
         ]
         return (
             arguments,
-            [input_bed, output_interval_list, sequence_dict],
+            subcommand,
+            [input_bed, sequence_dict],
+            [output_interval_list],
             None,
             None,
             None,
@@ -2251,8 +2272,9 @@ class GATK(External):
         >>> metrics()
         """
         # gatk CollectAlignmentSummaryMetrics -R ref.fa -I input.bam -O metrics.txt
+        subcommand = "CollectAlignmentSummaryMetrics"
         arguments = [
-            "CollectAlignmentSummaryMetrics",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-I",
@@ -2260,7 +2282,15 @@ class GATK(External):
             "-O",
             self.strabs(output_metrics),
         ]
-        return arguments, [reference, input_bam, output_metrics], None, None, None
+        return (
+            arguments,
+            subcommand,
+            [reference, input_bam],
+            [output_metrics],
+            None,
+            None,
+            None,
+        )
 
     @element
     def alignmetrics(
@@ -2332,9 +2362,7 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
-        key, name = self.build_element_name(
-            tag, "CollectAlignmentSummaryMetrics"
-        )
+        key, name = self.build_element_name(tag, "CollectAlignmentSummaryMetrics")
         return Element(
             key=key,
             name=name,
@@ -2393,8 +2421,9 @@ class GATK(External):
         >>> metrics()
         """
         # gatk CollectInsertSizeMetrics -I input.bam -O metrics.txt -H histogram.pdf
+        subcommand = "CollectInsertSizeMetrics"
         arguments = [
-            "CollectInsertSizeMetrics",
+            subcommand,
             "-I",
             self.strabs(input_bam),
             "-O",
@@ -2404,7 +2433,9 @@ class GATK(External):
         ]
         return (
             arguments,
-            [input_bam, output_metrics, output_histogram],
+            subcommand,
+            [input_bam],
+            [output_metrics, output_histogram],
             None,
             None,
             None,
@@ -2481,9 +2512,7 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
-        key, name = self.build_element_name(
-            tag, "CollectInsertSizeMetrics"
-        )
+        key, name = self.build_element_name(tag, "CollectInsertSizeMetrics")
         return Element(
             key=key,
             name=name,
@@ -2554,8 +2583,9 @@ class GATK(External):
         >>> metrics()
         """
         # gatk CollectHsMetrics -R ref.fa -I bam -O metrics --BAIT_INTERVALS baits --TARGET_INTERVALS targets  # noqa: E501
+        subcommand = "CollectHsMetrics"
         arguments = [
-            "CollectHsMetrics",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-I",
@@ -2567,10 +2597,9 @@ class GATK(External):
             "--TARGET_INTERVALS",
             self.strabs(target_intervals),
         ]
-        all_paths = [
+        in_paths = [
             reference,
             input_bam,
-            output_metrics,
             bait_intervals,
             target_intervals,
         ]
@@ -2579,9 +2608,9 @@ class GATK(External):
             arguments.extend(
                 ["--PER_TARGET_COVERAGE", self.strabs(per_target_coverage)]
             )
-            all_paths.append(per_target_coverage)
+            in_paths.append(per_target_coverage)
 
-        return arguments, all_paths, None, None, None
+        return arguments, subcommand, in_paths, [output_metrics], None, None, None
 
     @element
     def hs(
@@ -2795,12 +2824,13 @@ class GATK(External):
             A zero-argument callable that executes the indexing command.
         """
 
+        subcommand = "IndexFeatureFile"
         arguments = [
-            "IndexFeatureFile",
+            subcommand,
             "-I",
             self.strabs(input_path),
         ]
-        return arguments, [input_path], None, None, None
+        return arguments, subcommand, [input_path], [], None, None, None
 
     ###########################################################################
     # Callable Loci
@@ -2870,8 +2900,9 @@ class GATK(External):
         >>> loci()
         """
         # gatk CallableLoci -R ref -I bam -L target -summary summary -o bed
+        subcommand = "CallableLoci"
         arguments = [
-            "CallableLoci",
+            subcommand,
             "-R",
             self.strabs(reference_fasta),
             "-I",
@@ -2889,9 +2920,10 @@ class GATK(External):
             "-O",
             self.strabs(output_bed),
         ]
-        all_paths = [reference_fasta, input_bam, target_bed, output_bed, output_summary]
+        in_paths = [reference_fasta, input_bam, target_bed]
+        out_paths = [output_bed, output_summary]
         if output_json:
-            all_paths.append(output_json)
+            out_paths.append(output_json)
 
         def _post():
             callable_bases, callable_mb = self.extract_callable_mb(output_summary)
@@ -2908,7 +2940,7 @@ class GATK(External):
                     json.dump(ret, f, indent=2)
             return ret
 
-        return arguments, all_paths, None, None, _post
+        return arguments, subcommand, in_paths, out_paths, None, None, _post
 
     @element
     def loci(
@@ -3018,9 +3050,7 @@ class GATK(External):
         )
         determinants = self.signature_determinants(params, subroutine="CallableLoci")
         targ = {Path(target_bed).stem} if target_bed else None
-        key, name = self.build_element_name(
-            tag, "CallableLoci", targets=targ
-        )
+        key, name = self.build_element_name(tag, "CallableLoci", targets=targ)
         return Element(
             key=key,
             name=name,

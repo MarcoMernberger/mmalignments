@@ -322,8 +322,8 @@ class BCFtools(External):
         if targets_bed is not None:
             arguments += ["-R", str(Path(targets_bed).absolute())]
         arguments += ["-Oz", "-o", str(output_vcf), str(input_vcf)]
-
-        return arguments, [input_vcf, output_vcf], None, None, None
+        subcommand = "view"
+        return arguments, subcommand, [input_vcf], [output_vcf], None, None, None
 
     ###########################################################################
     # Filter (High-level and Low-level wrapper)
@@ -456,7 +456,8 @@ class BCFtools(External):
         else:
             arguments += ["-e", exclude_expr]
         arguments += ["-Oz", "-o", str(output_vcf), str(input_vcf)]
-        return arguments, [input_vcf, output_vcf], None, None, None
+        subcommand = "filter"
+        return arguments, subcommand, [input_vcf], [output_vcf], None, None, None
 
     ###########################################################################
     # Indexing (High-level and Low-level wrapper)
@@ -590,8 +591,8 @@ class BCFtools(External):
         if variant_type is not None:
             arguments += ["-v", variant_type]
         arguments.append(str(input_vcf))
-
-        return arguments, [input_vcf], None, None, None
+        subcommand = "view"
+        return arguments, subcommand, [input_vcf], [], None, None, None
 
     def count_variants_post_filter(
         self,
@@ -876,7 +877,8 @@ class BCFtools(External):
             self.strabs(input_vcf),
         ]
         post = GATK().index_feature_file(output_vcf) if not index_off else None
-        return arguments, [input_vcf, output_vcf], output_vcf, None, post
+        subcommand = "+fill-tags"
+        return arguments, subcommand, [input_vcf], [output_vcf], output_vcf, None, post
 
     ###########################################################################
     # Convenience methods for common workflows

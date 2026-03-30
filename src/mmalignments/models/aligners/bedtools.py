@@ -327,7 +327,8 @@ class Bedtools(External):
         """
         # Build command: bedtools sort -i input.bed > output.bed
         arguments = ["sort", "-i", str(input_bed)]
-        return arguments, [output_bed], output_bed, None, None
+        subcommand = "sort"
+        return arguments, subcommand, [input_bed], [output_bed], output_bed, None, None
 
     ###########################################################################
     # Slop (High-level and Low-level wrapper)
@@ -470,8 +471,6 @@ class Bedtools(External):
         ... )
         >>> slop_runner()  # Execute the slop
         """
-        paths = [input_bed, genome_file, output_bed]
-
         # Build command: bedtools slop -i input.bed -g genome -b 100 > output.bed
         arguments = [
             "slop",
@@ -481,7 +480,8 @@ class Bedtools(External):
             self.strabs(genome_file),
         ]
 
-        return arguments, paths, self.abs(output_bed), None, None
+        subcommand = "slop"
+        return arguments, subcommand, [input_bed, genome_file], [self.abs(output_bed)], self.abs(output_bed), None, None
 
     ###########################################################################
     # Merge (High-level and Low-level wrapper)
@@ -613,7 +613,8 @@ class Bedtools(External):
         """
         # Build command: bedtools merge -i input.bed > output.bed
         arguments = ["merge", "-i", str(input_bed)]
-        return arguments, [output_bed], output_bed, None, None
+        subcommand = "merge"
+        return arguments, subcommand, [input_bed], [output_bed], output_bed, None, None
 
     ###########################################################################
     # Conevenience methods for common workflows

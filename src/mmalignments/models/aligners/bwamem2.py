@@ -14,7 +14,6 @@ from mmalignments.models.elements import (
     MappedElement,
     NextGenSampleElement,
     element,
-    generate_element_key_name,
     sample_fastqs,
 )
 from mmalignments.models.tags import (
@@ -302,7 +301,7 @@ class BWAMem2(External):
         )
         determinants = self.signature_determinants(params, subroutine="index")
         key, name = self.build_element_name(tag, "index")
-        
+
         result = Element(
             key,
             runner,
@@ -362,8 +361,11 @@ class BWAMem2(External):
         parents(output_prefix)
 
         # bwa-mem2 index -p <prefix> <fasta>
+        subcommand = "index"
         return (
-            ["index", "-p", str(output_prefix), str(fasta_file)],
+            [subcommand, "-p", str(output_prefix), str(fasta_file)],
+            subcommand,
+            [fasta_file],
             [output_prefix],
             None,
             None,
@@ -622,8 +624,10 @@ class BWAMem2(External):
                 self.strabs(fastq_r1),
             ]
         )
+        in_paths = [index_prefix, fastq_r1]
         if fastq_r2:
             arguments.append(self.strabs(fastq_r2))
+            in_paths.append(fastq_r2)
 
         output_bam = self.strabs(output_bam)
         # Output to BAM file
@@ -641,7 +645,8 @@ class BWAMem2(External):
             )
             # calculate the index if needed. post however has priority
             post = post or sam_index
-        return arguments, [output_bam], None, None, post
+        subcommand = "mem"
+        return arguments, subcommand, in_paths, [output_bam], None, None, post
 
     ###########################################################################
     # Con   venience methods for common workflows

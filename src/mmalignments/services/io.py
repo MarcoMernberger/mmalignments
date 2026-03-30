@@ -3,7 +3,7 @@
 import gzip
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import IO, Any, Callable
 
 
 def ensure(*files: Path | str) -> bool:
@@ -124,13 +124,16 @@ def load_param_json(path: Path) -> dict[str, Any]:
     return obj
 
 
-def open_target(target, *, append: bool):
+def open_target(
+    target: Path | None | IO = None, *, append: bool, encoding: str = "utf-8"
+):
     if target is None:
         return None
     if isinstance(target, Path):
         parents(target)
         mode = "a" if append else "w"
-        return open(target, mode, encoding="utf-8")
+        return open(target, mode, encoding=encoding)
+
     return target
 
 

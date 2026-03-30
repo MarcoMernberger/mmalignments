@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import traceback
 from enum import Enum
 from functools import cached_property, wraps
 from pathlib import Path
@@ -94,6 +95,7 @@ class Element:
         self.empty_ok = empty_ok
         self.output_files  # trigger validation of output file paths
         self.validate_fields()
+        self.creation_trace = "".join(traceback.format_stack()[:-1])
 
     def validate_fields(self) -> None:
         required_fields = ["key", "run", "tag"]
@@ -595,15 +597,15 @@ def sample_fastqs(
 def generate_element_key_name(
     tag: ElementTag,
     tool_name: str,
-    tool_version: str,
+    tool_version: str | None,
     subcommand: str | None = None,
     suffix: str | None = None,
     **params_str: Any,
 ) -> tuple[str, str]:
     """
-    generate_element_key generates a unique key for an Element based on its tag and
-    other parameters. We want the keys to be somewhat informative for debugging and
-    provenance, but also unique and stable for caching.
+    generate_element_key generates a unique key for an Element based on its tag 
+    and other parameters. We want the keys to be somewhat informative for 
+    debugging and provenance, but also unique and stable for caching.
 
     Parameters
     ----------
@@ -627,7 +629,8 @@ def generate_element_key_name(
     if subcommand:
         parts.append(subcommand)
     short = "_".join(parts)
-    parts.append(tool_version)
+    if tool_version:
+        parts.append(tool_version)
     if suffix:
         parts.append(suffix)
     for k, v in params_str.items():

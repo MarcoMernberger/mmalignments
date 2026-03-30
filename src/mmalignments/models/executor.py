@@ -11,9 +11,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from logging import Logger
 from pathlib import Path
-from subprocess import CalledProcessError
 from tempfile import NamedTemporaryFile
 from typing import Any, Iterable, Literal
+
+from rich.console import Console  # type: ignore[import]
 
 from mmalignments.models.elements import Element
 from mmalignments.models.externals import External
@@ -23,6 +24,7 @@ from mmalignments.models.status import (
     NodeState,  # type: ignore[import]
     ProgressReporter,
 )
+from mmalignments.services.errors import PipelineError
 from mmalignments.services.io import ensure, from_json, parents
 from mmalignments.services.logging import initlog
 from mmalignments.services.time import now_as_str
@@ -147,7 +149,7 @@ class Executor:
         if log_run_only:
             self.log(
                 None,
-                f"Logging only Elements that need to run",
+                "Logging only Elements that need to run",
                 level="INFO",
             )
         if not targets:
@@ -332,7 +334,7 @@ class Executor:
         self.check_duplicate_outputs(nodes)
         self.write_dot(nodes, dot_path or self.dot_path)
         reporter: ProgressReporter | None = (
-            ProgressReporter() if (progress and not dry_run) else None
+            ProgressReporter(logger=self.logger) if (progress and not dry_run) else None
         )
         if reporter:
             reporter.register(order)
@@ -348,7 +350,7 @@ class Executor:
                 ).start()
             if parallel and not dry_run:
                 self.log(None, "Starting parallel execution...", level="INFO")
-                self._run_parallel(
+                failures, reporter = self._run_parallel(
                     order,
                     cache=cache,
                     reporter=reporter,
@@ -360,7 +362,7 @@ class Executor:
                 )
             else:
                 self.log(None, "Starting sequential execution...", level="INFO")
-                self._run_sequential(
+                failures, reporter = self._run_sequential(
                     order,
                     cache=cache,
                     reporter=reporter,
@@ -377,21 +379,72 @@ class Executor:
                     np = reporter._nodes.get(node.key)
                     if np is not None and np.state == NodeState.PENDING:
                         reporter.mark_skip(node.key, "not reached")
+
+                # if sys.stdin.isatty():
+                #     while True:
+                #         Console().print("\nPipeline finished. Choose an option:")
+                #         Console().print("  [1] Show all error panels")
+                #         Console().print("  [2] Show overview of failed nodes")
+                #         Console().print("  [3] Exit to command line")
+                #         choice = input("Enter 1/2/3: ").strip()
+                #         if choice == "1":
+                #             for panel in reporter.error_panels():
+                #                 Console().print(panel)
+                #         elif choice == "2":
+                #             failed = [
+                #                 n
+                #                 for n in reporter._nodes.values()
+                #                 if n.state == NodeState.FAILED
+                #             ]
+                #             if failed:
+                #                 Console().print(
+                #                     f"[bold red]Failed Nodes ({len(failed)}):[/bold red]"
+                #                 )
+                #                 for n in failed:
+                #                     Console().print(f"- {n.name}")
+                #             else:
+                #                 Console().print("[green]No failed nodes[/green]")
+                #         elif choice == "3":
+                #             break
+                #         else:
+                #             Console().print(
+                #                 "[yellow]Invalid choice, try again[/yellow]"
+                #             )
+
                 reporter.stop_live()
 
         if not dry_run:
             self.save_cache(self.signature_store_path, cache)
 
-        if failures and final_raise_on_error:
-            lines = [
-                f"{len(failures)} element(s) failed:",
-                *[
-                    f"- {name}: {key} ({type(err).__name__}: {err})"
-                    for name, key, err in failures
-                ],
-            ]
-            raise RuntimeError("\n".join(lines))
+        if failures:
+            if reporter:
+                for error_panel in reporter.error_panels():
+                    Console().print(error_panel)
+            for name, key, err in failures:
+                self.log(
+                    None,
+                    f"Element failed: {name} (key: {key}): {type(err).__name__}: {err.info.log_text}",
+                    level="ERROR",
+                )
+            if final_raise_on_error:
+                # lines = [
+                #     f"{len(failures)} element(s) failed:",
+                #     *[
+                #         f"- {name}: {key} ({type(err).__name__}: {err})"
+                #         for name, key, err in failures
+                #     ],
+                # ]
+                raise RuntimeError("Pipeline failed with errors in elements: ")
+        self.log_sigs(order)
         # self.prune()
+
+    def log_sigs(self, order) -> None:
+        cache = self.load_cache(self.signature_store_path)
+        for node in order:
+            if node is not None:
+                sig = cache.get(node.key, None)
+                self.log(None, f"SIG {node.name}: {sig}")
+        self.registry.write_registry(Path("test.reagistry.txt"))
 
     def prune(self) -> None:
         """Save the current state of the workspace to a file."""
@@ -440,24 +493,33 @@ class Executor:
 
     def _run_node(self, node, cache, reporter, continue_on_error, failures):
         try:
-            # print(f"Running node: {node.name} (key: {node.key})")
             node()
             # update cache immediately after each node finishes, so we don't lose progress if the pipeline crashes later  # noqa: E501
             self.update_cache(cache, node)
-            # cache[node.key] = node.signature
-            # self.save_cache(self.signature_store_path, cache)
             if reporter:
                 reporter.mark_done(node.key)
-        # except CalledProcessError as e:
-        except Exception as e:
-            failures.append((node.name, node.key, e))
+        except PipelineError as e:
+            e.info.add_creation_trace(node)
+            # Console().print(e.info.panel)
+            self.log(reporter, f"{node.name} failed!", level="ERROR")
             if reporter:
+                reporter.push_error_panel(e.info.panel)
                 reporter.mark_failed(node.key)
+            else:
+                Console().print(e.info.panel)
+            failures.append((node.name, node.key, e))
+            if not continue_on_error:
+                self.save_cache(self.signature_store_path, cache)
+                raise
+
+        except Exception as e:
             self.log(
                 reporter,
-                f"Error: {node.name}: failed{e}",
+                f"Error: {node.name}: failed with {type(e).__name__}: {e}",
                 level="ERROR",
             )
+            if reporter:
+                reporter.mark_failed(node.key)
             if not continue_on_error:
                 self.save_cache(self.signature_store_path, cache)
                 raise
@@ -480,7 +542,7 @@ class Executor:
         dry_run: bool,
         log_run_only: bool,
         verbose: bool,
-    ) -> None:
+    ) -> tuple[list[tuple[str, str, Exception]], ProgressReporter | None]:
         sigstore = self.load_sigstore(self.signature_data_path)
         # Keys of nodes that failed or were blocked by an upstream failure.
         # Used to propagate UPSTREAM_FAILED to their dependents.
@@ -498,10 +560,8 @@ class Executor:
             upstream_failed = any(pre.key in blocked_keys for pre in node.pres)
             if upstream_failed and not dry_run:
                 blocked_keys.add(node.key)
-                self.log(
-                    reporter,
-                    f"SKIP {node.name}  (upstream failed)",
-                    level="WARNING",
+                self._log_node(
+                    node, reporter, True, "upstream failed", log_run_only, verbose
                 )
                 if reporter:
                     reporter.mark_upstream_failed(node.key, "upstream failed")
@@ -527,6 +587,7 @@ class Executor:
             # dependents are skipped with UPSTREAM_FAILED.
             if failures and failures[-1][1] == node.key:
                 blocked_keys.add(node.key)
+        return failures, reporter
 
     ###########################################################################
     # Parallel execution  (DAG-aware: runs independent nodes concurrently)
@@ -559,7 +620,7 @@ class Executor:
         max_workers: int | None,
         log_run_only: bool,
         verbose: bool,
-    ) -> None:
+    ) -> tuple[list[tuple[str, str, Exception]], ProgressReporter | None]:
 
         by_key, pending_deps, successors = self._init_pending_and_successors(order)
         cache_lock = threading.Lock()
@@ -670,7 +731,7 @@ class Executor:
 
             if abort.is_set():
                 pool.shutdown(wait=False, cancel_futures=True)
-
+        return failures, reporter
 
     ###########################################################################
     # DAG helpers
@@ -903,8 +964,12 @@ class Executor:
                 cache[node.key] = node.signature
                 self.save_cache(outstore, cache)
 
-    
-    def merge_signature_stores(self, store_paths: list[Path], out_path: Path, conflict: Literal["override", "raise"] = "raise") -> None:
+    def merge_signature_stores(
+        self,
+        store_paths: list[Path],
+        out_path: Path,
+        conflict: Literal["override", "raise"] = "raise",
+    ) -> None:
         """Merge multiple signature stores into one, checking for conflicts."""
         merged: dict[str, str] = {}
         for path in store_paths:
@@ -924,7 +989,9 @@ class Executor:
                 merged[key] = sig
         self.save_cache(out_path, merged)
 
-    def update_store(self, store_paths: list[Path], conflict: Literal["override", "raise"] = "raise") -> None:
+    def update_store(
+        self, store_paths: list[Path], conflict: Literal["override", "raise"] = "raise"
+    ) -> None:
         """Update a signature store with new key-signature pairs."""
         out_path = self.signature_store_path
         store_paths = [out_path] + store_paths

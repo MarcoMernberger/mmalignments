@@ -229,7 +229,8 @@ class FastP(External):
         ]
 
         # Add paired-end parameters if provided
-        paths = [out_r1, json_out, html_out]
+        in_paths = [fastq_r1]
+        out_paths = [out_r1, json_out, html_out]
         if fastq_r2 is not None:
             fastq_r2 = Path(fastq_r2).absolute()
             if out_r2 is None:
@@ -244,8 +245,10 @@ class FastP(External):
                     str(out_r2),
                 ]
             )
-            paths.append(out_r2)
-        return arguments, paths, None, None, None
+            in_paths.append(fastq_r2)
+            out_paths.append(out_r2)
+        subcommand = None
+        return arguments, subcommand, in_paths, out_paths, None, None, None
 
     @element
     def qc(

@@ -259,8 +259,9 @@ class Samtools(External):
         >>> sort_runner()  # Execute the sort
         """
         # Build command: samtools sort -o <output> <input>
-        arguments = ["sort", "-o", self.strabs(output_bam), self.strabs(input_bam)]
-        return arguments, [output_bam], None, None, None
+        subcommand = "sort"
+        arguments = [subcommand, "-o", self.strabs(output_bam), self.strabs(input_bam)]
+        return arguments, subcommand, [input_bam], [output_bam], None, None, None
 
     ###########################################################################
     # Index (High-level and Low-level wrapper)
@@ -382,7 +383,8 @@ class Samtools(External):
         bai_file = bai_file or bam_file.with_suffix(bam_file.suffix + ".bai")
         # Build command: samtools index <bam_file>
         arguments = ["index", self.strabs(bam_file), "-o", self.strabs(bai_file)]
-        return arguments, [bai_file], None, None, None
+        subcommand = "index"
+        return arguments, subcommand, [bam_file], [bai_file], None, None, None
 
     ###########################################################################
     # Faidx (High-level and Low-level wrapper)
@@ -533,7 +535,8 @@ class Samtools(External):
             call_afterwards = _faidx_and_cut_callable(
                 output_file.with_suffix(".faicut")
             )
-        return arguments, [output_file], None, None, call_afterwards
+        subcommand = "faidx"
+        return arguments, subcommand, [fasta], [output_file], None, None, call_afterwards
 
     ###########################################################################
     # Stats (High-level and Low-level wrapper)
@@ -659,7 +662,8 @@ class Samtools(External):
         """
         # samtools stats input.bam > output.txt
         arguments = ["stats", self.strabs(input_bam)]
-        return arguments, [output_file], output_file, None, None
+        subcommand = "stats"
+        return arguments, subcommand, [input_bam], [output_file], output_file, None, None
 
     ###########################################################################
     # Flagstat (High-level and Low-level wrapper)
@@ -793,4 +797,5 @@ class Samtools(External):
 
         # samtools flagstat input.bam > output.txt
         arguments = ["flagstat", str(input_bam), "-O", suffix[1:]]
-        return arguments, [output_file], output_file, None, None
+        subcommand = "flagstat"
+        return arguments, subcommand, [input_bam], [output_file], output_file, None, None

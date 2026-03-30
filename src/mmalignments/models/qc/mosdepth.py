@@ -21,21 +21,19 @@ import json
 import logging
 import subprocess
 from pathlib import Path
-from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
 from mmalignments.models.elements import Element, MappedElement, element
 from mmalignments.models.tags import (
     ElementTag,
     Method,
+    PartialElementTag,
     Stage,
     State,
-    merge_tag,
-    PartialElementTag,
     from_prior,
 )
 
-from ..externals import External, ExternalRunConfig, subroutine, SubroutineIn
+from ..externals import External, ExternalRunConfig, SubroutineIn, subroutine
 from ..parameters import Params, ParamSet
 
 logger = logging.getLogger(__name__)
@@ -164,7 +162,8 @@ class Mosdepth(External):
         # Finally add the BAM/CRAM input
 
         arguments.append(self.strabs(input_bam))
-        return arguments, [prefix], None, None, None
+        subcommand = None
+        return arguments, subcommand, [input_bam], [prefix], None, None, None
 
     @element
     def coverage(

@@ -212,7 +212,8 @@ class FastQC(External):
         # Add input files
         for f in input_files:
             arguments.append(str(f))
-        return arguments, [output_dir], None, None, None
+        subcommand = None
+        return arguments, subcommand, input_files, [output_dir], None, None, None
 
     @element
     def qc(
@@ -387,4 +388,5 @@ class FastQC(External):
         # Add input files
         for f in input_files:
             arguments.append(str(f))
-        return arguments, [output_dir], None, None, None
+        subcommand = None
+        return arguments, subcommand, input_files, [output_dir], None, None, None

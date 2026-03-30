@@ -9,12 +9,16 @@ from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
 from mmalignments.models.elements import Element, element
-from mmalignments.models.externals import External, ExternalRunConfig, subroutine
+from mmalignments.models.externals import (
+    External,
+    ExternalRunConfig,
+    subroutine,
+)
 from mmalignments.models.parameters import Params, ParamSet
 from mmalignments.models.tags import (
     ElementTag,
-    PartialElementTag,
     Method,
+    PartialElementTag,
     Stage,
     State,
     from_prior,
@@ -212,7 +216,8 @@ class MultiQC(External):
 
         # Add analysis directory
         arguments.append(str(analysis_dir))
-        return arguments, [output_dir], None, None, None
+        subcommand = None
+        return arguments, subcommand, [analysis_dir], [output_dir], None, None, None
 
     @element
     def aggregate(
