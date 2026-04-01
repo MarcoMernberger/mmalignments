@@ -9,6 +9,8 @@ import sys
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
 from logging import Logger
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -16,7 +18,7 @@ from typing import Any, Iterable, Literal
 
 from rich.console import Console  # type: ignore[import]
 
-from mmalignments.models.elements import Element
+from mmalignments.models.elements import Element, explain_signature_diff
 from mmalignments.models.externals import External
 from mmalignments.models.registry import ElementRegistry, element_build_context
 from mmalignments.models.resources import ResourceConfig, _current_resources
@@ -28,6 +30,36 @@ from mmalignments.services.errors import PipelineError
 from mmalignments.services.io import ensure, from_json, parents
 from mmalignments.services.logging import initlog
 from mmalignments.services.time import now_as_str
+
+
+@dataclass
+class NodeState:
+    key: str
+    state: Literal["DONE", "SKIPPED", "FAILED"] = "SKIPPED"
+    reason: str = ""
+    start: datetime | None = None
+    stop: datetime | None = None
+    elapsed: float | None = None
+
+    def mark_start(self):
+        self.start = datetime.now()
+
+    def mark_done(self):
+        self.stop = datetime.now()
+        self.elapsed = (self.stop - self.start).total_seconds() if self.start else None
+        self.state = "DONE"
+
+    def mark_failed(self, reason: str):
+        self.stop = datetime.now()
+        self.elapsed = (self.stop - self.start).total_seconds() if self.start else None
+        self.state = "FAILED"
+        self.reason = reason
+
+    def mark_skipped(self, reason: str):
+        self.state = "SKIPPED"
+        self.reason = reason
+        self.start = self.stop = datetime.now()
+        self.elapsed = 0
 
 
 class Executor:
@@ -136,6 +168,7 @@ class Executor:
         dry_run: bool = False,
         max_workers: int | None = None,
         dot_path: str | Path | None = None,
+        log_signatures: bool = False,
     ) -> None:
         """Run all Elements registered since :meth:`record` was called."""
         dot_path = dot_path or self.dot_path
@@ -167,6 +200,7 @@ class Executor:
             progress=progress,
             parallel=parallel,
             max_workers=max_workers or self.resources.threads,
+            log_signatures=log_signatures,
         )
 
     ###########################################################################
@@ -322,6 +356,7 @@ class Executor:
         progress: bool = True,
         parallel: bool = False,  # ← neu
         max_workers: int | None = None,
+        log_signatures: bool = False,
     ) -> None:
         self.state = "running"
         if self.stop_event.is_set():
@@ -340,7 +375,7 @@ class Executor:
             reporter.register(order)
             reporter.start_live()
 
-        failures: list[tuple[str, str, Exception]] = []
+        failures: list[tuple[str, str, PipelineError]] = []
 
         try:
             if sys.stdin.isatty():
@@ -398,7 +433,7 @@ class Executor:
                 #             ]
                 #             if failed:
                 #                 Console().print(
-                #                     f"[bold red]Failed Nodes ({len(failed)}):[/bold red]"
+                #                     f"[bold red]Failed Nodes ({len(failed)}):[/bold red]"  # noqa: E501
                 #                 )
                 #                 for n in failed:
                 #                     Console().print(f"- {n.name}")
@@ -423,7 +458,7 @@ class Executor:
             for name, key, err in failures:
                 self.log(
                     None,
-                    f"Element failed: {name} (key: {key}): {type(err).__name__}: {err.info.log_text}",
+                    f"Element failed: {name} (key: {key}): {type(err).__name__}: {err.info.log_text}",  # noqa: E501
                     level="ERROR",
                 )
             if final_raise_on_error:
@@ -435,7 +470,8 @@ class Executor:
                 #     ],
                 # ]
                 raise RuntimeError("Pipeline failed with errors in elements: ")
-        self.log_sigs(order)
+        if log_signatures:
+            self.log_sigs(order)
         # self.prune()
 
     def log_sigs(self, order) -> None:
@@ -513,13 +549,18 @@ class Executor:
                 raise
 
         except Exception as e:
+            err = PipelineError(e, phase="EXECUTION")
             self.log(
                 reporter,
                 f"Error: {node.name}: failed with {type(e).__name__}: {e}",
                 level="ERROR",
             )
             if reporter:
+                reporter.push_error_panel(err)
                 reporter.mark_failed(node.key)
+            else:
+                Console().print(err.info.panel)
+            failures.append((node.name, node.key, err))
             if not continue_on_error:
                 self.save_cache(self.signature_store_path, cache)
                 raise
@@ -538,24 +579,39 @@ class Executor:
         cache: dict[str, str],
         reporter: ProgressReporter | None,
         continue_on_error: bool,
-        failures: list[tuple[str, str, Exception]],
+        failures: list[tuple[str, str, PipelineError]],
         dry_run: bool,
         log_run_only: bool,
         verbose: bool,
-    ) -> tuple[list[tuple[str, str, Exception]], ProgressReporter | None]:
+    ) -> tuple[list[tuple[str, str, PipelineError]], ProgressReporter | None]:
         sigstore = self.load_sigstore(self.signature_data_path)
         # Keys of nodes that failed or were blocked by an upstream failure.
         # Used to propagate UPSTREAM_FAILED to their dependents.
         blocked_keys: set[str] = set()
+        reasons_to_run = {}
+        need_to_run: list[Element] = []
+        skipped: set[str] = set()
         for node in order:
             sigdata = dict(node.sig_data())  #
             sigdata["name"] = node.tag.default_name
             sigstore[node.key] = sigdata
             self.save_sigstore(self.signature_data_path, sigstore)
+            # check if the node must run or skipped
+            skip, reason = self._evaluate_node(node, cache)
+            if skip:
+                skipped.add(node.key)
+                # log skipped node
+                self._log_node(node, reporter, skip, reason, log_run_only, verbose)
+                if reporter:
+                    reporter.mark_skip(node.key, reason)
+                continue
+            else:
+                reasons_to_run[node.key] = reason
+                need_to_run.append(node)
             # check if we need to stop
             if self.check_and_stop(reporter):
                 break
-
+        for node in need_to_run:
             # check if a direct prerequisite failed or was blocked
             upstream_failed = any(pre.key in blocked_keys for pre in node.pres)
             if upstream_failed and not dry_run:
@@ -566,16 +622,11 @@ class Executor:
                 if reporter:
                     reporter.mark_upstream_failed(node.key, "upstream failed")
                 continue
-
-            # check if the node must run or skipped
-            skip, reason = self._evaluate_node(node, cache)
-            self._log_node(node, reporter, skip, reason, log_run_only, verbose)
+            # log running node
+            self._log_node(
+                node, reporter, False, reasons_to_run[node.key], log_run_only, verbose
+            )
             if dry_run:
-                continue
-
-            if skip:
-                if reporter:
-                    reporter.mark_skip(node.key, reason)
                 continue
 
             if reporter:
@@ -616,11 +667,11 @@ class Executor:
         cache: dict[str, str],
         reporter: ProgressReporter | None,
         continue_on_error: bool,
-        failures: list[tuple[str, str, Exception]],
+        failures: list[tuple[str, str, PipelineError]],
         max_workers: int | None,
         log_run_only: bool,
         verbose: bool,
-    ) -> tuple[list[tuple[str, str, Exception]], ProgressReporter | None]:
+    ) -> tuple[list[tuple[str, str, PipelineError]], ProgressReporter | None]:
 
         by_key, pending_deps, successors = self._init_pending_and_successors(order)
         cache_lock = threading.Lock()
@@ -692,7 +743,10 @@ class Executor:
                         if reporter:
                             reporter.mark_done(node.key)
                     except Exception as e:
+                        if not isinstance(e, PipelineError):
+                            e = PipelineError(e, phase="EXECUTION")
                         failures.append((node.name, node.key, e))
+
                         if reporter:
                             reporter.mark_failed(node.key)
                         self.log(reporter, f"Error: {node.name}: {e}", level="ERROR")
@@ -926,11 +980,18 @@ class Executor:
         # nodes = self.collect(targets)
         # self.check_duplicate_outputs(nodes)
         # order = self.toposort(nodes)
+        sig_data_store = outstore.with_suffix(".data.json")
         order = self.ordered_nodes_for_run()
         cache = self.load_cache(self.signature_store_path)
+        data_cache = self.load_sigstore(self.signature_data_path)
         for node in order:
             cached_sig = cache.get(node.key)
             skip, reason = node.skip(cached_signature=cached_sig)
+            sigdata = dict(node.sig_data())  #
+            sigdata["name"] = node.tag.default_name
+            data_cache[node.key] = sigdata
+            self.save_sigstore(sig_data_store, data_cache)
+
             if not skip and reason == "First run":
                 if node.outputs_ok():
                     if accept_existing:
@@ -946,6 +1007,13 @@ class Executor:
                             f"Node {node.key} is being captured for the first time, but its outputs already exist and are valid. This likely means the node was run before without the cache, or the cache was cleared."  # noqa: E501
                         )
             elif not skip and reason == "Cached signature does not match":
+                _, check_result = explain_signature_diff(node, data_cache)
+                self.log(
+                    None,
+                    f"Node {node.key} cache signature is different:\n{check_result}",  # noqa: E501
+                    level="WARNING",
+                )
+
                 if node.outputs_ok():
                     if accept_existing:
                         cache[node.key] = node.signature
@@ -974,6 +1042,7 @@ class Executor:
         merged: dict[str, str] = {}
         for path in store_paths:
             cache = self.load_cache(path)
+            data_cache = self.load_sigstore(path.with_suffix(".data.json"))
             for key, sig in cache.items():
                 if key in merged and merged[key] != sig:
                     if conflict == "override":
@@ -988,6 +1057,7 @@ class Executor:
                         )
                 merged[key] = sig
         self.save_cache(out_path, merged)
+        self.save_sigstore(out_path.with_suffix(".data.json"), data_cache)
 
     def update_store(
         self, store_paths: list[Path], conflict: Literal["override", "raise"] = "raise"
@@ -996,3 +1066,55 @@ class Executor:
         out_path = self.signature_store_path
         store_paths = [out_path] + store_paths
         self.merge_signature_stores(store_paths, out_path, conflict)
+
+    ############################################################################
+    # Reporting
+    ############################################################################
+    # def write_report(self, order: list[Element], path: Path):
+    #     with path.open("w", encoding="utf-8") as f:
+    #         f.write("FILE LINEAGE\n")
+    #         f.write("=" * 80 + "\n")
+
+    #         for file, producer in produced_by.items():
+    #             f.write(f"{file}  <--  {producer}\n")
+
+    #         f.write("PIPELINE REPORT\n")
+    #         f.write("=" * 80 + "\n\n")
+
+    #         for i, node in enumerate(order, 1):
+    #             f.write(f"[{i}] {node.name}\n")
+    #             f.write(f"  Key: {node.key}\n")
+
+    #             # Inputs
+    #             f.write("  Inputs:\n")
+    #             for inp in node.inputs:
+    #                 f.write(f"    - {inp}\n")
+
+    #             # Outputs
+    #             f.write("  Outputs:\n")
+    #             for name, out in node.artifacts.items():
+    #                 f.write(f"    - {name}: {out}\n")
+
+    #             # Dependencies
+    #             f.write("  Depends on:\n")
+    #             for pre in node.pres:
+    #                 f.write(f"    - {pre.name}\n")
+
+    #             f.write("\n")
+
+    # def write_execution_order(self, order, path):
+    # with open(path, "w") as f:
+    #     for i, node in enumerate(order, 1):
+    #         f.write(f"{i:03d}  {node.name}\n")
+
+    # def render_dag(self, dot_path: Path):
+    #     subprocess.run(["dot", "-Tpng", str(dot_path), "-o", str(dot_path.with_suffix(".png"))])
+
+    # def build_lineage(self, nodes):
+    #     produced_by = {}
+
+    #     for node in nodes:
+    #         for out in node.output_files:
+    #             produced_by[str(out)] = node.name
+
+    #     return produced_by

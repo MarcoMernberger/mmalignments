@@ -627,7 +627,7 @@ class BWAMem2(External):
         in_paths = [index_prefix, fastq_r1]
         if fastq_r2:
             arguments.append(self.strabs(fastq_r2))
-            in_paths.append(fastq_r2)
+            in_paths.append(Path(fastq_r2))
 
         output_bam = self.strabs(output_bam)
         # Output to BAM file

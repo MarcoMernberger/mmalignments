@@ -35,7 +35,7 @@ from functools import cached_property, wraps
 from inspect import signature
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import IO, Any, Callable, Iterable, Mapping, TypeAlias
+from typing import IO, Any, Callable, Iterable, Mapping, Sequence, TypeAlias
 
 from mmalignments.models.parameters import (
     Params,
@@ -49,7 +49,6 @@ from mmalignments.models.resources import (
 )
 from mmalignments.services.errors import (
     PipelineError,
-    build_error_info_from_exception,
 )
 from mmalignments.services.io import parents
 from mmalignments.services.logging import ExternalLogger
@@ -620,245 +619,62 @@ class External:
                     return log_dir
         return fallback
 
-    # def get_timestamp_with_pid(self, timestamp: datetime) -> str:
-    #     """Generate a timestamp string for log file naming."""
-    #     timestamp_pid = f"{self._timestamp_to_str(timestamp)}_{os.getpid()}"
-    #     return timestamp_pid
+    def _initalize_logger(
+        self, cfg: ExternalRunConfig, name: str, now: datetime, output: Path | None
+    ) -> ExternalLogger:
+        """
+        Initialize the ExternalLogger for the current run based on the provided
+        configuration.
 
-    # def _delete_associated_logs(
-    #     self, log_dir: Path, path: Path, timestamp: datetime
-    # ) -> None:
-    #     stem = path.stem
-    #     combined, stdout, stderr = self._get_log_files_for_run(log_dir, stem, timestamp)
-    #     try:
-    #         combined.unlink()
-    #     except Exception as e:
-    #         logger.info(
-    #             f"Failed to remove old combined log {path} with {timestamp}\nException was: {e}"
-    #         )
-    #     try:
-    #         if stdout.exists():
-    #             stdout.unlink()
-    #     except Exception as e:
-    #         logger.info(
-    #             f"Failed to remove old stdout log {stdout} with {timestamp}\nException was: {e}"
-    #         )
-    #     try:
-    #         if stderr.exists():
-    #             stderr.unlink()
-    #     except Exception as e:
-    #         logger.info(
-    #             f"Failed to remove old stderr log {stderr} with {timestamp}\nException was: {e}"
-    #         )
+        Parameters
+        ----------
+        cfg : ExternalRunConfig
+            Configuration for the run, which may specify log_dir or cwd.
+        name : str
+            Name of the logger.
+        now : datetime
+            Current timestamp for log file naming.
+        output : Path | None
+            An optional output path if the command call needs to be piped into an output
+            file. Then the logger sets the output stream to this file.
 
-    # def _get_log_files_for_run(
-    #     self, log_dir: Path, base: str, timestamp: datetime
-    # ) -> tuple[Path, Path, Path]:
-    #     combined_log_path = (
-    #         log_dir / f"{base}_{self._timestamp_to_str(timestamp)}_{os.getpid()}.log"
-    #     )
-    #     stdout_log_path = combined_log_path.with_suffix(".stdout.log")
-    #     stderr_log_path = combined_log_path.with_suffix(".stderr.log")
-    #     return combined_log_path, stdout_log_path, stderr_log_path
-
-    # def _setup_run_logging(
-    #     self,
-    #     log_dir: Path,
-    #     filebase: str,
-    #     timestamp: datetime,
-    # ) -> tuple[Path, Path, Path, FileHandler | None]:
-    #     """Set up log files and file handler for a run.
-
-    #     Parameters
-    #     ----------
-    #     cwd : Path | None
-    #         Working directory for logs; if None, uses current directory.
-
-    #     Returns
-    #     -------
-    #     tuple[Path, Path, Path, FileHandler | None, str]
-    #         (combined_log_path, stdout_log_path, stderr_log_path, file_handler, filebase)
-    #     """
-    #     ensure(log_dir)
-    #     combined_log_path, stdout_log_path, stderr_log_path = (
-    #         self._get_log_files_for_run(log_dir, filebase, timestamp)
-    #     )
-    #     # Create file handler for logger messages
-    #     with open(combined_log_path, "w", encoding="utf-8") as f:
-    #         f.write("\n" + "=" * 80 + "\n")
-    #         f.write("LOG\n")
-    #         f.write("=" * 80 + "\n\n")
-    #     file_handler = FileHandler(combined_log_path, mode="a", encoding="utf-8")
-    #     file_handler.setLevel(self._loglevel)
-    #     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    #     file_handler.setFormatter(fmt)
-    #     logger.setLevel(self._loglevel)
-    #     logger.addHandler(file_handler)
-    #     # return the generated base (name + timestamp) so callers can
-    #     # identify and manage related per-run files
-    #     return combined_log_path, stdout_log_path, stderr_log_path, file_handler
-
-    # def _finalize_run_logging(
-    #     self,
-    #     combined_log_path: Path,
-    #     stdout_log_path: Path,
-    #     stderr_log_path: Path,
-    #     file_handler: FileHandler | None,
-    #     success: bool,
-    # ) -> None:
-    #     """Finalize logging by combining log files and adding success marker.
-
-    #     Parameters
-    #     ----------
-    #     combined_log_path : Path
-    #         Path to the combined log file.
-    #     stdout_log_path : Path
-    #         Path to the stdout log file.
-    #     stderr_log_path : Path
-    #         Path to the stderr log file.
-    #     file_handler : FileHandler | None
-    #         File handler to remove from logger.
-    #     success : bool
-    #         Whether the subprocess completed successfully.
-    #     """
-    #     try:
-    #         # Remove and close the file handler first
-    #         if file_handler is not None:
-    #             logger.removeHandler(file_handler)
-    #             file_handler.close()
-
-    #         # Append subprocess streams to combined log
-    #         with open(combined_log_path, "a", encoding="utf-8") as outf:
-    #             outf.write("\n" + "=" * 80 + "\n")
-    #             outf.write("SUBPROCESS OUTPUT\n")
-    #             outf.write("=" * 80 + "\n\n")
-
-    #             if stderr_log_path.exists():
-    #                 outf.write("--- STDERR ---\n")
-    #                 with open(stderr_log_path, "r", encoding="utf-8") as f:
-    #                     outf.write(f.read())
-    #                 outf.write("\n")
-
-    #             if stdout_log_path.exists():
-    #                 outf.write("--- STDOUT ---\n")
-    #                 with open(stdout_log_path, "r", encoding="utf-8") as f:
-    #                     outf.write(f.read())
-    #                 outf.write("\n")
-
-    #             # Add success/failure marker
-    #             outf.write("\n" + "=" * 80 + "\n")
-    #             if success:
-    #                 outf.write("STATUS: SUCCESS\n")
-    #                 outf.write("The command completed successfully.\n")
-    #             else:
-    #                 outf.write("STATUS: FAILED\n")
-    #                 outf.write("The command failed or was interrupted.\n")
-    #             outf.write("=" * 80 + "\n")
-
-    #         # Clean up temporary per-stream log files
-    #         try:
-    #             if stderr_log_path.exists():
-    #                 stderr_log_path.unlink()
-    #             if stdout_log_path.exists():
-    #                 stdout_log_path.unlink()
-    #         except Exception:
-    #             logger.exception("Failed to remove temporary per-stream log files")
-
-    #     except Exception:
-    #         logger.exception("Failed while finalizing run log files")
-
-    # def _cleanup_old_logs(
-    #     self,
-    #     log_dir: Path,
-    #     current_prefix: str,
-    #     current_timestamp: datetime,
-    # ) -> None:
-    #     """
-    #     Remove older per-run logs for this tool in *log_dir*.
-
-    #     Files that match the pattern ``{name}_*.log`` are examined. If their
-    #     timestamp (encoded in the filename) is older than the one in
-    #     ``current_base`` they are removed along with their corresponding
-    #     ``.stdout.log`` and ``.stderr.log`` files.
-
-    #     Parameters
-    #     ----------
-    #     log_dir : Path
-    #         Directory where log files are stored.
-    #     current_prefix : str
-    #         The prefix used in log filenames for the current run (e.g. tool name).
-    #     current_timestamp : datetime
-    #         The timestamp of the current run, used to identify older logs.
-    #     """
-
-    #     # extract timestamp part from current_base (strip pid suffix)
-    #     current_base = f"{current_prefix}_{self._timestamp_to_str(current_timestamp)}"
-    #     for p in Path(log_dir).glob(f"{current_prefix}_*.log"):
-    #         stem = p.stem  # base without suffix
-    #         if stem == current_base:
-    #             continue
-    #         ts = self.extract_timestamp_part(stem, current_prefix)
-    #         if ts is None:
-    #             logger.debug("Could not parse log timestamp '%s', skipping", stem)
-    #             continue
-    #         if ts < current_timestamp:
-    #             # remove combined and related per-stream logs
-    #             self._delete_associated_logs(log_dir=log_dir, path=p, timestamp=ts)
-    #         # except Exception:
-    #         #     logger.exception(f"Failed to process log file {p} for cleanup")
-    #         #     continue
-    #         #     raise
-
-    # def _prepare_output_streams(
-    #     self,
-    #     cfg: ExternalRunConfig,
-    #     output: Path | None = None,
-    #     stdout_log_path: Path | None = None,
-    #     stderr_log_path: Path | None = None,
-    # ) -> tuple[Any, Any]:
-    #     stdout_stream = None
-    #     stderr_stream = None
-    #     # decide stdout
-    #     # Open per-stream files if not capturing output
-    #     if cfg.capture_output:
-    #         if cfg.stdout is None:
-    #             stdout_stream = subprocess.PIPE
-    #         else:
-    #             stdout_stream = open_target(cfg.stdout, append=cfg.append)
-    #         if cfg.stderr is None:
-    #             stderr_stream = subprocess.PIPE
-    #         else:
-    #             stderr_stream = open_target(cfg.stderr, append=cfg.append)
-    #     else:
-    #         if stdout_log_path:
-    #             stdout_stream = open(stdout_log_path, "w", encoding="utf-8")
-    #         else:
-    #             stdout_stream = None
-    #         if stderr_log_path:
-    #             stderr_stream = open(stderr_log_path, "w", encoding="utf-8")
-    #         else:
-    #             stderr_stream = None
-    #     if output:
-    #         # If output file is specified, redirect to it always (append if specified)
-    #         stdout_stream = open_target(output, append=cfg.append)
-    #     return stdout_stream, stderr_stream
-
-    # def _finalize_streams(self, stdout_fh: Any, stderr_fh: Any) -> None:
-    #     for fh in (stdout_fh, stderr_fh):
-    #         try:
-    #             if fh is None or fh is subprocess.PIPE:
-    #                 continue
-    #             close = getattr(fh, "close", None)
-    #             if callable(close):
-    #                 close()
-    #         except Exception:
-    #             logger.exception("Failed to close stdout file object")
+        Returns
+        -------
+        ExternalLogger
+            The initialized ExternalLogger for the current run.
+        """
+        log_dir = self._get_log_dir(cfg)
+        call_logger = ExternalLogger(log_dir, name, now)
+        call_logger.prepare_output_streams(
+            output=output,
+            pipe_output=cfg.pipe_output,
+            append=cfg.append,
+            stderr_from_cfg=cfg.stderr,
+            stdout_from_cfg=cfg.stdout,
+        )
+        return call_logger
 
     ####################################################################################
     # Command-building helpers
     ####################################################################################
 
     def subcommand(self, arguments: list[str] | None) -> str | None:
+        """
+        A best-effor helper function that tries to resolve the subcommand of the main
+        external function call. For this to work, the subcommand must have been supplied
+        in the tool parameter json or have been inferred otherwise.
+        If this does not work, it assumes there is no subcommand.
+
+        Parameters
+        ----------
+        arguments : list[str] | None
+            Command line arguments to be called.
+
+        Returns
+        -------
+        str | None
+            The specific subcommand if it can be resolved, else None.
+        """
         if not arguments:
             return None
         # only if there are registered subcommands
@@ -977,11 +793,102 @@ class External:
         return cmd
 
     ###########################################################################
+    # Run Helper
+    ###########################################################################
+
+    def _run_callback(
+        self,
+        fn: Callable[[], CompletedProcess | None] | Runnable | None,
+        phase: str,
+        cmd: list[str] | None = None,
+        call_logger: ExternalLogger | None = None,
+        name: str | None = None,
+    ) -> Any:
+        """
+        A wrapper that executes pre and post callbacks that need to run prior or after
+        the main command. In addition, it handles logging and error reporting.
+
+        Parameters
+        ----------
+        fn : Callable[[], CompletedProcess  |  None] | Runnable | None
+            the callback function to execute, which can be a simple callable or a
+            Runnable instance.
+        phase : str
+            The phase of execution, used for logging and error reporting.
+        cmd : list[str] | None, optional
+            The command being executed, by default None
+        call_logger : ExternalLogger | None, optional
+            The logger instance used for logging errors, by default None
+        name : str | None, optional
+            The name of the callback function, by default None
+
+        Returns
+        -------
+        Any
+            The result of the callback function execution, if any.
+
+        Raises
+        ------
+        PipelineError
+            Pipeline-specific Error with more debug information.
+        """
+        if fn:
+            name = getattr(fn, "__name__", None)
+            if not name and isinstance(fn, Runnable):
+                name = fn.command_display
+
+            phase = f"{phase} ({name})" if name else phase
+            try:
+                return fn()
+            except PipelineError:
+                raise
+            except KeyboardInterrupt:
+                if call_logger:
+                    call_logger.logger.warning("Execution aborted by user")
+                raise
+            except Exception as e:
+                error = PipelineError(
+                    e=e,
+                    cmd=fn.command if isinstance(fn, Runnable) else cmd,
+                    logfile=(call_logger.combined_log_path if call_logger else None),
+                    phase=phase,
+                )
+                if call_logger:
+                    call_logger.log_error(error.info)
+                raise error
+
+    def run_process(
+        self, cmd: list[str], cfg: ExternalRunConfig, call_logger: ExternalLogger
+    ) -> CompletedProcess | None:
+        # the function that executes the subprocess run
+        try:
+            cp = subprocess.run(
+                cmd,
+                cwd=str(cfg.cwd) if cfg.cwd is not None else None,
+                env=cfg.env,
+                stdout=call_logger.stdout_stream,
+                stderr=call_logger.stderr_stream,
+                text=True,
+                timeout=cfg.timeout,
+                check=False,  # we'll handle this manually to log errors
+            )
+        except KeyboardInterrupt:
+            call_logger.logger.warning("Execution aborted by user")
+            raise
+        call_logger.write_streams(cp)
+        if cfg.check and cp:
+            try:
+                cp.check_returncode()  # may raise CalledProcessError
+            except subprocess.CalledProcessError as e:
+                # make sure we have the output stream for debugging
+                e.stdout = cp.stdout
+                e.stderr = cp.stderr
+                raise
+        return cp
+
+    ###########################################################################
     # Runner
     ###########################################################################
-    # External.run expects a single callable(post(cp)). Wrap the list
-    # of zero-argument post-callables in a single function that will be
-    # called with the CompletedProcess after the subprocess finished.
 
     def runnable(
         self,
@@ -996,7 +903,7 @@ class External:
     ) -> Runnable:
         """Execute the external tool and optionally run callbacks.
 
-        This is a thin wrapper around ``subprocess.run`` that builds the
+        This is a wrapper around ``subprocess.run`` that builds the
         command via :meth:`build_cmd`, captures stdout/stderr by default and
         raises ``subprocess.CalledProcessError`` when ``check`` is True and the
         exit code is non-zero.
@@ -1043,180 +950,85 @@ class External:
         cmd = self.build_cmd(arguments, params)
 
         # Build a zero-argument callable that executes the configured run.
-        def _runner() -> CompletedProcess:
+        def _runner() -> CompletedProcess | None:
             """Execute this External invocation and return CompletedProcess.
 
             The closure captures the arguments passed to :meth:`run` so the
             runner can be invoked later without parameters.
             """
-            # Set up logging infrastructure (always create log files)
-            name = (
-                f"{self.name}_{subcommand}" if subcommand else self.name
-            )  # noqa: E501
-            now = datetime.now()
-            log_dir = self._get_log_dir(cfg)
-            call_logger = ExternalLogger(log_dir, name, now)
-            call_logger.prepare_output_streams(
-                output=output,
-                pipe_output=cfg.pipe_output,
-                append=cfg.append,
-                stderr_from_cfg=cfg.stderr,
-                stdout_from_cfg=cfg.stdout,
-            )
-
-            def try_add(
-                fn: Callable[[], CompletedProcess | None] | Runnable | None,
-                phase: str,
-                cmd: list[str] | None = None,
-                call_logger: ExternalLogger | None = None,
-                name: str | None = None,
-            ) -> Any:
-                if fn:
-                    name = getattr(fn, "__name__", None)
-                    if not name and isinstance(fn, Runnable):
-                        name = fn.command_display
-
-                    phase = f"{phase} ({name})" if name else phase
-                    try:
-                        return fn()
-                    except PipelineError:
-                        raise
-                    except Exception as e:
-                        error_info = build_error_info_from_exception(
-                            e=e,
-                            cmd=fn.command if isinstance(fn, Runnable) else cmd,
-                            logfile=(
-                                call_logger.combined_log_path if call_logger else None
-                            ),
-                            phase=phase,
-                        )
-                        if call_logger:
-                            call_logger.log_error(error_info)
-                        raise PipelineError(error_info)
-
-            def try_main(
-                run_process: Callable[[], CompletedProcess] | Runnable,
-                call_logger: ExternalLogger,
-                name: str | None = None,
-            ) -> Any:
-                cp = run_process()
-                if cfg.check and cp:
-                    try:
-                        cp.check_returncode()
-                        call_logger.write_streams(cp)
-                        return cp
-                    except subprocess.CalledProcessError as e:
-                        print("RAISING ERROR NOW")
-                        # raise
-                        error_info = build_error_info_from_exception(
-                            e=e,
-                            cmd=cmd,
-                            stdout=e.output,
-                            stderr=e.stderr,
-                            logfile=call_logger.combined_log_path,
-                            phase=f"RUN ({name})",
-                        )
-                        # this is the externals logger, not the main logger
-                        call_logger.log_error(error_info)
-                        raise PipelineError(error_info)
-
+            # make a name for error report
+            name = f"{self.name}_{subcommand}" if subcommand else self.name
+            call_logger = None
             try:
-                # Execute pre-callback
-                try_add(pre, phase="PRE", call_logger=call_logger)
-                # if pre:
-                #     try:
-                #         pre()
-                #     except PipelineError:
-                #         raise
-                #     except Exception as e:
-                #         error_info = build_error_info_from_exception(
-                #             e=e,
-                #             cmd=pre.command if isinstance(pre, Runnable) else None,
-                #             logfile=(
-                #             phase=f"PRE ({pre.__name__})",
-                #         )
-                #         call_logger.log_error(error_info)
-                #         raise PipelineError(error_info)
+                # timestamp
+                now = datetime.now()
+
+                # initialize the logger
+                call_logger = self._initalize_logger(cfg, name, now, output)
+
+                # Execute pre-callback if there is one
+                self._run_callback(pre, phase="PRE", call_logger=call_logger)
 
                 # Execute the main subprocess command
-                def run_process() -> CompletedProcess:
-                    return subprocess.run(
-                        cmd,
-                        cwd=str(cfg.cwd) if cfg.cwd is not None else None,
-                        env=cfg.env,
-                        stdout=call_logger.stdout_stream,
-                        stderr=call_logger.stderr_stream,
-                        text=True,
-                        timeout=cfg.timeout,
-                        check=False,  # we'll handle this manually to log errors
-                    )
 
-                cp = try_main(run_process, call_logger=call_logger, name=name)
-                # cp = subprocess.run(
-                #     cmd,
-                #     cwd=str(cfg.cwd) if cfg.cwd is not None else None,
-                #     env=cfg.env,
-                #     stdout=call_logger.stdout_stream,
-                #     stderr=call_logger.stderr_stream,
-                #     text=True,
-                #     timeout=cfg.timeout,
-                #     check=False,
-                # )
-                # cp = try_call(
-                #     run_process,
-                #     phase=f"RUN ({name})",
-                #     cmd=cmd,
-                #     call_logger=call_logger,
-                # )
-                # Write captured output to per-stream files
-                # call_logger.write_streams(cp)
-                # if cfg.check:
-                #     try:
-                #         cp.check_returncode()
-                #     except subprocess.CalledProcessError as e:
-                #         print("RAISING ERROR NOW")
-                #         # raise
-                #         error_info = build_error_info_from_exception(
-                #             e=e,
-                #             cmd=cmd,
-                #             stdout=e.output,
-                #             stderr=e.stderr,
-                #             logfile=call_logger.combined_log_path,
-                #             phase="RUN",
-                #         )
-                #         # this is the externals logger, not the main logger
-                #         call_logger.log_error(error_info)
-                #         raise PipelineError(error_info)
+                # execute main call
+                cp = self.run_process(cmd, cfg, call_logger)
 
-                # Execute post-callback
-                try_add(post, phase="POST", call_logger=call_logger)
-                # if post:
-                #     try:
-                #         post()
-                #     except PipelineError:
-                #         raise
-                #     except Exception as e:
-                #         error_info = build_error_info_from_exception(
-                #             e=e,
-                #             cmd=post.command if isinstance(post, Runnable) else None,
-                #             logfile=call_logger.combined_log_path,
-                #             phase=f"POST ({post.__name__})",
-                #         )
-                #         call_logger.log_error(error_info)
-                #         raise PipelineError(error_info)
-                # Mark as successful
+                # Execute post-callback if there is one
+                self._run_callback(post, phase="POST", call_logger=call_logger)
+
+                # mark success if we got here without exceptions
                 call_logger.mark_success()
+
+                # return the CompletedProcess from the main subprocess call
                 return cp
+
+            except PipelineError:
+                # catch and raise PipelineErrors from _run_callback
+                raise
+
+            # except subprocess.CalledProcessError as e:
+            #     # catch CalledProcessError from main call
+            #     error = PipelineError(
+            #         e=e,
+            #         cmd=cmd,
+            #         stdout=e.stdout,
+            #         stderr=e.stderr,
+            #         logfile=call_logger.combined_log_path,
+            #         phase=phase,
+            #     )
+
+            #     call_logger.log_error(error.info)
+            #     raise error
+
+            except Exception as e:
+                # turn any Exception (including CalledProcessError) into a PipelineError
+                phase = "RUN" if not name else f"RUN ({name})"
+                error = PipelineError(
+                    e=e,
+                    cmd=cmd,
+                    stdout=getattr(e, "stdout", None)
+                    or getattr(call_logger, "stdout_stream", None),
+                    stderr=getattr(e, "stderr", None)
+                    or getattr(call_logger, "stderr_stream", None),
+                    logfile=getattr(call_logger, "combined_log_path", None),
+                    phase=phase,
+                )
+                # log if possible
+                if call_logger:
+                    call_logger.log_error(error.info)
+                raise error
 
             finally:
                 # Close stream file objects if they were opened
-                call_logger.finalize()
+                # Errors in logging are currently just logged and repressed, so finalize
+                # is safe. if that changes, implement try catch here.
+                if call_logger:
+                    call_logger.finalize()
 
-        # execute immediately (preserve previous behavior) and return the
-        # callable so caller may re-run later by calling the returned function.
-        _display = shlex.join(cmd)
-        if output:
-            _display += f" > {output}"
+        # add a display command to see the actual command call later
+        _display = f"{shlex.join(cmd)} > {output}" if output else shlex.join(cmd)
+
         return Runnable(_runner, cmd, _display)
 
 
@@ -1227,11 +1039,11 @@ class External:
 SubroutineIn: TypeAlias = tuple[
     list[str],  # arguments
     str | None,  # subcommand
-    list[str | Path],  # in paths
-    list[str | Path],  # out paths
+    Sequence[str | Path],  # in paths
+    Sequence[str | Path],  # out paths
     str | Path | None,  # output if piped
-    Callable[[], CompletedProcess | None] | None,  # pre
-    Callable[[], CompletedProcess | None] | None,  # post
+    Callable[[], CompletedProcess | None | Any] | None,  # pre
+    Callable[[], CompletedProcess | None | Any] | None,  # post
 ]
 
 
@@ -1266,7 +1078,7 @@ def subroutine(
             *bound.args, **bound.kwargs
         )
         outpaths = [Path(p) for p in outpaths if p is not None]
-        paths = inpaths + outpaths
+        paths = list(inpaths) + list(outpaths)
         if pipeoutput:
             paths = paths + [pipeoutput]
         if not subcommand:

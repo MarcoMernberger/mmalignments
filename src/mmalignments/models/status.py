@@ -34,14 +34,14 @@ STATE_PRIORITY = {
     NodeState.FAILED: 1,
     NodeState.UPSTREAM_FAILED: 2,
     NodeState.DONE: 3,
-    NodeState.SKIPPED: 4,
-    NodeState.PENDING: 5,
+    NodeState.PENDING: 4,
+    NodeState.SKIPPED: 5,
 }
 
 
 _STYLE = {
-    NodeState.PENDING: Style(color="bright_black"),
-    NodeState.SKIPPED: Style(color="cyan"),
+    NodeState.PENDING: Style(color="cyan"),
+    NodeState.SKIPPED: Style(color="bright_black"),
     NodeState.RUNNING: Style(color="yellow", bold=True),
     NodeState.DONE: Style(color="green"),
     NodeState.FAILED: Style(color="red"),
@@ -138,10 +138,10 @@ class ProgressReporter:
 
     def __init__(
         self,
+        logger: Logger,
         stream: IO | None = None,
         refresh_per_second: int = 10,
         max_lines: int = 55,
-        logger: Logger = None,
     ) -> None:
         self._console = Console(file=stream or sys.stderr, highlight=False)
         self._refresh_per_second = refresh_per_second

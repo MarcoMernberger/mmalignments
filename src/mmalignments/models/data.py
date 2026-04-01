@@ -123,7 +123,7 @@ class HardFilterThresholds:
     min_ad: int = 3
     min_vaf: float = 0.05
 
-    def as_expression(self, sample: Sample | None = None) -> str:
+    def as_expression(self, sample: str | None = None) -> str:
         """Return a bcftools ``-i`` filter expression for these thresholds.
 
         Returns
@@ -131,10 +131,10 @@ class HardFilterThresholds:
         str
             e.g. ``"FMT/DP>=10 && FMT/AD[1]>=3 && (FMT/AD[1]/FMT/DP)>=0.05"``
         """
-        sample = sample or "0"
+        sample_name = sample or "0"
         ret = (
-            f"FMT/DP[{sample}]>={self.min_dp} && "
-            f"FMT/AD[{sample}:1]>={self.min_ad} && "
-            f"(FMT/AD[{sample}:1]/FMT/DP[{sample}])>={self.min_vaf}"
+            f"FMT/DP[{sample_name}]>={self.min_dp} && "
+            f"FMT/AD[{sample_name}:1]>={self.min_ad} && "
+            f"(FMT/AD[{sample_name}:1]/FMT/DP[{sample_name}])>={self.min_vaf}"
         )
         return ret

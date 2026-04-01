@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from subprocess import CompletedProcess
-from typing import Callable, Mapping
+from typing import Mapping
 
 from mmalignments.models.elements import Element, element
 from mmalignments.models.externals import (
     External,
     ExternalRunConfig,
+    SubroutineIn,
     subroutine,
 )
 from mmalignments.models.parameters import Params, ParamSet
@@ -165,7 +165,7 @@ class MultiQC(External):
         report_name: str = "multiqc_report.html",
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Run MultiQC to aggregate QC reports (low-level).
 
         Creates a zero-argument callable that runs MultiQC on a directory
@@ -306,17 +306,15 @@ class MultiQC(External):
             raise ValueError(
                 "Analysis directory with qc reports must be provided to search."
             )
-        outdir = outdir or (
-            cfg.qc_root
-            if cfg and hasattr(cfg, "qc_root")
-            else Path(analysis_dir) / "multiqc_report"
-        )
+        outdir = outdir or Path(analysis_dir) / "multiqc_report"
         filename = filename or tag.default_output
+        report_file = Path(outdir) / filename
         # Collect input files from QC elements
         input_files = []
         for elem in qc_elements.values():
-            input_files.extend(elem.output_files)
-
+            if elem.output_files:
+                input_files.extend(elem.output_files)
+        input_files = tuple(input_files)
         # Build runner
         runner = self.run_multiqc(
             analysis_dir=analysis_dir,
@@ -326,11 +324,10 @@ class MultiQC(External):
             cfg=cfg,
         )
 
-        report_file = outdir / filename
         # MultiQC output files
         artifacts = {
             "multiqc_html": report_file,
-            "multiqc_data_dir": Path(str(report_file.stem) + "_data"),
+            "multiqc_data_dir": report_file.parent / (report_file.stem + "_data"),
         }
         determinants = self.signature_determinants(params)
         return Element(

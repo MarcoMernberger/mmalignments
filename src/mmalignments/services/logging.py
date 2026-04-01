@@ -6,6 +6,8 @@ from logging import FileHandler, Logger
 from pathlib import Path
 from typing import IO, Any, Iterator
 
+from mmalignments.utils import constants  # type: ignore[import]
+
 from .errors import ErrorInfo
 from .io import ensure, open_target
 from .time import now_as_str, str_to_timestamp, timestamp_to_str
@@ -141,9 +143,9 @@ class ExternalLogger:
         self._cleanup_old_logs()
         # Create file handler for logger messages
         with open(combined_log_path, "w", encoding="utf-8") as f:
-            f.write("\n" + +"\n")
+            f.write("\n" + constants.SEPLINE + "\n")
             f.write("LOG\n")
-            f.write("=" * 80 + "\n\n")
+            f.write(constants.SEPLINE + "\n\n")
         file_handler = FileHandler(combined_log_path, mode="a", encoding="utf-8")
         file_handler.setLevel(self._loglevel)
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -196,7 +198,7 @@ class ExternalLogger:
                 path.unlink()
             except Exception as e:
                 self.log_logging_error(
-                    f"Failed to remove old log {path} at {self.timestamp}\nException was: {e}"
+                    f"Failed to remove old log {path} at {self.timestamp}\nException was: {e}"  # noqa: E501
                 )
 
     def resolve_stream(
@@ -253,7 +255,12 @@ class ExternalLogger:
             if self.stderr_log_path and cp.stderr:
                 self.stderr_log_path.write_text(cp.stderr)
         except Exception as e:
-            self.log_logging_error(f"Failed to write streams: {e}")
+            self.log_logging_error(
+                "Failed to write streams",
+                error=e,
+                stdout_path=self.stdout_log_path,
+                stderr_path=self.stderr_log_path,
+            )
 
     def finalize(self) -> None:
         """Finalize logging by combining log files and adding success marker.
@@ -280,9 +287,9 @@ class ExternalLogger:
             # Append subprocess streams to combined log
             if self.combined_log_path:
                 with open(self.combined_log_path, mode="a", encoding="utf-8") as outf:
-                    outf.write("\n" + "=" * 80 + "\n")
+                    outf.write("\n" + constants.SEPLINE + "\n")
                     outf.write("SUBPROCESS OUTPUT\n")
-                    outf.write("=" * 80 + "\n\n")
+                    outf.write(constants.SEPLINE + "\n\n")
 
                     # add stderr to main log file
                     if self.stderr_log_path and self.stderr_log_path.exists():
@@ -299,14 +306,14 @@ class ExternalLogger:
                         outf.write("\n")
 
                     # Add success/failure marker
-                    outf.write("\n" + "=" * 80 + "\n")
+                    outf.write("\n" + constants.SEPLINE + "\n")
                     if self.success:
                         outf.write("STATUS: SUCCESS\n")
                         outf.write("The command completed successfully.\n")
                     else:
                         outf.write("STATUS: FAILED\n")
                         outf.write("The command failed or was interrupted.\n")
-                    outf.write("=" * 80 + "\n")
+                    outf.write(constants.SEPLINE + "\n")
 
         except Exception as e:
             self.log_logging_error(f"Failed while finalizing run log files: {e}")
@@ -322,8 +329,20 @@ class ExternalLogger:
             )
         self._finalize_streams(self.stdout_stream, self.stderr_stream)
 
-    def log_logging_error(self, msg: str) -> None:
-        safe_log_error(self.logger, msg)
+    def log_logging_error(
+        self, msg: str, error: Exception | None = None, **context
+    ) -> None:
+        parts = [msg]
+
+        if error:
+            parts.append(f"{type(error).__name__}: {error}")
+
+        if context:
+            ctx = ", ".join(f"{k}={v}" for k, v in context.items())
+            parts.append(f"[{ctx}]")
+
+        full_msg = " | ".join(parts)
+        safe_log_error(self.logger, full_msg)
 
     def log_error(self, error_info: ErrorInfo) -> None:
         safe_log_error(self.logger, error_info.log_text)

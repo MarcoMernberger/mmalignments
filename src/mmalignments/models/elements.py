@@ -8,7 +8,7 @@ from functools import cached_property, wraps
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
+from typing import Any, Callable, Iterable, Mapping, ParamSpec, TypeVar, cast, overload
 
 from mmalignments.models.data import Pairing
 from mmalignments.services.io import parents, paths_exists
@@ -57,7 +57,7 @@ class Element:
     def __init__(
         self,
         key: str,
-        run: Callable[[], CompletedProcess | None | bool],
+        run: Callable[[], CompletedProcess | None | bool | Any],
         tag: ElementTag,
         *,
         determinants: tuple[str, ...] | None = None,
@@ -341,7 +341,8 @@ class VcfElement(Element):
     #     return Path(v) if v is not None else None
 
 
-F = TypeVar("F", bound=Callable[..., Element])
+P = ParamSpec("P")
+R = TypeVar("R", bound=Element)
 
 
 def _as_path(x: Any) -> Path | None:
@@ -381,12 +382,24 @@ def get_candidates(
     return candidates
 
 
+@overload
+def element(fn: Callable[P, R]) -> Callable[P, R]: ...
+
+
+@overload
 def element(
-    fn: F | None = None,
     *,
     outputs: str | Iterable[str] | None = None,
     auto_outputs: bool = True,
-) -> F | Callable[[F], F]:
+) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+
+
+def element(
+    fn: Callable[P, R] | None = None,
+    *,
+    outputs: str | Iterable[str] | None = None,
+    auto_outputs: bool = True,
+) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """
     Usable as:
       @element
@@ -397,15 +410,15 @@ def element(
       def builder(...): ...
     """
 
-    def deco(func: F) -> F:
+    def deco(func: Callable[P, R]) -> Callable[P, R]:
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             e = func(*args, **kwargs)
 
             # intern (optional)
             reg = current_element_registry()
             if reg is not None:
-                e = reg.intern(e)
+                e = cast(R, reg.intern(e))
 
             # mkdir parents for outputs (independent of registry)
             arts = e.artifacts
@@ -426,7 +439,7 @@ def element(
 
             return e
 
-        return cast(F, wrapper)
+        return wrapper
 
     # called as @element
     if fn is not None:
@@ -603,8 +616,8 @@ def generate_element_key_name(
     **params_str: Any,
 ) -> tuple[str, str]:
     """
-    generate_element_key generates a unique key for an Element based on its tag 
-    and other parameters. We want the keys to be somewhat informative for 
+    generate_element_key generates a unique key for an Element based on its tag
+    and other parameters. We want the keys to be somewhat informative for
     debugging and provenance, but also unique and stable for caching.
 
     Parameters
@@ -639,3 +652,97 @@ def generate_element_key_name(
     key = "_".join(parts)
     ret = key, short
     return ret
+
+
+def explain_signature_diff(
+    element,
+    store: dict[str, Any],
+) -> tuple[bool, str]:
+    """
+    Vergleicht die sig_data eines Elements mit dem gespeicherten Eintrag.
+
+    Returns True wenn identisch, False wenn unterschiedlich.
+    Gibt bei Unterschieden eine detaillierte Erklärung aus.
+    """
+    key = element.key
+    current = element.sig_data()
+
+    if key not in store:
+        raise ValueError(f"Key not found in store: {key!r}")
+
+    stored = store[key]
+
+    diffs: list[str] = []
+
+    # --- key ---
+    if current.get("key") != stored.get("key"):
+        diffs.append(
+            f"Keys differ:\n"
+            f"    current: {current.get('key')!r}\n"
+            f"    stored:  {stored.get('key')!r}"
+        )
+
+    # --- determinants ---
+    cur_det = list(current.get("determinants", []))
+    sto_det = list(stored.get("determinants", []))
+    if cur_det != sto_det:
+        diffs.append(
+            f"Determinants differ:\n"
+            f"    current: {cur_det}\n"
+            f"    stored:  {sto_det}"
+        )
+
+    # --- inputs ---
+    cur_inputs = current.get("inputs", [])
+    sto_inputs = stored.get("inputs", [])
+    if cur_inputs != sto_inputs:
+        detail_lines = [
+            f"Inputs differ: ({len(cur_inputs)} current vs {len(sto_inputs)} stored)"
+        ]  # noqa: E501
+        all_paths = {inp.get("path") for inp in cur_inputs + sto_inputs}
+        for path in sorted(all_paths):
+            cur_entry = next((i for i in cur_inputs if i.get("path") == path), None)
+            sto_entry = next((i for i in sto_inputs if i.get("path") == path), None)
+            if cur_entry != sto_entry:
+                detail_lines.append(f"    path: {path!r}")
+                detail_lines.append(f"      current: {cur_entry}")
+                detail_lines.append(f"      stored:  {sto_entry}")
+        diffs.append("\n".join(detail_lines))
+
+    # --- artifacts ---
+    cur_art = current.get("artifacts", {})
+    sto_art = stored.get("artifacts", {})
+    if cur_art != sto_art:
+        all_artifact_keys = set(cur_art) | set(sto_art)
+        detail_lines = ["Artifacts differ:"]
+        for k in sorted(all_artifact_keys):
+            if cur_art.get(k) != sto_art.get(k):
+                detail_lines.append(f"    [{k!r}]")
+                detail_lines.append(f"      current: {cur_art.get(k)!r}")
+                detail_lines.append(f"      stored:  {sto_art.get(k)!r}")
+        diffs.append("\n".join(detail_lines))
+
+    # --- pre_sigs ---
+    cur_pre = sorted(current.get("pre_sigs", []))
+    sto_pre = sorted(stored.get("pre_sigs", []))
+    if cur_pre != sto_pre:
+        only_current = set(cur_pre) - set(sto_pre)
+        only_stored = set(sto_pre) - set(cur_pre)
+        detail_lines = ["Predecessor signatures differ:"]
+        if only_current:
+            detail_lines.append(f"    only in current: {sorted(only_current)}")
+        if only_stored:
+            detail_lines.append(f"    only in stored:  {sorted(only_stored)}")
+        diffs.append("\n".join(detail_lines))
+
+    # --- Ergebnis ---
+    if not diffs:
+        result = True
+        msg = f"[✓] No differences in sig_data for {key!r}"
+    else:
+        result = False
+        msg = f"[✗] Sig_data differs for {key!r}:"
+        for diff in diffs:
+            msg += f"\n{diff}"
+
+    return result, msg

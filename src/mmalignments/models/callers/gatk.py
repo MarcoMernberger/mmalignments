@@ -733,7 +733,7 @@ class GATK(External):
             if isinstance(x, Element)
         )
         artifacts = {"vcf": output}
-        if f1r2_tar_gz:
+        if f1r2:
             artifacts["f1r2"] = f1r2
         if not index_off:
             artifacts["tbi"] = output_index
@@ -868,7 +868,7 @@ class GATK(External):
         >>> gatk = GATK()
         >>> pileup_element = gatk.pilesum(mapped, known_variants, targets_padded)
         """
-        input_bam = mapped.bam
+        input_bam = Path(mapped.bam)
         tag = from_prior(
             mapped.tag,
             tag,
@@ -883,12 +883,12 @@ class GATK(External):
         variant_sites = (
             known_variants.vcf
             if isinstance(known_variants, Element)
-            else known_variants
+            else Path(known_variants)
         )
         intervals = (
             targets_padded.bed
             if isinstance(targets_padded, Element)
-            else targets_padded
+            else Path(targets_padded)
         )
 
         runner = self.get_pileup_summaries(
@@ -914,7 +914,7 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bam, variant_sites, intervals],
+            inputs=(input_bam, variant_sites, intervals),
             artifacts={"pileup": Path(output_table).absolute()},
             pres=pres,
         )
@@ -1083,9 +1083,9 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=inputs,
+            inputs=tuple(inputs),
             artifacts={"contamination": Path(output_table).absolute()},
-            pres=pres,
+            pres=tuple(pres),
         )
 
     ###########################################################################
@@ -1291,9 +1291,9 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=inputs,
+            inputs=tuple(inputs),
             artifacts={"vcf": output_vcf},
-            pres=pres,
+            pres=tuple(pres),
         )
 
     ###########################################################################
@@ -1304,7 +1304,7 @@ class GATK(External):
     def basecalibrate_bam(
         self,
         reference: Path | str,
-        sequence_dictionary: Path | str | None,
+        sequence_dictionary: Path | str,
         input_bams: list[Path | str],
         output_table: Path | str,
         known_sites: Path | str | list[Path | str] | None = None,
@@ -1321,6 +1321,8 @@ class GATK(External):
         ----------
         reference : Path | str
             Reference genome FASTA file.
+        sequence_dictionary: Path | str
+            Reference sequence dictionary file (e.g., .dict from Picard).
         input_bams : list[Path | str]
             List of input BAM files.
         output_table : Path | str
@@ -1454,11 +1456,10 @@ class GATK(External):
             param="bsqr",
         )
         output_table = outdir / (filename or tag.default_output)
-        intervals = (
-            intervals
-            if not isinstance(intervals, Element)
-            else intervals.output_files[0]
-        )
+
+        if isinstance(intervals, Element) and intervals.output_files:
+            intervals = next(iter(intervals.output_files))
+
         known_sites = (
             list(known_sites.artifacts.values())
             if isinstance(known_sites, Element)
@@ -1471,7 +1472,7 @@ class GATK(External):
                 if isinstance(refdict_element, Element)
                 else refdict_element
             ),
-            input_bams=input_bams,
+            input_bams=tuple(input_bams),
             output_table=output_table,
             known_sites=known_sites,
             intervals=intervals,
@@ -1488,9 +1489,9 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=input_bams,
+            inputs=tuple(input_bams),
             artifacts={"bsqr_table": Path(output_table).absolute()},
-            pres=mapped_list,
+            pres=tuple(mapped_list),
         )
 
     @subroutine
@@ -1577,7 +1578,7 @@ class GATK(External):
         bsqrmodel: Element,
         reference: Genome,
         *,
-        intervals: Path | str | None = None,
+        intervals: Path | str | Element | None = None,
         index_off: bool = False,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
@@ -1668,12 +1669,11 @@ class GATK(External):
             run=bsqr_runner,
             tag=tag,
             determinants=determinants,
-            inputs=[mapped.bam, bsqrmodel.bsqr_table],
+            inputs=(mapped.bam, bsqrmodel.bsqr_table),
             artifacts={"bam": output.absolute()},
-            pres=pres,
+            pres=tuple(pres),
         )
 
-    @element
     def bsqr(
         self,
         mapped: MappedElement,
@@ -1741,7 +1741,7 @@ class GATK(External):
         cfgs = cfgs or {}
         tags = tags or {}
         filename_model = Path(filename).with_suffix(".table").name if filename else None
-        model = self.modelbsqr(
+        model = self.modelbsqr(  # type: ignore[reportCallIssue]
             mapped=mapped,
             reference=reference,
             refdict_element=refdict_element,
@@ -1754,7 +1754,7 @@ class GATK(External):
             cfg=cfgs.get("modelbsqr", None),
             pre=pre,
         )
-        recalibrated = self.applybsqr(
+        recalibrated = self.applybsqr(  # type: ignore[reportCallIssue]
             mapped=mapped,
             bsqrmodel=model,
             reference=reference,
@@ -1933,9 +1933,9 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=input_vcfs,
+            inputs=tuple(input_vcfs),
             artifacts={"pon": output.absolute()},
-            pres=pres_pon,
+            pres=tuple(pres_pon),
         )
 
     ###########################################################################
@@ -1978,7 +1978,6 @@ class GATK(External):
         >>> create_dict()
         """
         # Build command: gatk CreateSequenceDictionary -R ref.fa -O ref.dict
-        print("cfg we got", cfg)
         subcommand = "CreateSequenceDictionary"
         arguments = [
             subcommand,
@@ -2195,7 +2194,7 @@ class GATK(External):
             ext="intervals",
         ).merge(tag)
         outdir = Path(outdir or input_bed.parent)
-        filename = filename or (input_bed.with_suffix(".intervals").name)
+        filename = filename or str(input_bed.with_suffix(".intervals").name)
         output_interval_list = outdir / filename
 
         runner = self.bed_to_interval_list(
@@ -2220,9 +2219,9 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bed],
+            inputs=(input_bed,),
             artifacts={"intervals": output_interval_list},
-            pres=pres,
+            pres=tuple(pres),
         )
 
     ###########################################################################
@@ -2369,9 +2368,9 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bam, reference.fasta],
+            inputs=(input_bam, reference.fasta),
             artifacts={"metrics": output_metrics},
-            pres=[mapped],
+            pres=(mapped,),
         )
 
     ###########################################################################
@@ -2519,9 +2518,9 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bam],
+            inputs=(input_bam,),
             artifacts={"metrics": output_metrics, "histogram": output_histogram},
-            pres=[mapped],
+            pres=(mapped,),
         )
 
     ###########################################################################
@@ -2684,8 +2683,12 @@ class GATK(External):
             Path(outdir or default_outdir) / (filename or tag.default_output)
         ).absolute()
 
-        bait_path = baits.intervals if isinstance(baits, Element) else baits
-        target_path = targets.intervals if isinstance(targets, Element) else targets
+        bait_path = Path(
+            baits.intervals if isinstance(baits, Element) else baits
+        ).absolute()
+        target_path = Path(
+            targets.intervals if isinstance(targets, Element) else targets
+        ).absolute()
 
         runner = self.hs_metrics(
             reference=reference.fasta,
@@ -2698,7 +2701,7 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
-        pres = [mapped]
+        pres: list[Element] = [mapped]
         if isinstance(baits, Element):
             pres.append(baits)
         if isinstance(targets, Element) and targets != baits:
@@ -2717,9 +2720,9 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bam, reference.fasta, bait_path, target_path],
+            inputs=(input_bam, reference.fasta, bait_path, target_path),
             artifacts=artifacts,
-            pres=pres,
+            pres=tuple(pres),
         )
 
     ###########################################################################
@@ -2768,20 +2771,35 @@ class GATK(External):
         Element
             An Element that indexes the feature file when run.
         """
-        is_element = isinstance(element, Element)
-        input_path = getattr(element, filetype) if is_element else Path(element)
-        root = element.tag.root if is_element else input_path.stem
-        tag = ElementTag(
-            root=root,
-            level=element.tag.level + 1 if is_element else 1,
-            stage=Stage.PREP,
-            method=Method.GATK,
-            state=State.INDEX,
-            omics=element.tag.omics if is_element else Omics.DNA,
-            ext=input_path.suffix + ".idx",
-        ).merge(tag)
+        if isinstance(element, Element):
+            input_path = getattr(element, filetype, None)
+            if not isinstance(input_path, Path):
+                raise ValueError(
+                    f"Element {element} does not have a '{filetype}' artifact of type Path: {input_path}"  # noqa: E501
+                )
+            tag = from_prior(
+                element.tag,
+                tag,
+                stage=Stage.PREP,
+                method=Method.GATK,
+                state=State.INDEX,
+                ext=input_path.suffix + ".idx",
+            )
+            pres = (element,)
+        else:
+            input_path = Path(element)
+            pres = ()
+            tag = ElementTag(
+                root=input_path.stem,
+                level=1,
+                stage=Stage.PREP,
+                method=Method.GATK,
+                state=State.INDEX,
+                omics=Omics.DNA,
+                ext=input_path.suffix + ".idx",
+            )
         outdir = Path(outdir or input_path.parent)
-        filename = input_path.with_suffix(".idx")
+        filename = filename or input_path.with_suffix(".idx").name
         output_index = outdir / filename
         runner = self.index_feature_file(input_path, params, cfg)
         determinants = self.signature_determinants(params)
@@ -2794,9 +2812,9 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_path],
-            artifacts={tag.ext: output_index},
-            pres=[element] if isinstance(element, Element) else [],
+            inputs=(input_path,),
+            artifacts={"idx": output_index},
+            pres=pres,
         )
 
     @subroutine
@@ -2850,7 +2868,7 @@ class GATK(External):
         output_json: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Collect callable loci regions using GATK CallableLoci.
 
         Creates a zero-argument callable that identifies regions in the
@@ -2920,6 +2938,7 @@ class GATK(External):
             "-O",
             self.strabs(output_bed),
         ]
+        output_summary = Path(output_summary)
         in_paths = [reference_fasta, input_bam, target_bed]
         out_paths = [output_bed, output_summary]
         if output_json:
@@ -3057,13 +3076,13 @@ class GATK(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=inputs,
+            inputs=tuple(inputs),
             artifacts={
                 "summary": output_summary,
                 "bed": output_bed,
                 "callable": output_json,
             },
-            pres=pres,
+            pres=tuple(pres),
         )
 
     @staticmethod
@@ -3072,9 +3091,10 @@ class GATK(External):
 
         with open(summary_file) as f:
             for line in f:
-                if line.startswith("CALLABLE"):
-                    callable_bases = int(line.split()[1])
+                if "CALLABLE" in line:
+                    callable_bases = int(line.split("CALLABLE")[1].strip())
                     break
 
-        callable_mb = callable_bases / 1_000_000
+        callable_mb = callable_bases / 1000000
+        raise ValueError("here " + line + " " + str(callable_bases))
         return callable_bases, callable_mb

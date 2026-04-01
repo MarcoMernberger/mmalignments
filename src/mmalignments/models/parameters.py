@@ -2,9 +2,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-from mmalignments.services.io import load_param_json
 from mmalignments.models.resources import ResourceConfig  # type: ignore[import]
-
+from mmalignments.services.io import load_param_json
 
 ###############################################################################
 # Params
@@ -221,10 +220,6 @@ class ParamSet:
             value = overrides.get(name, spec.default)
             if spec.required and (value is None or value is False or value == []):
                 missing.append(name)
-        # if missing:
-        #     raise ValueError(
-        #         f"Missing required params for {self.name} {self.subcommand}: {missing}"
-        #     )  # these are in the arguments
 
     def merged_values(self, params: Params | None) -> dict[str, Any]:
         overrides = params.to_dict() if params else {}
@@ -396,7 +391,7 @@ def _paramsets_from_json(tool_name: str, obj: dict[str, Any]) -> dict[str, Param
             flag = spec.get("flag", None)
             if flag is not None and not isinstance(flag, str):
                 raise ValueError(
-                    f"flag must be None or a non-null string value for '{subroutine}.{key}'"
+                    f"flag must be None or a non-null string value for '{subroutine}.{key}'"  # noqa: E501
                 )
 
             ps = ParamSpec(
@@ -465,6 +460,6 @@ def _parse_dtype(d: Any) -> type | tuple[type, ...]:
 #         return None
 #     if isinstance(n, str):
 #         if n not in _NORMALIZE:
-#             raise ValueError(f"Unknown normalize '{n}'. Allowed: {sorted(_NORMALIZE)}")
+#             raise ValueError(f"Unknown normalize '{n}'. Allowed: {sorted(_NORMALIZE)}")   # noqa: E501
 #         return _NORMALIZE[n]
 #     raise ValueError(f"Invalid normalize format: {n!r}")

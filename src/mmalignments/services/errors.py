@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import shlex
 import subprocess
 import sys
@@ -5,13 +7,18 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from subprocess import CalledProcessError
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 from rich.console import Group  # type: ignore[import]
 from rich.panel import Panel  # type: ignore[import]
 from rich.syntax import Syntax  # type: ignore[import]
 from rich.text import Text  # type: ignore[import]
 from rich.traceback import Traceback  # type: ignore[import]
+
+from mmalignments.utils import constants  # type: ignore[import]
+
+if TYPE_CHECKING:
+    from mmalignments.models.elements import Element  # type: ignore[import]
 
 
 def _isatty(stream) -> bool:
@@ -242,8 +249,38 @@ class ErrorInfo:
         color: bool = True,
         show_stack: bool = True,
     ):
+        """
+        Initialize an ErrorInfo object. This object encapsulates all relevant
+        information about an error that occurred during pipeline execution, including
+        the original exception, command, outputs, stack trace, and more. It also
+        provides methods to format this information for logging and display purposes.
+
+        Parameters
+        ----------
+        e : Exception
+            The original exception that was caught.
+        cmd : Iterable[str] | None, optional
+            The command that was being executed when the error occurred, by default None
+        stdout : str | None, optional
+            The standard output captured from the command, by default None
+        stderr : str | None, optional
+            The standard error captured from the command, by default None
+        trace : str | None, optional
+            The traceback of the exception, by default None
+        logfile : Path | None, optional
+            The path to the log file, by default None
+        creation_trace : str | None, optional
+            The trace of the element creation, by default None
+        phase : str, optional
+            The phase of the error, by default "RUN"
+        color : bool, optional
+            Whether to use color in the output, by default True
+        show_stack : bool, optional
+            Whether to show the stack trace, by default True
+        """
         self.e = e
         self.phase = phase
+        self.type = type(e)
         self._creation_trace = creation_trace
         self.cmd = list(cmd) if cmd is not None else _build_cmd_list(e)
         err, out = _resolve_err_out(stderr, stdout, e)
@@ -255,9 +292,17 @@ class ErrorInfo:
         self.color = color
         self.show_stack = show_stack
         self.linewidth = 120
-        self.sepchar = "="
+        self.sepchar = constants.SEPCHAR
 
     def as_dict(self):
+        """
+        Convert the ErrorInfo object to a dictionary representation.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the error information.
+        """
         return {
             "cmd": self.cmd,
             "stdout": self.stdout,
@@ -267,28 +312,39 @@ class ErrorInfo:
 
     @property
     def pretty_ansi_text(self):
+        """
+        Get the pretty ANSI text representation of the error.
+
+        Returns
+        -------
+        str
+            The pretty ANSI text representation of the error.
+        """
         if not hasattr(self, "_pretty_ansi_text"):
             self._pretty_ansi_text = self.build_pretty_ansi_text()
         return self._pretty_ansi_text
 
     @property
     def log_text(self) -> str:
+        """Get the log text representation of the error."""
         if not hasattr(self, "_log_text"):
             self._log_text = self.build_log_text()
         return self._log_text
 
     @property
     def panel(self):
+        """Get the error panel representation of the error."""
         if not hasattr(self, "_error_panel"):
             self._error_panel = self.build_error_panel()
         return self._error_panel
 
     @property
     def creation_trace(self) -> str | None:
+        """Get the creation trace of the error."""
         return self._creation_trace
 
-    def add_creation_trace(self, node):
-        # Creation Trace
+    def add_creation_trace(self, node: Element):
+        """Add the creation trace from an element to the error."""
         creation_trace = getattr(node, "creation_trace", None)
         self._creation_trace = creation_trace
 
@@ -320,7 +376,7 @@ class ErrorInfo:
         )  # noqa: E501
 
         # Creation Trace
-        if self._creation_trace:
+        if self.creation_trace:
             elements.append(
                 Panel(
                     Syntax(self.creation_trace, "python"),
@@ -432,33 +488,98 @@ class ErrorInfo:
 
 
 class PipelineError(Exception):
-    def __init__(self, error_info: ErrorInfo):
-        self.info = error_info
-        super().__init__(error_info.log_text)
+    def __init__(
+        self,
+        e: Exception,
+        cmd=None,
+        stdout=None,
+        stderr=None,
+        logfile=None,
+        phase="RUN",
+    ):
+        """
+        A PipelineError wraps any exception that occurs during pipeline execution,
+        especially subprocess.CalledProcessError from external commands, and enriches it
+        with additional context like the command, stdout/stderr, stack trace, and phase
+        of execution.
 
+        Parameters
+        ----------
+        e : Exception
+            The original exception that was caught.
+        cmd : _type_, optional
+            The command that was being executed when the exception occurred, by default
+            None
+        stdout : _type_, optional
+            The standard output captured from the command, by default None
+        stderr : _type_, optional
+            The standard error captured from the command, by default None
+        logfile : _type_, optional
+            The path to the log file, by default None
+        phase : str, optional
+            The phase of execution when the error occurred, by default "RUN"
+        """
+        self.info = PipelineError.build_error_info_from_exception(
+            e=e,
+            cmd=cmd,
+            stdout=stdout,
+            stderr=stderr,
+            logfile=logfile,
+            phase=phase,
+        )
+        self.exception = e
+        self.exception_type: type | None = (
+            type(self.exception) if self.exception else None
+        )
+        super().__init__(self.info.log_text)
 
-def build_error_info_from_exception(
-    *,
-    e: Exception,
-    cmd=None,
-    stdout=None,
-    stderr=None,
-    logfile=None,
-    phase="RUN",
-):
-    stack = "".join(traceback.format_stack())
-    exc = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-    trace = stack + "\n--- Exception ---\n" + exc
+    @staticmethod
+    def build_error_info_from_exception(
+        *,
+        e: Exception,
+        cmd=None,
+        stdout=None,
+        stderr=None,
+        logfile=None,
+        phase="RUN",
+    ) -> ErrorInfo:
+        """
+        Build error information from an exception.
 
-    return ErrorInfo(
-        e=e,
-        cmd=cmd,
-        stdout=stdout,
-        stderr=stderr,
-        trace=trace,
-        logfile=logfile,
-        phase=phase,
-    )
+        Parameters
+        ----------
+        e : Exception
+            The original exception that was caught.
+        cmd : _type_, optional
+            The command that was being executed when the exception occurred, by default
+            None
+        stdout : _type_, optional
+            The standard output captured from the command, by default None
+        stderr : _type_, optional
+            The standard error captured from the command, by default None
+        logfile : _type_, optional
+            The path to the log file, by default None
+        phase : str, optional
+            The phase of execution when the error occurred, by default "RUN"
+
+        Returns
+        -------
+        ErrorInfo
+            An ErrorInfo object containing detailed information about the error.
+        """
+        stack = "".join(traceback.format_stack())
+        exc = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        trace = stack + "\n--- Exception ---\n" + exc
+
+        return ErrorInfo(
+            e=e,
+            cmd=cmd,
+            stdout=stdout,
+            stderr=stderr,
+            trace=trace,
+            logfile=logfile,
+            phase=phase,
+        )
 
 
 # def build_error_info(
