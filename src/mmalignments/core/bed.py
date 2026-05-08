@@ -1,16 +1,14 @@
 """Some heler functionality for bed files."""
 
 from pathlib import Path
-from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
 from mmalignments.models.elements import Element, element
 from mmalignments.models.tags import (
     ElementTag,
     Method,
-    State,
-    merge_tag,
     PartialElementTag,
+    State,
     from_prior,
 )
 from mmalignments.services.io import absolutize, parents
@@ -136,17 +134,19 @@ def ensemblmap(
     )
     runner.command = ["ensemblmap_bed"]
     runner.threads = 1
-    determinants = [
-        "".join([f"{k}={v}" for k, v in (mapping or {}).items()]) if mapping else []
-    ]
+    determinants = (
+        ("".join([f"{k}={mapping[k]}" for k in sorted(mapping.keys())]),)
+        if mapping
+        else ()
+    )
     key = f"{tag.default_name}_mapped_chromosomes_to_ensembl"
     element = Element(
         key=key,
         run=runner,
         tag=tag,
         determinants=determinants,
-        inputs=[input_bed],
+        inputs=(input_bed,),
         artifacts={"bed": output_bed},
-        pres=[bed_element],
+        pres=(bed_element,),
     )
     return element

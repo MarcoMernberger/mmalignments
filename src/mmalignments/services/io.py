@@ -2,11 +2,8 @@
 
 import gzip
 import json
-import logging
-from datetime import datetime
-from logging import Logger
 from pathlib import Path
-from typing import Any, Callable
+from typing import IO, Any, Callable
 
 
 def ensure(*files: Path | str) -> bool:
@@ -106,48 +103,6 @@ def write_fastq_check_results(
                 f.write(f"  - {warn}\n")
 
 
-def initlog(console: bool = False) -> Logger:
-    timestamp = get_timestamp()
-    return setup_run_logger(timestamp, console=console)
-
-
-def get_timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def setup_run_logger(
-    timestamp: str, console: bool = False, log_dir: Path | None = None
-) -> Logger:
-    log_dir = Path("logs")
-    ensure(log_dir)
-    run_log = log_dir / f"run_{timestamp}.log"
-    logger = logging.getLogger("pipeline.run")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-
-    if not any(
-        isinstance(h, logging.FileHandler) and h.baseFilename == str(run_log)
-        for h in logger.handlers
-    ):
-        fh = logging.FileHandler(run_log)
-        fh.setLevel(logging.INFO)
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
-
-    if console and not any(
-        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
-        for h in logger.handlers
-    ):
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
-
-    return logger
-
-
 def from_json(infile: Path, encoding="utf-8") -> dict[str, str | int | float]:
     if not infile.exists():
         raise FileNotFoundError(f"JSON file not found: {infile}")
@@ -169,13 +124,16 @@ def load_param_json(path: Path) -> dict[str, Any]:
     return obj
 
 
-def open_target(target, *, append: bool):
+def open_target(
+    target: Path | None | IO = None, *, append: bool, encoding: str = "utf-8"
+):
     if target is None:
         return None
     if isinstance(target, Path):
         parents(target)
         mode = "a" if append else "w"
-        return open(target, mode, encoding="utf-8")
+        return open(target, mode, encoding=encoding)
+
     return target
 
 

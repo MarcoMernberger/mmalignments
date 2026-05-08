@@ -2,8 +2,9 @@ import dataclasses
 from dataclasses import dataclass
 from enum import Enum
 from functools import cached_property
-from deprecated import deprecated  # type: ignore
 from typing import Any
+
+from deprecated import deprecated  # type: ignore
 
 
 class Omics(str, Enum):
@@ -23,6 +24,7 @@ class Stage(str, Enum):
     DIFF = "diff"
     INPUT = "input"
     ANALYSIS = "analysis"
+    SUMMARY = "summary"
 
 
 class State(str, Enum):

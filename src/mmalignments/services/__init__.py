@@ -1,8 +1,9 @@
 """Services for IO operations and external tool integration."""
 
-from .io import ensure, absolutize
 from .errors import handle_called_process_error
-from .time import timestamp, timestamp_to_str, str_to_timestamp
+from .io import absolutize, ensure
+from .logging import initlog
+from .time import str_to_timestamp, timestamp, timestamp_to_str
 
 __all__ = [
     "ensure",
@@ -11,4 +12,5 @@ __all__ = [
     "timestamp",
     "timestamp_to_str",
     "str_to_timestamp",
+    "initlog",
 ]

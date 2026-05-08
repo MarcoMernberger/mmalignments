@@ -8,9 +8,8 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Callable, Mapping, Union
 
-from mmalignments.models.elements import Element, element
-from mmalignments.models.tags import ElementTag, Method, State, merge_tag
-from mmalignments.models.tags import Tag
+from mmalignments.models.elements import Element, element, generate_element_key_name
+from mmalignments.models.tags import ElementTag, Method, State, Tag, merge_tag
 
 from ..externals import External, ExternalRunConfig, subroutine
 from ..parameters import Params, ParamSet
@@ -275,14 +274,15 @@ class Bedtools(External):
             cfg=cfg,
         )
         # build element
+        key, name = generate_element_key_name(tag, self.version_name, "sort")
         element = Element(
             key=f"{tag.default_name}_sorted_{self.version_name}",
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bed],
+            inputs=(input_bed,),
             artifacts={"bed": output_bed},
-            pres=[bed_element],
+            pres=(bed_element,),
         )
         return element
 
@@ -327,7 +327,8 @@ class Bedtools(External):
         """
         # Build command: bedtools sort -i input.bed > output.bed
         arguments = ["sort", "-i", str(input_bed)]
-        return arguments, [output_bed], output_bed, None, None
+        subcommand = "sort"
+        return arguments, subcommand, [input_bed], [output_bed], output_bed, None, None
 
     ###########################################################################
     # Slop (High-level and Low-level wrapper)
@@ -403,7 +404,6 @@ class Bedtools(External):
         tag = merge_tag(default_tag, tag) if tag is not None else default_tag
         output_bed = self.build_outfile(outdir, filename, tag, input_bed)
 
-        print(f"Slop parameters ", self.get_paramset("slop"))
         if slop_bp:
             if slop_bp > 0:
                 params = Params(b=slop_bp, **(params.to_dict() if params else {}))
@@ -471,8 +471,6 @@ class Bedtools(External):
         ... )
         >>> slop_runner()  # Execute the slop
         """
-        paths = [input_bed, genome_file, output_bed]
-
         # Build command: bedtools slop -i input.bed -g genome -b 100 > output.bed
         arguments = [
             "slop",
@@ -482,7 +480,8 @@ class Bedtools(External):
             self.strabs(genome_file),
         ]
 
-        return arguments, paths, self.abs(output_bed), None, None
+        subcommand = "slop"
+        return arguments, subcommand, [input_bed, genome_file], [self.abs(output_bed)], self.abs(output_bed), None, None
 
     ###########################################################################
     # Merge (High-level and Low-level wrapper)
@@ -614,7 +613,8 @@ class Bedtools(External):
         """
         # Build command: bedtools merge -i input.bed > output.bed
         arguments = ["merge", "-i", str(input_bed)]
-        return arguments, [output_bed], output_bed, None, None
+        subcommand = "merge"
+        return arguments, subcommand, [input_bed], [output_bed], output_bed, None, None
 
     ###########################################################################
     # Conevenience methods for common workflows

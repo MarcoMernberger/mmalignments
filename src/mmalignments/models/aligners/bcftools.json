@@ -1,0 +1,1197 @@
+{
+  "view": {
+    "_thread_spec": {
+      "flag": "--threads",
+      "max_threads": null,
+      "fraction": 1,
+      "multi": true
+    },
+    "drop_genotypes": {
+      "flag": "-G",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Drop individual genotype information (after subsetting if -s option set)."
+    },
+    "header_only": {
+      "flag": "-h",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Print only the header in VCF output."
+    },
+    "no_header": {
+      "flag": "-H",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Suppress the header in VCF output."
+    },
+    "compression_level": {
+      "flag": "-l",
+      "dtype": [
+        "int"
+      ],
+      "default": -1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Compression level: 0 uncompressed, 1 best speed, 9 best compression [-1]."
+    },
+    "no_version": {
+      "flag": "--no-version",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Do not append version and command line to the header."
+    },
+    "output": {
+      "flag": "-o",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output file name [stdout]."
+    },
+    "output_type": {
+      "flag": "-O",
+      "dtype": "str",
+      "default": "v",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output type: u/b: un/compressed BCF, v/z: un/compressed VCF, 0-9: compression level [v]."
+    },
+    "regions": {
+      "flag": "-r",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Restrict to comma-separated list of regions."
+    },
+    "regions_file": {
+      "flag": "-R",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Restrict to regions listed in FILE."
+    },
+    "regions_overlap": {
+      "flag": "--regions-overlap",
+      "dtype": [
+        "int"
+      ],
+      "default": 1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Include if POS in the region (0), record overlaps (1), variant overlaps (2) [1]."
+    },
+    "targets": {
+      "flag": "-t",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Similar to -r but streams rather than index-jumps. Exclude regions with '^' prefix."
+    },
+    "targets_file": {
+      "flag": "-T",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Similar to -R but streams rather than index-jumps. Exclude regions with '^' prefix."
+    },
+    "targets_overlap": {
+      "flag": "--targets-overlap",
+      "dtype": [
+        "int"
+      ],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Include if POS in the region (0), record overlaps (1), variant overlaps (2) [0]."
+    },
+    "trim_unseen_allele": {
+      "flag": "-A",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Remove '<*>' or '<NON_REF>' at variant sites."
+    },
+    "trim_alt_alleles": {
+      "flag": "-a",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Trim ALT alleles not seen in the genotype fields."
+    },
+    "no_update": {
+      "flag": "-I",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Do not (re)calculate INFO fields for the subset (currently INFO/AC and INFO/AN)."
+    },
+    "samples": {
+      "flag": "-s",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Comma separated list of samples to include (or exclude with '^' prefix)."
+    },
+    "samples_file": {
+      "flag": "-S",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "File of samples to include (or exclude with '^' prefix)."
+    },
+    "force_samples": {
+      "flag": "--force-samples",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Only warn about unknown subset samples."
+    },
+    "min_ac": {
+      "flag": "-c",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum count for non-reference (nref), 1st alternate (alt1), least/most frequent (minor/major) alleles [nref]."
+    },
+    "max_ac": {
+      "flag": "-C",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Maximum count for non-reference (nref), 1st alternate (alt1), least/most frequent (minor/major) alleles [nref]."
+    },
+    "apply_filters": {
+      "flag": "-f",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Require at least one of the listed FILTER strings (e.g. 'PASS,.')."
+    },
+    "genotype": {
+      "flag": "-g",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Require one or more hom/het/missing genotype or, if prefixed with '^', exclude such sites."
+    },
+    "include": {
+      "flag": "-i",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Select sites for which the expression is true."
+    },
+    "exclude": {
+      "flag": "-e",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Exclude sites for which the expression is true."
+    },
+    "known": {
+      "flag": "-k",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Select known sites only (ID is not '.')."
+    },
+    "novel": {
+      "flag": "-n",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Select novel sites only (ID is '.')."
+    },
+    "min_alleles": {
+      "flag": "-m",
+      "dtype": [
+        "int"
+      ],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum number of alleles listed in REF and ALT."
+    },
+    "max_alleles": {
+      "flag": "-M",
+      "dtype": [
+        "int"
+      ],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Maximum number of alleles listed in REF and ALT."
+    },
+    "phased": {
+      "flag": "-p",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Select sites where all samples are phased."
+    },
+    "exclude_phased": {
+      "flag": "-P",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Exclude sites where all samples are phased."
+    },
+    "min_af": {
+      "flag": "-q",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum frequency for non-reference (nref), 1st alternate (alt1), least/most frequent alleles [nref]."
+    },
+    "max_af": {
+      "flag": "-Q",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Maximum frequency for non-reference (nref), 1st alternate (alt1), least/most frequent alleles [nref]."
+    },
+    "uncalled": {
+      "flag": "-u",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Select sites without a called genotype."
+    },
+    "exclude_uncalled": {
+      "flag": "-U",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Exclude sites without a called genotype."
+    },
+    "types": {
+      "flag": "-v",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Select comma-separated list of variant types: snps,indels,mnps,ref,bnd,other."
+    },
+    "exclude_types": {
+      "flag": "-V",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Exclude comma-separated list of variant types: snps,indels,mnps,ref,bnd,other."
+    },
+    "private": {
+      "flag": "-x",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Select sites where the non-reference alleles are exclusive (private) to the subset samples."
+    },
+    "exclude_private": {
+      "flag": "-X",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Exclude sites where the non-reference alleles are exclusive (private) to the subset samples."
+    },
+    "write_index": {
+      "flag": "-W",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Automatically index the output files [off]."
+    },
+    "threads": {
+      "flag": "--threads",
+      "dtype": [
+        "int"
+      ],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Use multithreading with INT worker threads [0]."
+    }
+  },
+  "index": {
+    "_thread_spec": {
+      "flag": "--threads",
+      "max_threads": null,
+      "fraction": 1,
+      "multi": true
+    },
+    "csi": {
+      "flag": "-c",
+      "dtype": [
+        "bool"
+      ],
+      "default": true,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Generate CSI-format index for VCF/BCF files [default]."
+    },
+    "tbi": {
+      "flag": "-t",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Generate TBI-format index for VCF files."
+    },
+    "force": {
+      "flag": "-f",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Overwrite index if it already exists."
+    },
+    "min_shift": {
+      "flag": "-m",
+      "dtype": [
+        "int"
+      ],
+      "default": 14,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Set minimal interval size for CSI indices to 2^INT [14]."
+    },
+    "output": {
+      "flag": "-o",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Optional output index file name."
+    },
+    "nrecords": {
+      "flag": "-n",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Print number of records based on existing index file."
+    },
+    "stats": {
+      "flag": "-s",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Print per contig stats based on existing index file."
+    },
+    "threads": {
+      "flag": "--threads",
+      "dtype": [
+        "int"
+      ],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Use multithreading with INT worker threads [0]."
+    }
+  },
+  "filter": {
+    "_thread_spec": {
+      "flag": "--threads",
+      "max_threads": null,
+      "fraction": 1,
+      "multi": true
+    },
+    "exclude": {
+      "flag": "-e",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Exclude sites for which the expression is true."
+    },
+    "include": {
+      "flag": "-i",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Include only sites for which the expression is true."
+    },
+    "snp_gap": {
+      "flag": "-g",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Filter SNPs within <int> base pairs of an indel (the default) or any combination of indel,mnp,bnd,other,overlap."
+    },
+    "indel_gap": {
+      "flag": "-G",
+      "dtype": [
+        "int"
+      ],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Filter clusters of indels separated by <int> or fewer base pairs allowing only one to pass."
+    },
+    "mask": {
+      "flag": "--mask",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Soft filter regions, '^' to negate."
+    },
+    "mask_file": {
+      "flag": "-M",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Soft filter regions listed in a file, '^' to negate."
+    },
+    "mask_overlap": {
+      "flag": "--mask-overlap",
+      "dtype": [
+        "int"
+      ],
+      "default": 1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Mask if POS in the region (0), record overlaps (1), variant overlaps (2) [1]."
+    },
+    "mode": {
+      "flag": "-m",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "'+': do not replace but add to existing FILTER; 'x': reset filters at sites which pass."
+    },
+    "no_version": {
+      "flag": "--no-version",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Do not append version and command line to the header."
+    },
+    "output": {
+      "flag": "-o",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Write output to a file [standard output]."
+    },
+    "output_type": {
+      "flag": "-O",
+      "dtype": "str",
+      "default": "v",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output type: u/b: un/compressed BCF, v/z: un/compressed VCF, 0-9: compression level [v]."
+    },
+    "regions": {
+      "flag": "-r",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Restrict to comma-separated list of regions."
+    },
+    "regions_file": {
+      "flag": "-R",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Restrict to regions listed in a file."
+    },
+    "regions_overlap": {
+      "flag": "--regions-overlap",
+      "dtype": [
+        "int"
+      ],
+      "default": 1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Include if POS in the region (0), record overlaps (1), variant overlaps (2) [1]."
+    },
+    "soft_filter": {
+      "flag": "-s",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Annotate FILTER column with <string> or unique filter name ('Filter%d') made up by the program ('+')."
+    },
+    "set_gts": {
+      "flag": "-S",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Set genotypes of failed samples to missing (.) or ref (0)."
+    },
+    "targets": {
+      "flag": "-t",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Similar to -r but streams rather than index-jumps."
+    },
+    "targets_file": {
+      "flag": "-T",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Similar to -R but streams rather than index-jumps."
+    },
+    "targets_overlap": {
+      "flag": "--targets-overlap",
+      "dtype": [
+        "int"
+      ],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Include if POS in the region (0), record overlaps (1), variant overlaps (2) [0]."
+    },
+    "write_index": {
+      "flag": "-W",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Automatically index the output files [off]."
+    },
+    "threads": {
+      "flag": "--threads",
+      "dtype": [
+        "int"
+      ],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Use multithreading with <int> worker threads [0]."
+    }
+  },
+  "fill-tags": {
+    "_thread_spec": {
+      "flag": "--threads",
+      "max_threads": null,
+      "fraction": 1,
+      "multi": true
+    },
+    "exclude": {
+      "flag": "-e",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Exclude sites for which the expression is true."
+    },
+    "include": {
+      "flag": "-i",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Select sites for which the expression is true."
+    },
+    "regions": {
+      "flag": "-r",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Restrict to comma-separated list of regions."
+    },
+    "regions_file": {
+      "flag": "-R",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Restrict to regions listed in a file."
+    },
+    "regions_overlap": {
+      "flag": "--regions-overlap",
+      "dtype": [
+        "int"
+      ],
+      "default": 1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Include if POS in the region (0), record overlaps (1), variant overlaps (2) [1]."
+    },
+    "targets": {
+      "flag": "-t",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Similar to -r but streams rather than index-jumps."
+    },
+    "targets_file": {
+      "flag": "-T",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Similar to -R but streams rather than index-jumps."
+    },
+    "targets_overlap": {
+      "flag": "--targets-overlap",
+      "dtype": [
+        "int"
+      ],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Include if POS in the region (0), record overlaps (1), variant overlaps (2) [0]."
+    },
+    "no_version": {
+      "flag": "--no-version",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Do not append version and command line to the header."
+    },
+    "output": {
+      "flag": "-o",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Write output to a file [standard output]."
+    },
+    "output_type": {
+      "flag": "-O",
+      "dtype": "str",
+      "default": "v",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output type: u/b: un/compressed BCF, v/z: un/compressed VCF, 0-9: compression level [v]."
+    },
+    "write_index": {
+      "flag": "-W",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Automatically index the output files [off]."
+    },
+    "threads": {
+      "flag": "--threads",
+      "dtype": [
+        "int"
+      ],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Use multithreading with <int> worker threads [0]."
+    }
+  },
+  "sort": {
+    "_thread_spec": {
+      "flag": "--threads",
+      "max_threads": null,
+      "fraction": 1,
+      "multi": false
+    },
+    "max_mem": {
+      "flag": "-m",
+      "dtype": [
+        "str",
+        "int"
+      ],
+      "default": "768M",
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Maximum memory to use [768M]. Suffix k/M/G recognized."
+    },
+    "output": {
+      "flag": "-o",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output file name [stdout]."
+    },
+    "output_type": {
+      "flag": "-O",
+      "dtype": "str",
+      "default": "v",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output type: u/b: un/compressed BCF, v/z: un/compressed VCF, 0-9: compression level [v]."
+    },
+    "temp_dir": {
+      "flag": "-T",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Temporary files directory [/tmp/bcftools.XXXXXX]."
+    },
+    "write_index": {
+      "flag": "-W",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Automatically index the output files [off]."
+    }
+  },
+  "annotate": {
+    "_thread_spec": {
+      "flag": "--threads",
+      "max_threads": null,
+      "fraction": 1,
+      "multi": true
+    },
+    "annotations": {
+      "flag": "-a",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "VCF file or tabix-indexed FILE with annotations: CHR\\tPOS[\\tVALUE]+."
+    },
+    "columns": {
+      "flag": "-c",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "List of columns in the annotation file, e.g. CHROM,POS,REF,ALT,-,INFO/TAG."
+    },
+    "columns_file": {
+      "flag": "-C",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Read -c columns from FILE, one name per row, with optional --merge-logic TYPE."
+    },
+    "exclude": {
+      "flag": "-e",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Exclude sites for which the expression is true."
+    },
+    "force": {
+      "flag": "--force",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Continue despite parsing error (at your own risk!)."
+    },
+    "header_line": {
+      "flag": "-H",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Header line to append to the VCF header (can be given multiple times)."
+    },
+    "header_lines": {
+      "flag": "-h",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "File with lines to append to the VCF header."
+    },
+    "set_id": {
+      "flag": "-I",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Set ID column using a bcftools query-like expression."
+    },
+    "include": {
+      "flag": "-i",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Select sites for which the expression is true."
+    },
+    "keep_sites": {
+      "flag": "-k",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Leave -i/-e sites unchanged instead of discarding them."
+    },
+    "merge_logic": {
+      "flag": "-l",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Merge logic for multiple overlapping regions TAG:TYPE (EXPERIMENTAL)."
+    },
+    "mark_sites": {
+      "flag": "-m",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Add INFO/TAG flag to sites which are ('+') or are not ('-') listed in the -a file."
+    },
+    "min_overlap": {
+      "flag": "--min-overlap",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Required overlap as a fraction of variant in the -a file (ANN), the VCF (:VCF), or reciprocal (ANN:VCF)."
+    },
+    "no_version": {
+      "flag": "--no-version",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Do not append version and command line to the header."
+    },
+    "output": {
+      "flag": "-o",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Write output to a file [standard output]."
+    },
+    "output_type": {
+      "flag": "-O",
+      "dtype": "str",
+      "default": "v",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output type: u/b: un/compressed BCF, v/z: un/compressed VCF, 0-9: compression level [v]."
+    },
+    "pair_logic": {
+      "flag": "--pair-logic",
+      "dtype": "str",
+      "default": "some",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Matching records by snps|indels|both|all|some|exact [some]."
+    },
+    "regions": {
+      "flag": "-r",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Restrict to comma-separated list of regions."
+    },
+    "regions_file": {
+      "flag": "-R",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Restrict to regions listed in FILE."
+    },
+    "regions_overlap": {
+      "flag": "--regions-overlap",
+      "dtype": [
+        "int"
+      ],
+      "default": 1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Include if POS in the region (0), record overlaps (1), variant overlaps (2) [1]."
+    },
+    "rename_annots": {
+      "flag": "--rename-annots",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Rename annotations from FILE: TYPE/old\\tnew, where TYPE is one of FILTER,INFO,FORMAT."
+    },
+    "rename_chrs": {
+      "flag": "--rename-chrs",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Rename sequences according to the mapping in FILE: old\\tnew."
+    },
+    "samples": {
+      "flag": "-s",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Comma separated list of samples to annotate (or exclude with '^' prefix)."
+    },
+    "samples_file": {
+      "flag": "-S",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "File of samples to annotate (or exclude with '^' prefix)."
+    },
+    "single_overlaps": {
+      "flag": "--single-overlaps",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": false,
+      "render": "flag",
+      "description": "Keep memory low by avoiding complexities arising from handling multiple overlapping intervals."
+    },
+    "remove": {
+      "flag": "-x",
+      "dtype": "str",
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "List of annotations to remove (e.g. ID,INFO/DP,FORMAT/DP,FILTER), or keep with '^' prefix."
+    },
+    "write_index": {
+      "flag": "-W",
+      "dtype": [
+        "bool"
+      ],
+      "default": false,
+      "required": false,
+      "affects_output": true,
+      "render": "flag",
+      "description": "Automatically index the output files [off]."
+    },
+    "threads": {
+      "flag": "--threads",
+      "dtype": [
+        "int"
+      ],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Number of extra output compression threads [0]."
+    }
+  }
+}

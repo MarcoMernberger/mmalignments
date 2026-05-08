@@ -28,7 +28,7 @@ from mmalignments.models.aligners import (
     Samtools,
 )
 from mmalignments.models.callers.gatk import GATK  # noqa: F401
-from mmalignments.models.data import Genome, Sample, Pairing  # noqa: F401
+from mmalignments.models.data import Genome, Pairing, Sample  # noqa: F401
 from mmalignments.models.elements import (
     Element,
     FileElement,  # noqa: F401
@@ -37,19 +37,19 @@ from mmalignments.models.elements import (
     ValidationPolicy,
 )
 from mmalignments.models.executor import Executor  # noqa: F401
+from mmalignments.models.externals import ExternalRunConfig  # noqa: F401
+from mmalignments.models.parameters import Params  # noqa: F401
 from mmalignments.models.qc import (
     FastQC,
     MultiQC,
     post_mapping_qc_with_multiqc,
     pre_alignment_qc,
 )
-from mmalignments.models.reports.report import MutationalLoadReport  # noqa: F401
+from mmalignments.models.reports import MutationalLoadReport
+from mmalignments.models.tags import ElementTag  # noqa: F401
 from mmalignments.services import ensure, initlog  # noqa: F401
 
 from .core import ensemblmap  # noqa: F401
-from mmalignments.models.parameters import Params  # noqa: F401
-from mmalignments.models.externals import ExternalRunConfig  # noqa: F401
-from mmalignments.models.tags import ElementTag  # noqa: F401
 
 __all__ = [
     "Bedtools",
