@@ -9,13 +9,13 @@ from subprocess import CompletedProcess
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
 
-from deprecated import deprecated  # type: ignore[import]
+import pandas as pd
 
 from mmalignments.models.data import Pairing
-from mmalignments.services.io import exists, parents, paths_exists
+from mmalignments.services.io import parents, paths_exists
 
 from .registry import current_element_registry
-from .tags import ElementTag, Method, Stage, State, PartialElementTag
+from .tags import ElementTag, Method, PartialElementTag, Stage, State
 
 
 def file_sig(p: Path) -> dict[str, Any]:
@@ -121,8 +121,8 @@ class Element:
 
     @cached_property
     def output_files(self) -> Iterable[Path] | None:
-        files = list(
-            sorted([v for v in self.artifacts.values() if isinstance(v, Path)], key=str)
+        files = sorted(
+            [v for v in self.artifacts.values() if isinstance(v, Path)], key=str
         )
         return files if files else None
 
@@ -664,3 +664,78 @@ def sample_fastqs(
         name = sample.artifacts.get("sample_name", sample.name)
         rg = sample.artifacts.get("read_group")
         return r1, r2, name, rg
+
+
+class TableElement(Element):
+    """An Element that produces a TSV (for humans) and a Parquet file (for the pipeline).
+
+    Parameters
+    ----------
+    key : str
+        Unique cache key.
+    run : Callable
+        Zero-argument callable that executes the computation and writes both files.
+    tag : ElementTag
+        Tag used for naming / provenance.
+    tsv : Path
+        Output TSV path.
+    parquet : Path
+        Output Parquet path.
+    determinants, inputs, pres, name
+        Forwarded to :class:`Element`.
+
+    Artefacts
+    ---------
+    ``"tsv"``     → *tsv*
+    ``"parquet"`` → *parquet*
+
+    The pipeline should prefer ``element.parquet`` for chaining.
+    Users / downstream tools consume ``element.tsv``.
+    """
+
+    def __init__(
+        self,
+        key: str,
+        run: Callable[[], CompletedProcess],
+        tag: ElementTag,
+        *,
+        tsv: Path,
+        parquet: Path,
+        determinants: tuple | None = None,
+        inputs: tuple[Path, ...] | None = None,
+        pres: tuple[Element, ...] | None = None,
+        name: str | None = None,
+    ) -> None:
+        self._tsv = tsv
+        self._parquet = parquet
+        super().__init__(
+            key=key,
+            run=run,
+            tag=tag,
+            determinants=determinants,
+            inputs=inputs,
+            artifacts={"tsv": tsv, "parquet": parquet},
+            pres=pres,
+            name=name,
+        )
+
+    @property
+    def tsv(self) -> Path:
+        return self._tsv
+
+    @property
+    def parquet(self) -> Path:
+        return self._parquet
+
+    @cached_property
+    def df(self) -> pd.DataFrame:
+        """Load the result table (prefers Parquet, falls back to TSV)."""
+        if self._parquet.exists():
+            return pd.read_parquet(self._parquet)
+        if self._tsv.exists():
+            return pd.read_csv(self._tsv, sep="\t", index_col=0)
+        raise FileNotFoundError(
+            f"Neither Parquet nor TSV output found for {self.name!r}.\n"
+            f"  parquet: {self._parquet}\n"
+            f"  tsv:     {self._tsv}"
+        )

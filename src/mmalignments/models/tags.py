@@ -22,6 +22,7 @@ class Stage(str, Enum):
     QUANT = "quant"
     DIFF = "diff"
     INPUT = "input"
+    ANALYSIS = "analysis"
 
 
 class State(str, Enum):
@@ -45,6 +46,9 @@ class State(str, Enum):
     LOCI = "loci"
     METRIC = "metric"
     REPORT = "report"
+    DIFF = "diff"
+    CLUSTER = "cluster"
+    PCA = "pca"
 
 
 class Method(str, Enum):
@@ -64,6 +68,8 @@ class Method(str, Enum):
     CHECK = "check"
     BCFTOOLS = "bcftools"
     CUSTOM = "custom"  # for custom python functions
+    EDGER = "edger"
+    CLUSTERING = "clustering"
 
 
 def level(level: int) -> str:
