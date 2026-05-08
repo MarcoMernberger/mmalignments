@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import matplotlib.pyplot as plt  # type: ignore[import]
+import numpy as np
 import pandas as pd  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
 
@@ -235,7 +236,7 @@ class MutationalLoadReport:
             row = {
                 "sample": tumor,
                 "normal": normal,
-                "mouse_id": _mouse_id_from_sample(tumor),
+                "mouse": _mouse_id_from_sample(tumor),
                 "tissue": _tissue_from_sample(tumor),
                 "callable_mb": callable_mb,
                 "n_snv": n_snv,
@@ -251,7 +252,7 @@ class MutationalLoadReport:
         columns = [
             "sample",
             "normal",
-            "mouse_id",
+            "mouse",
             "tissue",
             "callable_mb",
             "n_snv",
@@ -301,6 +302,7 @@ class MutationalLoadReport:
         filename: Path | str | None = None,
         markdup_by_sample: Mapping[str, Element] | None = None,
         hs_by_sample: Mapping[str, Element] | None = None,
+        params: Params | None = None,
     ) -> Element:
 
         out_dir = Path(outdir or self.output_dir).absolute()
@@ -350,77 +352,199 @@ class MutationalLoadReport:
     # Write Plots
     ############################################################################
 
-    def plot_by_group(
+    def plot_grouped(
         self,
         report_table: Path | str,
-        out_plot_group: Path | str,
+        out_plot: Path | str,
         *,
-        params: Params | None = None,
-    ) -> Runnable:
-        # ---------- plots ----------
-        # Plot 1: by group (Kidney vs SCC vs Other)
-        # (Even if you only have SCC tumors, it will still plot.)
+        group_col: str,
+        value_col: str = "mut_load",
+        mode: str = "bar",  # "bar" | "box"
+        error: str = "std",  # "std" | "sem" | None
+        params=None,
+    ):
         def __run():
             suffixes = params.get("suffixes", None) if params else None
-            groups = {}
+
             df = pd.read_csv(report_table, sep="\t")
-            for _, r in df.iterrows():
-                g = r["tissue"]
-                v = r["mut_load"]
-                if v is None:
-                    continue
-                groups.setdefault(g, []).append(float(v))
 
-            if groups:
-                labels = sorted(
-                    groups.keys(),
-                    key=lambda x: (
-                        ["Kidney", "SCC", "Other"].index(x)
-                        if x in ["Kidney", "SCC", "Other"]
-                        else 99
-                    ),
-                )
-                data = [groups[ll] for ll in labels]
+            # drop NaNs
+            df = df[[group_col, value_col]].dropna()
 
-                f = plt.figure()
+            groups = df.groupby(group_col)[value_col].apply(list)
+
+            labels = sorted(groups.index)
+            data = [groups[ll] for ll in labels]
+
+            f = plt.figure()
+
+            if mode == "box":
                 plt.boxplot(data, labels=labels, showfliers=True)
-                plt.ylabel("Mutational load (variants / callable Mb)")
-                plt.title("Mutational load by tissue group")
-                plt.tight_layout()
-                plt.close()
-                save_figure(f, Path(out_plot_group), suffixes=suffixes)
 
-        return Runnable(__run, [], "plot mutational load by group")
+            elif mode == "bar":
+                means = []
+                errs = []
+
+                for vals in data:
+                    vals = np.array(vals, dtype=float)
+                    means.append(vals.mean())
+
+                    if len(vals) > 1 and error is not None:
+                        if error == "std":
+                            errs.append(vals.std())
+                        elif error == "sem":
+                            errs.append(vals.std() / np.sqrt(len(vals)))
+                        else:
+                            errs.append(0)
+                    else:
+                        errs.append(0)
+
+                x = np.arange(len(labels))
+
+                plt.bar(x, means, yerr=errs if any(errs) else None, capsize=5)
+                plt.xticks(x, labels, rotation=45, ha="right")
+
+            else:
+                raise ValueError(f"Unknown mode: {mode}")
+
+            plt.ylabel(f"{value_col} (variants / callable Mb)")
+            plt.title(f"{value_col} grouped by {group_col}")
+            plt.tight_layout()
+
+            save_figure(f, Path(out_plot), suffixes=suffixes)
+            plt.close()
+
+        return Runnable(__run, [], f"plot {value_col} by {group_col}")
+
+    # def plot_by_group(
+    #     self,
+    #     report_table: Path | str,
+    #     out_plot_group: Path | str,
+    #     *,
+    #     params: Params | None = None,
+    # ) -> Runnable:
+    #     # ---------- plots ----------
+    #     # Plot 1: by group (Kidney vs SCC vs Other)
+    #     # (Even if you only have SCC tumors, it will still plot.)
+    #     def __run():
+    #         suffixes = params.get("suffixes", None) if params else None
+    #         groups = {}
+    #         df = pd.read_csv(report_table, sep="\t")
+    #         for _, r in df.iterrows():
+    #             g = r["tissue"]
+    #             v = r["mut_load"]
+    #             if v is None:
+    #                 continue
+    #             groups.setdefault(g, []).append(float(v))
+
+    #         if groups:
+    #             labels = sorted(
+    #                 groups.keys(),
+    #                 key=lambda x: (
+    #                     ["Kidney", "SCC", "Other"].index(x)
+    #                     if x in ["Kidney", "SCC", "Other"]
+    #                     else 99
+    #                 ),
+    #             )
+    #             data = [groups[ll] for ll in labels]
+
+    #             f = plt.figure()
+    #             plt.boxplot(data, labels=labels, showfliers=True)
+    #             plt.ylabel("Mutational load (variants / callable Mb)")
+    #             plt.title("Mutational load by tissue group")
+    #             plt.tight_layout()
+    #             plt.close()
+    #             save_figure(f, Path(out_plot_group), suffixes=suffixes)
+
+    #     return Runnable(__run, [], "plot mutational load by group")
+
+    # def plot_by_mouse(
+    #     self,
+    #     report_table: Path | str,
+    #     out_plot_mouse: Path | str,
+    #     *,
+    #     params: Params | None = None,
+    # ) -> Runnable:
+    #     # Plot 2: by mouse (median per mouse as bar plot)
+    #     print(out_plot_mouse)
+    #     # raise ValueError("Intentional error to test dry run")  # noqa: E501
+
+    #     def __run():
+    #         suffixes = params.get("suffixes", None) if params else None
+    #         df = pd.read_csv(report_table, sep="\t")
+    #         mouse_vals = {}
+    #         for _, r in df.iterrows():
+    #             mid = r["mouse_id"]
+    #             v = r["mut_load"]
+    #             if v is None:
+    #                 continue
+    #             mouse_vals.setdefault(mid, []).append(float(v))
+
+    #         if mouse_vals:
+    #             mouse_ids = sorted(mouse_vals.keys())
+    #             # median
+    #             meds = []
+    #             for mid in mouse_ids:
+    #                 xs = sorted(mouse_vals[mid])
+    #                 n = len(xs)
+    #                 meds.append(
+    #                     xs[n // 2]
+    #                     if n % 2 == 1
+    #                     else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
+    #                 )
+
+    #             f = plt.figure()
+    #             plt.bar(mouse_ids, meds)
+    #             plt.xticks(rotation=45, ha="right")
+    #             plt.ylabel("Median mutational load (variants / callable Mb)")
+    #             plt.title("Mutational load by mouse (median across tumors)")
+    #             plt.tight_layout()
+    #             print(Path(out_plot_mouse))
+    #             save_figure(f, Path(out_plot_mouse), suffixes=suffixes)
+    #             plt.close()
+
+    #     return Runnable(__run, [], "plot mutational load by mouse")
 
     @element
     def bygroup(
         self,
         report_table: Element,
         *,
+        group: str = "tissue",
+        value: str = "mut_load",
+        mode: str = "bar",
+        error: str = "std",
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
     ) -> Element:
         out_dir = Path(outdir or self.output_dir).absolute()
+        param = tag.param if tag and hasattr(tag, "param") else f"by_{group}"
         tag = from_prior(
             report_table.tag,
             tag,
             stage=Stage.SUMMARY,
             method=Method.CUSTOM,
             state=State.REPORT,
-            param="bygroup",
+            param=param,
             ext="png",
         )
-        out_plot_group = out_dir / (
-            Path(filename).with_suffix(f".{tag.param}")
-            if filename
-            else tag.default_output
+        out_plot_group = out_dir / tag.default_output
+        if filename:
+            filename = Path(filename)
+            out_plot_group = filename.with_suffix(f".{tag.param}{filename.suffix}")
+
+        runner = self.plot_grouped(
+            report_table.artifacts["tsv"],
+            out_plot_group,
+            group_col=group,
+            value_col=value,
+            mode=mode,
+            error=error,
+            params=params,
         )
 
-        runner = self.plot_by_group(
-            report_table.artifacts["tsv"], out_plot_group, params=params
-        )
         key, name = self.build_element_name(tag, "bygroup")
 
         inputs = (report_table.artifacts["tsv"],)
@@ -433,7 +557,6 @@ class MutationalLoadReport:
         artifacts = {}
         for suffix in suffixes:
             artifacts[suffix.lstrip(".")] = out_plot_group.with_suffix(suffix)
-
         return Element(
             key=key,
             run=runner,
@@ -445,101 +568,104 @@ class MutationalLoadReport:
             name=name,
         )
 
-    @element
-    def bymouse(
-        self,
-        report_table: Element,
-        *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        params: Params | None = None,
-    ) -> Element:
-        out_dir = Path(outdir or self.output_dir).absolute()
-        tag = from_prior(
-            report_table.tag,
-            tag,
-            stage=Stage.SUMMARY,
-            method=Method.CUSTOM,
-            state=State.REPORT,
-            param="bymouse",
-            ext="png",
-        )
-        out_plot_mouse = out_dir / (
-            Path(filename).with_suffix(f".{tag.param}")
-            if filename
-            else tag.default_output
-        )
+    # @element
+    # def bymouse(
+    #     self,
+    #     report_table: Element,
+    #     *,
+    #     tag: PartialElementTag | ElementTag | None = None,
+    #     outdir: Path | str | None = None,
+    #     filename: Path | str | None = None,
+    #     params: Params | None = None,
+    # ) -> Element:
+    #     out_dir = Path(outdir or self.output_dir).absolute()
+    #     tag = from_prior(
+    #         report_table.tag,
+    #         tag,
+    #         stage=Stage.SUMMARY,
+    #         method=Method.CUSTOM,
+    #         state=State.REPORT,
+    #         param="bymouse",
+    #         ext="png",
+    #     )
 
-        runner = self.plot_by_mouse(
-            report_table.artifacts["tsv"], out_plot_mouse, params=params
-        )
-        key, name = self.build_element_name(tag, "bymouse")
+    #     out_plot_mouse = out_dir / tag.default_output
+    #     if filename:
+    #         filename = Path(filename)
+    #         out_plot_mouse = filename.with_suffix(f".{tag.param}{filename.suffix}")
 
-        inputs = (report_table.artifacts["tsv"],)
-        determinants = ()
-        suffixes = (
-            params.get("suffixes", FIGURE_SUFFIXES)
-            if params
-            else FIGURE_SUFFIXES  # noqa: E501
-        )
-        artifacts = {}
-        for suffix in suffixes:
-            artifacts[suffix.lstrip(".")] = out_plot_mouse.with_suffix(suffix)
+    #     runner = self.plot_by_mouse(
+    #         report_table.artifacts["tsv"], out_plot_mouse, params=params
+    #     )
+    #     key, name = self.build_element_name(tag, "bymouse")
 
-        return Element(
-            key=key,
-            run=runner,
-            tag=tag,
-            determinants=determinants,
-            inputs=inputs,
-            artifacts=artifacts,
-            pres=(report_table,),
-            name=name,
-        )
+    #     inputs = (report_table.artifacts["tsv"],)
+    #     determinants = ()
+    #     suffixes = (
+    #         params.get("suffixes", FIGURE_SUFFIXES)
+    #         if params
+    #         else FIGURE_SUFFIXES  # noqa: E501
+    #     )
+    #     artifacts = {}
+    #     for suffix in suffixes:
+    #         artifacts[suffix.lstrip(".")] = out_plot_mouse.with_suffix(suffix)
+    #     return Element(
+    #         key=key,
+    #         run=runner,
+    #         tag=tag,
+    #         determinants=determinants,
+    #         inputs=inputs,
+    #         artifacts=artifacts,
+    #         pres=(report_table,),
+    #         name=name,
+    #     )
 
-    def plot_by_mouse(
-        self,
-        report_table: Path | str,
-        out_plot_mouse: Path | str,
-        *,
-        params: Params | None = None,
-    ) -> Runnable:
-        # Plot 2: by mouse (median per mouse as bar plot)
-        def __run():
-            suffixes = params.get("suffixes", None) if params else None
-            df = pd.read_csv(report_table, sep="\t")
-            mouse_vals = {}
-            for _, r in df.iterrows():
-                mid = r["mouse_id"]
-                v = r["mut_load"]
-                if v is None:
-                    continue
-                mouse_vals.setdefault(mid, []).append(float(v))
+    # def plot_by_mouse(
+    #     self,
+    #     report_table: Path | str,
+    #     out_plot_mouse: Path | str,
+    #     *,
+    #     params: Params | None = None,
+    # ) -> Runnable:
+    #     # Plot 2: by mouse (median per mouse as bar plot)
+    #     print(out_plot_mouse)
+    #     # raise ValueError("Intentional error to test dry run")  # noqa: E501
 
-            if mouse_vals:
-                mouse_ids = sorted(mouse_vals.keys())
-                # median
-                meds = []
-                for mid in mouse_ids:
-                    xs = sorted(mouse_vals[mid])
-                    n = len(xs)
-                    meds.append(
-                        xs[n // 2]
-                        if n % 2 == 1
-                        else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
-                    )
+    #     def __run():
+    #         suffixes = params.get("suffixes", None) if params else None
+    #         df = pd.read_csv(report_table, sep="\t")
+    #         mouse_vals = {}
+    #         for _, r in df.iterrows():
+    #             mid = r["mouse_id"]
+    #             v = r["mut_load"]
+    #             if v is None:
+    #                 continue
+    #             mouse_vals.setdefault(mid, []).append(float(v))
 
-                f = plt.figure()
-                plt.bar(mouse_ids, meds)
-                plt.xticks(rotation=45, ha="right")
-                plt.ylabel("Median mutational load (variants / callable Mb)")
-                plt.title("Mutational load by mouse (median across tumors)")
-                plt.tight_layout()
-                save_figure(f, Path(out_plot_mouse), suffixes=suffixes)
-                plt.close()
+    #         if mouse_vals:
+    #             mouse_ids = sorted(mouse_vals.keys())
+    #             # median
+    #             meds = []
+    #             for mid in mouse_ids:
+    #                 xs = sorted(mouse_vals[mid])
+    #                 n = len(xs)
+    #                 meds.append(
+    #                     xs[n // 2]
+    #                     if n % 2 == 1
+    #                     else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
+    #                 )
 
-        return Runnable(__run, [], "plot mutational load by mouse")
+    #             f = plt.figure()
+    #             plt.bar(mouse_ids, meds)
+    #             plt.xticks(rotation=45, ha="right")
+    #             plt.ylabel("Median mutational load (variants / callable Mb)")
+    #             plt.title("Mutational load by mouse (median across tumors)")
+    #             plt.tight_layout()
+    #             print(Path(out_plot_mouse))
+    #             save_figure(f, Path(out_plot_mouse), suffixes=suffixes)
+    #             plt.close()
+
+    #     return Runnable(__run, [], "plot mutational load by mouse")
 
     ############################################################################
     # Build report
@@ -556,7 +682,7 @@ class MutationalLoadReport:
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         parameters: Mapping[str, Params] | None = None,
-    ) -> tuple[Element, Element, Element]:
+    ) -> tuple[Element, ...]:
         out_dir = outdir or Path(self.output_dir).absolute()
 
         # write the report table first, then use it for plotting
@@ -568,21 +694,30 @@ class MutationalLoadReport:
             filename=filename,
             markdup_by_sample=markdup_by_sample,
             hs_by_sample=hs_by_sample,
+            params=parameters.get("write") if parameters else None,
         )
-        # plot by group
+        # TODO: make generic
+        # plot by tissue (default)
         report_plot_group = self.bygroup(
             report_write,
-            tag=tags.get("bygroup") if tags else None,
             outdir=out_dir,
             filename=filename,
-            params=parameters.get("bygroup") if parameters else None,
+            params=parameters.get("tissue") if parameters else None,
         )
         # plot by mouse
-        report_plot_mouse = self.bymouse(
+        report_plot_mouse = self.bygroup(
             report_write,
-            tag=tags.get("bymouse") if tags else None,
+            group="mouse",
             outdir=out_dir,
             filename=filename,
-            params=parameters.get("bymouse") if parameters else None,
+            params=parameters.get("mouse") if parameters else None,
         )
-        return report_write, report_plot_group, report_plot_mouse
+        # plot by sample
+        report_plot_sample = self.bygroup(
+            report_write,
+            group="sample",
+            outdir=out_dir,
+            filename=filename,
+            params=parameters.get("sample") if parameters else None,
+        )
+        return report_write, report_plot_group, report_plot_mouse, report_plot_sample

@@ -9,8 +9,6 @@ import sys
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime
 from logging import Logger
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -31,35 +29,34 @@ from mmalignments.services.io import ensure, from_json, parents
 from mmalignments.services.logging import initlog
 from mmalignments.services.time import now_as_str
 
+# @dataclass
+# class NodeState:
+#     key: str
+#     state: Literal["DONE", "SKIPPED", "FAILED"] = "SKIPPED"
+#     reason: str = ""
+#     start: datetime | None = None
+#     stop: datetime | None = None
+#     elapsed: float | None = None
 
-@dataclass
-class NodeState:
-    key: str
-    state: Literal["DONE", "SKIPPED", "FAILED"] = "SKIPPED"
-    reason: str = ""
-    start: datetime | None = None
-    stop: datetime | None = None
-    elapsed: float | None = None
+#     def mark_start(self):
+#         self.start = datetime.now()
 
-    def mark_start(self):
-        self.start = datetime.now()
+#     def mark_done(self):
+#         self.stop = datetime.now()
+#         self.elapsed = (self.stop - self.start).total_seconds() if self.start else None
+#         self.state = "DONE"
 
-    def mark_done(self):
-        self.stop = datetime.now()
-        self.elapsed = (self.stop - self.start).total_seconds() if self.start else None
-        self.state = "DONE"
+#     def mark_failed(self, reason: str):
+#         self.stop = datetime.now()
+#         self.elapsed = (self.stop - self.start).total_seconds() if self.start else None
+#         self.state = "FAILED"
+#         self.reason = reason
 
-    def mark_failed(self, reason: str):
-        self.stop = datetime.now()
-        self.elapsed = (self.stop - self.start).total_seconds() if self.start else None
-        self.state = "FAILED"
-        self.reason = reason
-
-    def mark_skipped(self, reason: str):
-        self.state = "SKIPPED"
-        self.reason = reason
-        self.start = self.stop = datetime.now()
-        self.elapsed = 0
+#     def mark_skipped(self, reason: str):
+#         self.state = "SKIPPED"
+#         self.reason = reason
+#         self.start = self.stop = datetime.now()
+#         self.elapsed = 0
 
 
 class Executor:
