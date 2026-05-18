@@ -16,11 +16,11 @@ try:
 except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.1.0"
 
-from mmalignments.jobs.aligner_jobs import (  # noqa: F401
-    index_genome,
-    jobify,
-    write_lengths,  # noqa: F401
-)
+# from mmalignments.jobs.aligner_jobs import (  # noqa: F401
+#     index_genome,
+#     jobify,
+#     write_lengths,  # noqa: F401
+# )
 from mmalignments.models.aligners import (
     BCFtools,
     Bedtools,  # noqa: F401
@@ -48,8 +48,10 @@ from mmalignments.models.qc import (
 from mmalignments.models.reports import MutationalLoadReport
 from mmalignments.models.tags import ElementTag  # noqa: F401
 from mmalignments.services import ensure, initlog  # noqa: F401
+# from mmalignments.models.differential.deseq2 import DESeq2  # noqa: F401
+# from mmalignments.models.differential.edger import EdgeR  # noqa: F401
 
-from .core import ensemblmap  # noqa: F401
+# from .core import ensemblmap  # noqa: F401
 
 __all__ = [
     "Bedtools",
@@ -81,4 +83,6 @@ __all__ = [
     "ValidationPolicy",
     "__version__",
     "write_lengths",
+    # "DESeq2",
+    # "EdgeR",
 ]

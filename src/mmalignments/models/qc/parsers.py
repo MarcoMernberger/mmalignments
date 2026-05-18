@@ -21,7 +21,6 @@ from mmalignments.models.tags import (
     PartialElementTag,
     Stage,
     State,
-    merge_tag,
 )
 
 logger = logging.getLogger(__name__)
@@ -323,7 +322,7 @@ def build_qc_summary(
     ... )
     >>> summary_elem.run()
     """
-    default_tag = ElementTag(
+    tag = ElementTag(
         root=sample.tag.root,
         level=max([el.tag.level for el in elements_to_summary]) + 1,
         stage=Stage.QC,
@@ -331,9 +330,8 @@ def build_qc_summary(
         state=State.REPORT,
         omics=sample.tag.omics,
         ext="json",
-    )
-    tag = merge_tag(default_tag, tag) if tag is not None else default_tag
-    outdir = Path(outdir) or sample.result_dir / "qc"
+    ).merge(tag)
+    outdir = Path(outdir or sample.result_dir / "qc")
     out_json = outdir / (filename or (tag.default_name + ".json"))
     out_tsv = out_json.with_suffix(".tsv")
     input_files = []

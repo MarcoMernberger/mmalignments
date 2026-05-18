@@ -19,7 +19,6 @@ from .tags import (  # noqa: F401
     PartialElementTag,
     Stage,
     State,
-    merge_tag,
 )
 from .parameters import Params  # noqa: F401
 from .externals import ExternalRunConfig  # noqa: F401

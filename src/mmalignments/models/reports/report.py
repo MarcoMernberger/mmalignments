@@ -15,6 +15,7 @@ from mmalignments.models.elements import (
     element,
     generate_element_key_name,
 )
+from mmalignments import __version__
 from mmalignments.models.externals import Runnable
 from mmalignments.models.parameters import Params
 from mmalignments.models.tags import (
@@ -125,7 +126,7 @@ class MutationalLoadReport:
 
     output_dir: Path = Path("results/report")
     name: str = "MutationalLoadReport"
-    version: str = version("mmalignments")
+    version: str = __version__
 
     ############################################################################
     # Helpers

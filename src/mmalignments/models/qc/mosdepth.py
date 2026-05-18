@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Mapping
 
-from mmalignments.models.elements import Element, MappedElement, element
+from mmalignments.models.elements import Element, MappedElement, element, generate_element_key_name
 from mmalignments.models.tags import (
     ElementTag,
     Method,
@@ -264,16 +264,19 @@ class Mosdepth(External):
             params=params,
             cfg=cfg,
         )
-        key = f"{tag.default_name}_coverage_{self.version_name}"
+        key, name = generate_element_key_name(
+            tag, self.name, self.version, "coverage"
+        )
         determinants = self.signature_determinants(params)
         return Element(
             key=key,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=inputs,
+            inputs=tuple(inputs),
             artifacts=artifacts,
             pres=pres,
+            name=name,
         )
 
     def callable_mb_from_mosdepth_per_base(
@@ -359,15 +362,20 @@ class Mosdepth(External):
         runner = self.callable_mb_from_mosdepth_per_base(
             per_base, output_json=out_json, min_dp=params["min_dp"]
         )
-        determinants = ([f"min_dp={params['min_dp']}"],)
+        determinants = (f"min_dp={params['min_dp']}",)
         key = f"{tag.default_name}_callable_mb_{mosdepth_element.key}_dp_{params['min_dp']}"
+        key, name = generate_element_key_name(
+            tag, self.name, self.version, "callable_mb"
+        )
         return Element(
             key=key,
             run=runner,
+            tag=tag,
             determinants=determinants,
-            inputs=[per_base],
+            inputs=(per_base,),
             artifacts={"callable": out_json},
-            pres=[mosdepth_element],
+            pres=(mosdepth_element,),
+            name=name
         )
 
     @staticmethod

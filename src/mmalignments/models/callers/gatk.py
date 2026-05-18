@@ -3049,7 +3049,7 @@ class GATK(External):
         target_bed = targets.bed if isinstance(targets, Element) else targets
 
         inputs = [input_bam, reference.fasta]
-        pres = [mapped]
+        pres: list[Element] = [mapped]
         if isinstance(targets, Element):
             pres.append(targets)
             inputs.append(targets.bed)
@@ -3096,5 +3096,4 @@ class GATK(External):
                     break
 
         callable_mb = callable_bases / 1000000
-        raise ValueError("here " + line + " " + str(callable_bases))
         return callable_bases, callable_mb

@@ -429,11 +429,11 @@ class ErrorInfo:
 
         if self.stderr:
             parts.append("\n ---STDERR---:")
-            parts.append(self.stderr.rstrip())
+            parts.append(str(self.stderr).rstrip())
 
         if self.stdout:
             parts.append("\n ---STDOUT---:")
-            parts.append(self.stdout.rstrip())
+            parts.append(str(self.stdout).rstrip())
         parts.append(section_end)
 
         section = "LOGFILE".center(self.linewidth, self.sepchar)

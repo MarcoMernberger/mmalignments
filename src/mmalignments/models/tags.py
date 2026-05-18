@@ -4,7 +4,6 @@ from enum import Enum
 from functools import cached_property
 from typing import Any
 
-from deprecated import deprecated  # type: ignore
 
 
 class Omics(str, Enum):
@@ -72,6 +71,7 @@ class Method(str, Enum):
     CUSTOM = "custom"  # for custom python functions
     EDGER = "edger"
     CLUSTERING = "clustering"
+    MAGECK = "mageck"
 
 
 def level(level: int) -> str:
@@ -304,31 +304,31 @@ def from_prior(
     return patched.resolve()
 
 
-@deprecated(reason="Use from_prior(input_element.tag, **tag) instead")
-def merge_tag(base: ElementTag, override: PartialElementTag | None) -> ElementTag:
-    """
-    Return a new ElementTag using *base* as default,
-    overriding with any non-None field from *override*.
+# @deprecated(reason="Use from_prior(input_element.tag, **tag) instead")
+# def merge_tag(base: ElementTag, override: PartialElementTag | None) -> ElementTag:
+#     """
+#     Return a new ElementTag using *base* as default,
+#     overriding with any non-None field from *override*.
 
-    This lets callers specify only the fields that differ from the computed
-    default.
+#     This lets callers specify only the fields that differ from the computed
+#     default.
 
 
-    Parameters
-    ----------
-    base : ElementTag | PartialElementTag
-        The base ElementTag or PartialElementTag to use as default.
-    patch : PartialElementTag | None
-        A PartialElementTag containing fields to override in the base.
+#     Parameters
+#     ----------
+#     base : ElementTag | PartialElementTag
+#         The base ElementTag or PartialElementTag to use as default.
+#     patch : PartialElementTag | None
+#         A PartialElementTag containing fields to override in the base.
 
-    Returns
-    -------
-    ElementTag
-        A fully initialized ElementTag instance.
+#     Returns
+#     -------
+#     ElementTag
+#         A fully initialized ElementTag instance.
 
-    Examples
-    --------
+#     Examples
+#     --------
 
-        ensemblmap(element, tag=PartialElementTag(root="sample"))
-    """
-    return PartialElementTag(**base).merge(override).resolve()
+#         ensemblmap(element, tag=PartialElementTag(root="sample"))
+#     """
+#     return PartialElementTag(**base).merge(override).resolve()

@@ -14,7 +14,7 @@ from typing import Any, Mapping
 from mmalignments.models.aligners.samtools import Samtools
 from mmalignments.models.callers.gatk import GATK
 from mmalignments.models.data import Genome
-from mmalignments.models.elements import Element, MappedElement, NextGenSampleElement
+from mmalignments.models.elements import Element, MappedElement, NextGenSampleElement, generate_element_key_name
 from mmalignments.models.externals import ExternalRunConfig
 from mmalignments.models.parameters import Params
 from mmalignments.models.qc.fastp import FastP
@@ -22,7 +22,7 @@ from mmalignments.models.qc.fastqc import FastQC
 from mmalignments.models.qc.mosdepth import Mosdepth
 from mmalignments.models.qc.multiqc import MultiQC
 from mmalignments.models.qc.parsers import build_qc_summary
-from mmalignments.models.tags import ElementTag, Method, Stage, State, merge_tag
+from mmalignments.models.tags import ElementTag, Method, Stage, State
 from mmalignments.models.tags import PartialElementTag as Tag
 from mmalignments.services.io import (
     ensure,
@@ -260,7 +260,7 @@ def build_input_check(
     filename: Path | str | None = None,
 ) -> Element:
     """Create Element that performs FASTQ sanity checks."""
-    default_tag = ElementTag(
+    tag = ElementTag(
         root=sample.tag.root,
         level=sample.tag.level + 1,
         stage=Stage.QC,
@@ -268,8 +268,7 @@ def build_input_check(
         state=State.STAT,
         omics=sample.tag.omics,
         ext="json",
-    )
-    tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+    ).merge(tag)
     outdir = Path(outdir or sample.fastq1.parent / "qc" / "input_check")
 
     json_filename = filename or tag.default_output
@@ -287,26 +286,26 @@ def build_input_check(
 
         try:
             # R1 scan
-            r1 = _scan_fastq(sample.fastq_r1, read_label="R1", n_records=n_records)
-            results["checks"]["r1_records_checked"] = r1.records_checked
-            results["errors"].extend(r1.errors)
-            results["checks"]["r1_format_ok"] = len(r1.errors) == 0
+            r1_ids, r1_counts, r1_errors = _scan_fastq(sample.fastq_r1, read_label="R1", n_records=n_records)
+            results["checks"]["r1_records_checked"] = r1_counts
+            results["errors"].extend(r1_errors)
+            results["checks"]["r1_format_ok"] = len(r1_errors) == 0
 
             # R2 scan + pairing check (only if paired)
             if sample.pairing == "paired" and sample.fastq_r2:
-                r2 = _scan_fastq(sample.fastq_r2, read_label="R2", n_records=n_records)
-                results["checks"]["r2_records_checked"] = r2.records_checked
-                results["errors"].extend(r2.errors)
-                results["checks"]["r2_format_ok"] = len(r2.errors) == 0
+                r2_ids, r2_counts, r2_errors = _scan_fastq(sample.fastq_r2, read_label="R2", n_records=n_records)
+                results["checks"]["r2_records_checked"] = r2_counts
+                results["errors"].extend(r2_errors)
+                results["checks"]["r2_format_ok"] = len(r2_errors) == 0
 
-                mismatches, mismatch_warnings = _pairing_mismatches(r1.ids, r2.ids)
+                mismatches, mismatch_warnings = _pairing_mismatches(r1_ids, r2_ids)
                 results["checks"]["id_mismatches"] = mismatches
                 results["checks"]["ids_match"] = mismatches == 0
                 results["warnings"].extend(mismatch_warnings)
 
                 if mismatches > 0:
                     results["warnings"].append(
-                        f"Found {mismatches} ID mismatches in {min(r1.records_checked, r2.records_checked)} checked records"  # noqa: E501
+                        f"Found {mismatches} ID mismatches in {min(r1_counts, r2_counts)} checked records"  # noqa: E501
                     )
 
             results["status"] = "PASS" if not results["errors"] else "FAIL"
@@ -322,15 +321,14 @@ def build_input_check(
         logger.info(f"Input check completed for {sample.name}: {results['status']}")
 
     input_files = [sample.fastq_r1] + ([sample.fastq_r2] if sample.fastq_r2 else [])
-    _check_fastq.command = ["build_input_check"]
     return Element(
         key=f"{tag.default_name}_build_input_check",
         run=_check_fastq,
         tag=tag,
-        determinants=[f"n_records={n_records}"],
-        inputs=input_files,
+        determinants=(f"n_records={n_records}",),
+        inputs=tuple(input_files),
         artifacts={"input_check_json": out_json, "input_check_txt": out_txt},
-        pres=[],
+        pres=(),
     )
 
 
@@ -410,6 +408,7 @@ def pre_alignment_qc(
         qc_elements.insert(0, input_check)
 
     # 2. fastp Element
+    fastp_elem = None
     if preqc_cfg.run_fastp:
         logger.info(f"Creating fastp QC for {sample.name}")
         fastp = FastP()
@@ -437,7 +436,7 @@ def pre_alignment_qc(
         qc_elements.insert(0, fastqc_raw)
 
     # 4. FastQC on cleaned FASTQs
-    if preqc_cfg.run_fastqc_cleaned:
+    if preqc_cfg.run_fastqc_cleaned and fastp_elem:
         logger.info(f"Creating FastQC for cleaned reads of {sample.name}")
         fastqc_cleaned = fastqc.qc(
             sample=fastp_elem,  # Use fastp element as input (has cleaned FASTQs)

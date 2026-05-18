@@ -4,14 +4,255 @@ from __future__ import annotations
 
 import json
 import logging
+import rpy2.robjects as ro
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Callable
+from datetime import datetime
+from inspect import signature
+from functools import wraps
 
-from mmalignments.models.externals import External, ExternalRunConfig, subroutine
+from mmalignments.models.externals import External, ExternalRunConfig, Runnable, subroutine, SubroutineIn
 from mmalignments.models.parameters import Params, ParamSet
 from mmalignments.services.io import parents
+from mmalignments.services.errors import (
+    PipelineError,
+)
+from mmalignments.models.resources import (
+    current_resources,
+)
+
+from rpy2.robjects.vectors import StrVector, FloatVector
+from rpy2.rinterface import NULL
 
 logger = logging.getLogger(__name__)
+
+
+def _convert_value(v: Any) -> Any:
+    """Recursively convert a Python value to an rpy2-compatible R type."""
+    try:
+        import pandas as pd
+        from rpy2.robjects import pandas2ri
+        if isinstance(v, pd.DataFrame):
+            with (ro.default_converter + pandas2ri.converter).context():
+                return pandas2ri.py2rpy(v)
+    except ImportError:
+        pass
+    if isinstance(v, Path):
+        return str(v)
+    if isinstance(v, dict):
+        return ro.ListVector({dk: _convert_value(dv) for dk, dv in v.items()})
+    if isinstance(v, list) and v and all(isinstance(i, str) for i in v):
+        return StrVector(v)
+    if isinstance(v, list) and v and all(isinstance(i, (int, float)) for i in v):
+        return FloatVector(v)
+    if isinstance(v, list) and not v:
+        return StrVector([])
+    if v is None:
+        return NULL
+    return v
+
+
+def _r_to_pandas(r_result: Any) -> Any:
+    """Convert an R data.frame result back to a pandas DataFrame, if possible."""
+    try:
+        from rpy2.robjects import pandas2ri
+        with (ro.default_converter + pandas2ri.converter).context():
+            return pandas2ri.rpy2py(r_result)
+    except Exception:
+        return r_result
+
+
+class RScriptInternal(External):
+    """External subclass that calls R functions directly via rpy2 (in-process).
+
+    The contract:
+    - A ``.R`` source file is loaded once per call via ``source()``.
+    - Individual R functions are retrieved from the global environment and
+      called with the converted *payload* dict as keyword arguments.
+    - Output post-processing (writing TSV/Parquet, merging annotations) is
+      done in Python via the *post* callback which receives the R result.
+
+    Subclasses implement ``@element`` high-level methods that call
+    ``@rsubroutine`` low-level methods returning
+    ``(r_function, payload, inpaths, outpaths, pipeoutput, pre, post)``.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        r_source_file: str | Path,
+        version: str | None = None,
+        source: str | None = None,
+        parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None = None,
+        loglevel: int = logging.INFO,
+    ) -> None:
+        self.rsource = Path(r_source_file).resolve()
+        if not self.rsource.exists():
+            raise FileNotFoundError(f"R source file not found: {self.rsource}")
+        super().__init__(
+            name=name,
+            primary_binary=None,
+            version=version,
+            source=source,
+            parameters=parameters or {},
+            loglevel=loglevel,
+        )
+
+    def get_version(self, fallback: str | None = None) -> str | None:
+        try:
+            ver = str(ro.r("R.version.string")[0])
+            return ver
+        except Exception:
+            return fallback
+
+    def _load_r_function(self, r_function: str):
+        """Source the R file and return the named function object."""
+        ro.r["source"](str(self.rsource))
+        fn = ro.globalenv[r_function]
+        if fn is None:
+            raise NameError(
+                f"R function {r_function!r} not found in {self.rsource}"
+            )
+        return fn
+
+    def runnable(
+        self,
+        *,
+        r_function: str,
+        payload: dict[str, Any],
+        output: Path | None = None,
+        pre: Runnable | Callable | None = None,
+        post: Callable | None = None,
+        params: Params | None = None,
+        cfg: ExternalRunConfig | None = None,
+    ) -> Runnable:
+        """Build a :class:`Runnable` that calls *r_function* with *payload*.
+
+        Parameters
+        ----------
+        r_function : str
+            Name of the R function to call (must exist in *r_source_file*).
+        payload : dict[str, Any]
+            Keyword arguments already converted to R types via
+            :func:`adjust_r_types`.
+        output : Path | None
+            Primary output path (used by the logger).
+        pre : Runnable | Callable | None
+            Optional zero-argument callable to run before the R call.
+        post : Callable | None
+            Optional single-argument callable ``post(result) -> result`` called
+            with the pandas DataFrame returned by the R function.
+        params, cfg
+            Standard pipeline parameters.
+        """
+        cfg = cfg or ExternalRunConfig()
+
+        def _runner():
+            _name = f"{self.rsource.stem}.{r_function}"
+            call_logger = None
+            print("calling R function", r_function)
+            try:
+                now = datetime.now()
+                call_logger = self._initalize_logger(cfg, _name, now, output)
+
+                self._run_callback(pre, phase="PRE", call_logger=call_logger)
+
+                r_fn = self._load_r_function(r_function)
+                r_result = r_fn(**payload)
+                result = _r_to_pandas(r_result)
+
+                # post receives (and returns) the pandas result
+                print("post is", post)
+                if post is not None:
+                    print("Calling post")
+                    result = post(result)
+
+                call_logger.mark_success()
+                return result
+
+            except PipelineError:
+                raise
+
+            except Exception as e:
+                _phase = f"RUN ({_name})"
+                error = PipelineError(
+                    e=e,
+                    cmd=[r_function],
+                    stdout=getattr(e, "stdout", None)
+                    or getattr(call_logger, "stdout_stream", "None"),
+                    stderr=getattr(e, "stderr", None)
+                    or getattr(call_logger, "stderr_stream", "None"),
+                    logfile=getattr(call_logger, "combined_log_path", None),
+                    phase=_phase,
+                )
+                if call_logger:
+                    call_logger.log_error(error.info)
+                raise error
+
+            finally:
+                if call_logger:
+                    call_logger.finalize()
+
+        return Runnable(_runner, [r_function], f"R: {self.rsource.stem}::{r_function}")
+
+
+def adjust_r_types(payload: dict[str, Any]) -> dict[str, Any]:
+    """Convert Python values in *payload* to rpy2-compatible R types."""
+    return {k: _convert_value(v) for k, v in payload.items()}
+
+
+def rsubroutine(
+    fn: Callable[
+        ...,
+        SubroutineIn,
+    ],
+) -> Callable[..., Callable[[], Any]]:
+    """Decorator for :class:`RScriptInternal` methods.
+
+    The decorated method must return a 7-tuple::
+
+        (r_function, payload, inpaths, outpaths, pipeoutput, pre, post)
+
+    where *post* is an optional ``Callable[[DataFrame], DataFrame]`` that
+    receives the R result (already converted to pandas) and handles
+    file-writing / annotation merging.
+    """
+    sig = signature(fn)
+
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs) -> Callable[[], Any]:
+        bound = sig.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+
+        params = bound.arguments.get("params", None) or Params()
+        cfg = bound.arguments.get("cfg", None) or ExternalRunConfig()
+        resources = current_resources()
+
+        r_function, payload, inpaths, outpaths, _, pre, post = fn(
+            *bound.args, **bound.kwargs
+        )
+        outpaths = [Path(p) for p in (outpaths or []) if p is not None]
+        inpaths = list(inpaths or [])
+        paths = inpaths + outpaths
+
+        parents(*paths)
+        payload = adjust_r_types(payload)
+
+        params, cfg = self.apply_threads(
+            params, cfg=cfg, resources=resources, subroutine=r_function
+        )
+        runner = self.runnable(
+            r_function=r_function,
+            payload=payload,
+            pre=pre,
+            post=post,
+            params=params,
+            cfg=cfg,
+        )
+        runner.threads = cfg.threads
+        return runner
+
+    return wrapper
 
 
 class RScriptExternal(External):
@@ -130,4 +371,6 @@ class RScriptExternal(External):
         """
         script_path = self.r_script(script_name)
         arguments = [str(script_path), str(params_path)]
-        return arguments, output_files, None, None, None
+        # subroutine decorator expects a 7-tuple:
+        # (arguments, subcommand, inpaths, outpaths, pipeoutput, pre, post)
+        return arguments, None, [params_path], list(output_files), None, None, None

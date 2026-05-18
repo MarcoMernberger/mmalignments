@@ -14,10 +14,10 @@ from mmalignments.models.elements import (
     element,
     sample_fastqs,
 )
-from mmalignments.models.tags import ElementTag, Method, Stage, State, merge_tag
+from mmalignments.models.tags import ElementTag, Method, Stage, State
 from mmalignments.models.tags import PartialElementTag as Tag
 
-from ..externals import External, ExternalRunConfig, subroutine
+from ..externals import External, ExternalRunConfig, subroutine, SubroutineIn
 from ..parameters import Params, ParamSet
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ class FastP(External):
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Run fastp quality control and filtering (low-level).
 
         Creates a zero-argument callable that runs fastp on input FASTQ files,
@@ -306,7 +306,7 @@ class FastP(External):
         >>> fastp_elem = fastp.qc(sample, cfg=ExternalRunConfig(threads=8))
         >>> fastp_elem.run()
         """
-        default_tag = ElementTag(
+        tag = ElementTag(
             root=sample.root,
             level=sample.tag.level + 1,
             stage=Stage.PREP,
@@ -314,11 +314,10 @@ class FastP(External):
             state=State.TRIM,
             omics=sample.tag.omics,
             ext=".R1.fastq.gz",
-        )
-        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+        ).merge(tag)
         fastq_r1, fastq_r2, _, _ = sample_fastqs(sample)
 
-        outdir = outdir or sample.result_dir / "qc" / "fastp"
+        outdir = Path(outdir or sample.result_dir / "qc" / "fastp")
         filename = filename or tag.default_output
         params = params or Params(thread=10)
         cfg = cfg or ExternalRunConfig(threads=params.get("thread", 10))
@@ -338,7 +337,7 @@ class FastP(External):
             "json": json_out,
             "html": html_out,
         }
-        if fastq_r2:
+        if fastq_r2 and out_r2:
             artifacts["fastq_r2"] = out_r2
             input_files.append(fastq_r2)
 
@@ -364,7 +363,7 @@ class FastP(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=input_files,
+            inputs=tuple(input_files),
             artifacts=artifacts,
-            pres=pres,
+            pres=tuple(pres),
         )
