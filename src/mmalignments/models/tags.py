@@ -45,6 +45,7 @@ class State(str, Enum):
     LOCI = "loci"
     METRIC = "metric"
     REPORT = "report"
+    DEMULTIPLEX = "demultiplex"
 
 
 class Method(str, Enum):
@@ -64,6 +65,7 @@ class Method(str, Enum):
     CHECK = "check"
     BCFTOOLS = "bcftools"
     CUSTOM = "custom"  # for custom python functions
+    FASTQGRAB = "fastqgrab"
 
 
 def level(level: int) -> str:

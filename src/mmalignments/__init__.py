@@ -44,7 +44,7 @@ from mmalignments.models.qc import (
     pre_alignment_qc,
 )
 from mmalignments.models.reports.report import MutationalLoadReport  # noqa: F401
-from mmalignments.services import ensure, initlog  # noqa: F401
+from mmalignments.services import ensure#, initlog  # noqa: F401
 
 from .core import ensemblmap  # noqa: F401
 from mmalignments.models.parameters import Params  # noqa: F401
@@ -68,7 +68,7 @@ __all__ = [
     "GATK",
     "Genome",
     "index_genome",
-    "initlog",
+    # "initlog",
     "jobify",
     "MultiQC",
     "MutationalLoadReport",
