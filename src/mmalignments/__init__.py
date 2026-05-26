@@ -16,11 +16,11 @@ try:
 except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.1.0"
 
-from mmalignments.jobs.aligner_jobs import (  # noqa: F401
-    index_genome,
-    jobify,
-    write_lengths,  # noqa: F401
-)
+# from mmalignments.jobs.aligner_jobs import (  # noqa: F401
+#     index_genome,
+#     jobify,
+#     write_lengths,  # noqa: F401
+# )
 from mmalignments.models.aligners import (
     BCFtools,
     Bedtools,  # noqa: F401
@@ -28,7 +28,7 @@ from mmalignments.models.aligners import (
     Samtools,
 )
 from mmalignments.models.callers.gatk import GATK  # noqa: F401
-from mmalignments.models.data import Genome, Sample, Pairing  # noqa: F401
+from mmalignments.models.data import Genome, Pairing, Sample  # noqa: F401
 from mmalignments.models.elements import (
     Element,
     FileElement,  # noqa: F401
@@ -37,6 +37,8 @@ from mmalignments.models.elements import (
     ValidationPolicy,
 )
 from mmalignments.models.executor import Executor  # noqa: F401
+from mmalignments.models.externals import ExternalRunConfig  # noqa: F401
+from mmalignments.models.parameters import Params  # noqa: F401
 from mmalignments.models.qc import (
     FastQC,
     MultiQC,
@@ -45,11 +47,12 @@ from mmalignments.models.qc import (
 )
 from mmalignments.models.reports.report import MutationalLoadReport  # noqa: F401
 from mmalignments.services import ensure#, initlog  # noqa: F401
-
-from .core import ensemblmap  # noqa: F401
-from mmalignments.models.parameters import Params  # noqa: F401
-from mmalignments.models.externals import ExternalRunConfig  # noqa: F401
+from mmalignments.models.reports import MutationalLoadReport
 from mmalignments.models.tags import ElementTag  # noqa: F401
+# from mmalignments.models.differential.deseq2 import DESeq2  # noqa: F401
+# from mmalignments.models.differential.edger import EdgeR  # noqa: F401
+
+# from .core import ensemblmap  # noqa: F401
 
 __all__ = [
     "Bedtools",
@@ -81,4 +84,6 @@ __all__ = [
     "ValidationPolicy",
     "__version__",
     "write_lengths",
+    # "DESeq2",
+    # "EdgeR",
 ]

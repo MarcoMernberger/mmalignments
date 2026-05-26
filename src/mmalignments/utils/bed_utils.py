@@ -1,9 +1,10 @@
 """Utility functions for BED file operations."""
 
-import pypipegraph2 as ppg  # type: ignore
-from pathlib import Path
 import subprocess
+from pathlib import Path
 from typing import Optional
+
+import pypipegraph2 as ppg  # type: ignore
 
 
 def create_padded_bed(

@@ -13,11 +13,11 @@ from mmalignments.models.elements import (
     NextGenSampleElement,
     element,
     sample_fastqs,
+    generate_element_key_name,
 )
-from mmalignments.models.tags import ElementTag, Method, Stage, State, merge_tag
-from mmalignments.models.tags import PartialElementTag as Tag
+from mmalignments.models.tags import ElementTag, Method, Stage, State, PartialElementTag
 
-from ..externals import External, ExternalRunConfig, subroutine
+from ..externals import External, ExternalRunConfig, subroutine, SubroutineIn
 from ..parameters import Params, ParamSet
 
 logger = logging.getLogger(__name__)
@@ -166,13 +166,7 @@ class FastQC(External):
         output_dir: Path | str,
         params: Params | None,
         cfg: ExternalRunConfig | None = ExternalRunConfig(threads=10),
-    ) -> tuple[
-        list[str],
-        list[str],
-        str | None,
-        Callable[[], CompletedProcess] | None,
-        Callable[[], None] | None,
-    ]:
+    ) -> SubroutineIn:
         """Run FastQC on FASTQ files (low-level).
 
         Creates a zero-argument callable that runs FastQC quality control
@@ -212,7 +206,8 @@ class FastQC(External):
         # Add input files
         for f in input_files:
             arguments.append(str(f))
-        return arguments, [output_dir], None, None, None
+        subcommand = None
+        return arguments, subcommand, input_files, [output_dir], None, None, None
 
     @element
     def qc(
@@ -220,7 +215,7 @@ class FastQC(External):
         sample: NextGenSampleElement,
         label: str,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -282,7 +277,7 @@ class FastQC(External):
         """
         params = params or Params(extract=False)
         cfg = cfg or ExternalRunConfig()
-        default_tag = ElementTag(
+        tag = ElementTag(
             root=sample.root,
             level=sample.tag.level + 1,
             stage=Stage.QC,
@@ -290,11 +285,10 @@ class FastQC(External):
             state=State.REPORT,
             omics=sample.tag.omics,
             param=label,
-        )
-        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+        ).merge(tag)
 
         # Prepare output folder
-        outdir = outdir or sample.fastq_r1.parent / "qc" / "fastqc"
+        outdir = Path(outdir or sample.fastq_r1.parent / "qc" / "fastqc")
         # Extract FASTQ paths from Sample or Element
         fastq_r1, fastq_r2, _, _ = sample_fastqs(sample)
         # Collect input files
@@ -314,7 +308,7 @@ class FastQC(External):
             "html_r1": outdir / f"{r1_base}_fastqc.html",
             "zip_r1": outdir / f"{r1_base}_fastqc.zip",
         }
-        if sample.fastq_r2:
+        if fastq_r2:
             r2_base = self.get_base(fastq_r2)
             artifacts["html_r2"] = outdir / f"{r2_base}_fastqc.html"
             artifacts["zip_r2"] = outdir / f"{r2_base}_fastqc.zip"
@@ -322,15 +316,18 @@ class FastQC(External):
         # Build prerequisites list
         pres = [sample] if isinstance(sample, Element) else []
         determinants = self.signature_determinants(params)
-        key = f"{tag.default_name}_{label}_{self.version_name}"
+        key, name = generate_element_key_name(
+            tag, self.name, self.version,
+        )
         return Element(
             key=key,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=input_files,
+            inputs=tuple(input_files),
             artifacts=artifacts,
-            pres=pres,
+            pres=tuple(pres),
+            name=name
         )
 
     @subroutine
@@ -340,7 +337,7 @@ class FastQC(External):
         output_dir: Path | str,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], None]:
+    ) -> SubroutineIn:
         """Run FastQC on one or more sequencing files.
 
         Creates a zero-argument callable that runs FastQC quality control
@@ -373,7 +370,7 @@ class FastQC(External):
         >>> qc()
         """
         params = params or Params(threads=10, extract=False)
-        cfg = cfg or ExternalRunConfig(threads=Params.get("--threads", 1))
+        cfg = cfg or ExternalRunConfig()
         # Handle single file or list of files
         if isinstance(input_file, (list, tuple)):
             input_files = [Path(f).absolute() for f in input_file]
@@ -387,4 +384,5 @@ class FastQC(External):
         # Add input files
         for f in input_files:
             arguments.append(str(f))
-        return arguments, [output_dir], None, None, None
+        subcommand = None
+        return arguments, subcommand, input_files, [output_dir], None, None, None

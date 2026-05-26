@@ -6,6 +6,10 @@ from datetime import datetime
 TIMEFORMAT = "%Y-%m-%d-%H-%M-%S"
 
 
+def now_as_str() -> str:
+    return timestamp_to_str(timestamp())
+
+
 def timestamp() -> datetime:
     """
     Get the current timestamp.

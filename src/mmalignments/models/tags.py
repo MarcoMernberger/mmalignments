@@ -2,8 +2,8 @@ import dataclasses
 from dataclasses import dataclass
 from enum import Enum
 from functools import cached_property
-from deprecated import deprecated  # type: ignore
 from typing import Any
+
 
 
 class Omics(str, Enum):
@@ -22,6 +22,8 @@ class Stage(str, Enum):
     QUANT = "quant"
     DIFF = "diff"
     INPUT = "input"
+    ANALYSIS = "analysis"
+    SUMMARY = "summary"
 
 
 class State(str, Enum):
@@ -45,7 +47,13 @@ class State(str, Enum):
     LOCI = "loci"
     METRIC = "metric"
     REPORT = "report"
+<<<<<<< HEAD
     DEMULTIPLEX = "demultiplex"
+=======
+    DIFF = "diff"
+    CLUSTER = "cluster"
+    PCA = "pca"
+>>>>>>> f2698d16def7b2b3929deccf3167d87159bc2420
 
 
 class Method(str, Enum):
@@ -65,7 +73,13 @@ class Method(str, Enum):
     CHECK = "check"
     BCFTOOLS = "bcftools"
     CUSTOM = "custom"  # for custom python functions
+<<<<<<< HEAD
     FASTQGRAB = "fastqgrab"
+=======
+    EDGER = "edger"
+    CLUSTERING = "clustering"
+    MAGECK = "mageck"
+>>>>>>> f2698d16def7b2b3929deccf3167d87159bc2420
 
 
 def level(level: int) -> str:
@@ -298,31 +312,31 @@ def from_prior(
     return patched.resolve()
 
 
-@deprecated(reason="Use from_prior(input_element.tag, **tag) instead")
-def merge_tag(base: ElementTag, override: PartialElementTag | None) -> ElementTag:
-    """
-    Return a new ElementTag using *base* as default,
-    overriding with any non-None field from *override*.
+# @deprecated(reason="Use from_prior(input_element.tag, **tag) instead")
+# def merge_tag(base: ElementTag, override: PartialElementTag | None) -> ElementTag:
+#     """
+#     Return a new ElementTag using *base* as default,
+#     overriding with any non-None field from *override*.
 
-    This lets callers specify only the fields that differ from the computed
-    default.
+#     This lets callers specify only the fields that differ from the computed
+#     default.
 
 
-    Parameters
-    ----------
-    base : ElementTag | PartialElementTag
-        The base ElementTag or PartialElementTag to use as default.
-    patch : PartialElementTag | None
-        A PartialElementTag containing fields to override in the base.
+#     Parameters
+#     ----------
+#     base : ElementTag | PartialElementTag
+#         The base ElementTag or PartialElementTag to use as default.
+#     patch : PartialElementTag | None
+#         A PartialElementTag containing fields to override in the base.
 
-    Returns
-    -------
-    ElementTag
-        A fully initialized ElementTag instance.
+#     Returns
+#     -------
+#     ElementTag
+#         A fully initialized ElementTag instance.
 
-    Examples
-    --------
+#     Examples
+#     --------
 
-        ensemblmap(element, tag=PartialElementTag(root="sample"))
-    """
-    return PartialElementTag(**base).merge(override).resolve()
+#         ensemblmap(element, tag=PartialElementTag(root="sample"))
+#     """
+#     return PartialElementTag(**base).merge(override).resolve()

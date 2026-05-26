@@ -21,21 +21,19 @@ import json
 import logging
 import subprocess
 from pathlib import Path
-from subprocess import CompletedProcess
 from typing import Callable, Mapping
 
-from mmalignments.models.elements import Element, MappedElement, element
+from mmalignments.models.elements import Element, MappedElement, element, generate_element_key_name
 from mmalignments.models.tags import (
     ElementTag,
     Method,
+    PartialElementTag,
     Stage,
     State,
-    merge_tag,
-    PartialElementTag,
     from_prior,
 )
 
-from ..externals import External, ExternalRunConfig, subroutine
+from ..externals import External, ExternalRunConfig, SubroutineIn, subroutine
 from ..parameters import Params, ParamSet
 
 logger = logging.getLogger(__name__)
@@ -54,7 +52,7 @@ class Mosdepth(External):
         primary_binary: str = "mosdepth",
         version: str | None = None,
         source: str = "https://github.com/brentp/mosdepth",
-        parameters: Mapping[str, ParamSet] | ParamSet | None = None,
+        parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None = None,
     ) -> None:
         """
         Initialize Mosdepth wrapper.
@@ -69,7 +67,7 @@ class Mosdepth(External):
             Version string override (default: None).
         source : str, optional
             URL/source for the tool (default: "https://github.com/brentp/mosdepth").
-        parameters : Mapping[str, ParamSet] | ParamSet | None
+        parameters : Mapping[str, ParamSet] | ParamSet | str | Path | None
             Set of parameters for invocations. If the tool has subroutines,
             this can be a mapping from subroutine names to parameter sets.
             This will be used for default parameters, validation and
@@ -122,7 +120,7 @@ class Mosdepth(External):
         targets: Path | str | int | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Calculate coverage depth on target regions using mosdepth.
 
         Creates a zero-argument callable that runs mosdepth to calculate coverage depth
@@ -164,14 +162,15 @@ class Mosdepth(External):
         # Finally add the BAM/CRAM input
 
         arguments.append(self.strabs(input_bam))
-        return arguments, [prefix], None, None, None
+        subcommand = None
+        return arguments, subcommand, [input_bam], [prefix], None, None, None
 
     @element
     def coverage(
         self,
         mapped: MappedElement,
-        targets: Element | Path | str,
         *,
+        targets: Element | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         fileprefix: Path | str | None = None,
@@ -187,7 +186,7 @@ class Mosdepth(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file.
-        targets : Element | Path | str
+        targets : Element | Path | str | None
             Element or BED file defining target regions.
         tag : Tag | ElementTag | None
             Partial or full Element tag for the output Element, used for default
@@ -218,15 +217,18 @@ class Mosdepth(External):
         ... )
         >>> depth_elem.run()
         """
-        default_tag = from_prior(
+        params = params or Params()
+        tag = from_prior(
             mapped.tag,
             tag,
             stage=Stage.QC,
             method=Method.MOSDEPTH,
             state=State.REPORT,
+            ext="",
         )
-        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
-
+        if targets:
+            targets_bed = targets.bed
+            params.override(by=self.strabs(targets_bed))
         input_bam = mapped.bam
         qc_dir = Path(outdir or input_bam.parent / "qc" / "mosdepth")
         outprefix = qc_dir / (fileprefix or tag.default_output)
@@ -239,8 +241,9 @@ class Mosdepth(External):
             "global": output_dist,
         }
         # mosdepth creates several output files with the prefix
-        no_per_base = params.get("n") or params.get("no_per_base") or False
-        if not no_per_base:
+        # no_per_base = params.get("n") or params.get("no_per_base") or False
+
+        if not params.no_per_base:
             artifacts["per_base"] = Path(f"{outprefix}.per-base.bed.gz")
         if "q" in params or "quantize" in params:
             artifacts["quantized"] = Path(f"{outprefix}.quantized.bed.gz")
@@ -250,33 +253,32 @@ class Mosdepth(External):
             artifacts["thresholds"] = Path(f"{outprefix}.thresholds.bed.gz")
 
         # Extract BED path from Element if needed
-        targets_path = targets.bed if isinstance(targets, Element) else targets
-
+        inputs = [input_bam, targets.bed] if targets else [input_bam]
         # Build prerequisites list
-        pres = [mapped]
-        if isinstance(targets, Element):
-            pres.append(targets)
+        pres = (mapped, targets) if targets else (mapped,)
 
         runner = self.depth_coverage(
             input_bam=input_bam,
             output_prefix=outprefix,
-            targets=targets_path,
+            targets=targets.bed if targets else None,
             params=params,
             cfg=cfg,
         )
-        key = f"{tag.default_name}_coverage_{self.version_name}"
+        key, name = generate_element_key_name(
+            tag, self.name, self.version, "coverage"
+        )
         determinants = self.signature_determinants(params)
         return Element(
             key=key,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bam, targets_path],
+            inputs=tuple(inputs),
             artifacts=artifacts,
             pres=pres,
+            name=name,
         )
 
-    @staticmethod
     def callable_mb_from_mosdepth_per_base(
         self,
         input_per_base_bed_gz: Path | str,
@@ -332,47 +334,48 @@ class Mosdepth(External):
         self,
         mosdepth_element: Element,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Element:
 
-        params = Params or Params(min_dp=10)
+        params = params or Params(min_dp=10)
         if "per_base" not in mosdepth_element.artifacts:
             raise ValueError(
                 "mosdepth_element needs per_base artifact. Run mosdepth with no_per_base=False."  # noqa: E501
             )
-        default_tag = ElementTag(
-            root=mosdepth_element.tag.root,
-            level=mosdepth_element.tag.level + 1,
+        tag = from_prior(
+            mosdepth_element.tag,
+            tag,
             stage=Stage.QC,
             method=Method.MOSDEPTH,
             state=State.STAT,
-            omics=mosdepth_element.tag.omics,
-            ext="callabele.json",
-            param=f"min_dp={params.min_dp}",
+            ext="callable.json",
+            param=f"min_dp={params['min_dp']}",
         )
-        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
         per_base = mosdepth_element.artifacts["per_base"]
-        outdir = Path(outdir) or per_base.parent
+        outdir = Path(outdir or per_base.parent)
         filename = filename or tag.default_output
         out_json = outdir / filename
         runner = self.callable_mb_from_mosdepth_per_base(
-            per_base, output_json=out_json, params=params, cfg=cfg
+            per_base, output_json=out_json, min_dp=params["min_dp"]
         )
-        determinants = ([f"min_dp={params.min_dp}"],)
-        key = (
-            f"{tag.default_name}_callable_mb_{mosdepth_element.key}_dp_{params.min_dp}"
+        determinants = (f"min_dp={params['min_dp']}",)
+        key = f"{tag.default_name}_callable_mb_{mosdepth_element.key}_dp_{params['min_dp']}"
+        key, name = generate_element_key_name(
+            tag, self.name, self.version, "callable_mb"
         )
         return Element(
             key=key,
             run=runner,
+            tag=tag,
             determinants=determinants,
-            inputs=[per_base],
+            inputs=(per_base,),
             artifacts={"callable": out_json},
-            pres=[mosdepth_element],
+            pres=(mosdepth_element,),
+            name=name
         )
 
     @staticmethod

@@ -6,6 +6,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from logging import Logger
 from typing import IO
 
 from rich.console import Console  # type: ignore[import]
@@ -16,22 +17,37 @@ from rich.style import Style  # type: ignore[import]
 from rich.table import Table  # type: ignore[import]
 from rich.text import Text  # type: ignore[import]
 
+from mmalignments.services.logging import enable_console
+
 
 class NodeState(Enum):
-    PENDING = "pending"
-    SKIPPED = "skipped"
     RUNNING = "running"
-    DONE = "done"
+    SKIPPED = "skipped"
+    PENDING = "pending"
     FAILED = "failed"
+    UPSTREAM_FAILED = "upstream_failed"
+    DONE = "done"
+
+
+STATE_PRIORITY = {
+    NodeState.RUNNING: 0,
+    NodeState.FAILED: 1,
+    NodeState.UPSTREAM_FAILED: 2,
+    NodeState.DONE: 3,
+    NodeState.PENDING: 4,
+    NodeState.SKIPPED: 5,
+}
 
 
 _STYLE = {
-    NodeState.PENDING: Style(color="bright_black"),
-    NodeState.SKIPPED: Style(color="cyan"),
+    NodeState.PENDING: Style(color="cyan"),
+    NodeState.SKIPPED: Style(color="bright_black"),
     NodeState.RUNNING: Style(color="yellow", bold=True),
     NodeState.DONE: Style(color="green"),
     NodeState.FAILED: Style(color="red"),
+    NodeState.UPSTREAM_FAILED: Style(color="dark_orange"),
 }
+
 
 _ICON = {
     NodeState.PENDING: "○",
@@ -39,6 +55,7 @@ _ICON = {
     NodeState.RUNNING: "◎",
     NodeState.DONE: "✓",
     NodeState.FAILED: "✗",
+    NodeState.UPSTREAM_FAILED: "↯",
 }
 
 
@@ -62,6 +79,10 @@ class NodeProgress:
 
     def skip(self, reason: str = "") -> None:
         self.state = NodeState.SKIPPED
+        self.reason = reason
+
+    def upstream_failed(self, reason: str = "upstream failed") -> None:
+        self.state = NodeState.UPSTREAM_FAILED
         self.reason = reason
 
     def fmt_elapsed(self) -> str:
@@ -117,6 +138,7 @@ class ProgressReporter:
 
     def __init__(
         self,
+        logger: Logger,
         stream: IO | None = None,
         refresh_per_second: int = 10,
         max_lines: int = 55,
@@ -124,19 +146,23 @@ class ProgressReporter:
         self._console = Console(file=stream or sys.stderr, highlight=False)
         self._refresh_per_second = refresh_per_second
         self.max_visible = max_lines
-
+        self._logger = logger
         self._nodes: dict[str, NodeProgress] = {}
         self._order: list[str] = []
         self._log_buffer: deque[str] = deque(maxlen=self.max_visible)
-
+        self._final_errors: list[Panel] = []
         self._lock = threading.Lock()
         self._live: Live | None = None
         self._renderable: _LiveLayout | None = None
-        self.log_width = 90
+        self.log_width = self._console.size.width // 2 - 2
 
     ###########################################################################
     # Node Status handling
     ###########################################################################
+
+    def error_panels(self) -> list[Panel]:
+        with self._lock:
+            return list(self._final_errors)
 
     def register(self, nodes: list) -> None:
         """Register nodes. Call before start_live()."""
@@ -154,6 +180,10 @@ class ProgressReporter:
         """Add a log line to the right-hand pane."""
         with self._lock:
             self._log_buffer.append(message.rstrip())
+
+    def push_error_panel(self, renderable: Panel):
+        with self._lock:
+            self._final_errors.append(renderable)
 
     def mark_skip(self, key: str, reason: str = "") -> None:
         with self._lock:
@@ -175,9 +205,17 @@ class ProgressReporter:
             if key in self._nodes:
                 self._nodes[key].finish(failed=True)
 
+    def mark_upstream_failed(self, key: str, reason: str = "upstream failed") -> None:
+        with self._lock:
+            if key in self._nodes:
+                self._nodes[key].upstream_failed(reason)
+
     def start_live(self) -> None:
         self._renderable = _LiveLayout(self)
         self.layout = Layout()
+        enable_console(
+            self._logger, False
+        )  # disable console echo when using live display
         self._live = Live(
             self._renderable,
             console=self._console,
@@ -188,6 +226,9 @@ class ProgressReporter:
             self._live.start()
 
     def stop_live(self) -> None:
+        enable_console(
+            self._logger, True
+        )  # re-enable console echo when stopping live display
         if self._live:
             if self._renderable:
                 self._renderable.final = True
@@ -208,6 +249,7 @@ class ProgressReporter:
             (NodeState.DONE, "done"),
             (NodeState.SKIPPED, "skipped"),
             (NodeState.FAILED, "failed"),
+            (NodeState.UPSTREAM_FAILED, "upstream failed"),
             (NodeState.RUNNING, "running"),
             (NodeState.PENDING, "pending"),
         ]:
@@ -226,20 +268,28 @@ class ProgressReporter:
 
         # Snapshot all display values inside the lock to avoid races.
         with self._lock:
-            snapshot = [
-                (np.state, np.name, np.threads, np.fmt_elapsed())
+            nodes = [
+                (k, np.state, np.name, np.threads, np.fmt_elapsed())
                 for k in self._order
                 if (np := self._nodes.get(k)) is not None
-            ][-self.max_visible :]
+            ]
 
+        running = [n for n in nodes if n[1] == NodeState.RUNNING]
+        others = [n for n in nodes if n[1] != NodeState.RUNNING]
+        remaining_slots = self.max_visible - len(running)
+        if remaining_slots > 0:
+            others.sort(key=lambda x: STATE_PRIORITY[x[1]])
+            snapshot = running + others[:remaining_slots]
+        else:
+            snapshot = running[: self.max_visible]
         table = Table.grid(padding=(0, 1))
         table.add_column(width=2)  # icon
-        table.add_column(min_width=28)  # name
+        table.add_column(min_width=self.log_width - 19)  # name
         table.add_column(width=5)  # threads
         table.add_column(width=12)  # elapsed
 
         running_count = 0
-        for state, name, threads, elapsed in snapshot:
+        for _, state, name, threads, elapsed in snapshot:
             if state == NodeState.RUNNING:
                 running_count += 1
                 icon_char = spin if not final else _ICON[state]
@@ -247,7 +297,7 @@ class ProgressReporter:
                 icon_char = _ICON[state]
             table.add_row(
                 Text(icon_char, style=_STYLE[state]),
-                Text(name[:40], style=_STYLE[state]),
+                Text(name[: self.log_width - 19], style=_STYLE[state]),
                 Text(
                     f"({threads}t)" if threads and threads > 1 else "",
                     style=Style(color="bright_black"),

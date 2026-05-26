@@ -13,20 +13,23 @@ from mmalignments.models.aligners.samtools import (
     Samtools,  # type: ignore[import]
 )
 from mmalignments.models.data import Genome
-from mmalignments.models.elements import Element, MappedElement, element
+from mmalignments.models.elements import (
+    Element,
+    MappedElement,
+    element,
+)
 from mmalignments.models.parameters import Params, ParamSet
 from mmalignments.models.tags import (
     ElementTag,
     Method,
     Omics,
+    PartialElementTag,
     Stage,
     State,
-    Tag,
     from_prior,
-    merge_tag,
 )
 
-from ..externals import External, ExternalRunConfig, subroutine
+from ..externals import External, ExternalRunConfig, SubroutineIn, subroutine
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +213,7 @@ class GATK(External):
         index_off: bool = False,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Mark duplicate reads in a BAM file using GATK MarkDuplicates.
 
         Creates a zero-argument callable that marks PCR/optical duplicates
@@ -245,8 +248,9 @@ class GATK(External):
         >>> mark_dups()
         """
         # Build command: gatk MarkDuplicates -I input.bam -O output.bam -M metrics.txt
+        subcommand = "MarkDuplicates"
         arguments = [
-            "MarkDuplicates",
+            subcommand,
             "-I",
             self.abs(input_bam),
             "-O",
@@ -257,7 +261,9 @@ class GATK(External):
         post = self.index_by_sam(output_bam) if not index_off else None
         return (
             arguments,
-            [input_bam, output_bam, metrics_file],
+            subcommand,
+            [input_bam],
+            [output_bam, metrics_file],
             None,
             None,
             post,
@@ -269,7 +275,7 @@ class GATK(External):
         mapped: MappedElement,
         *,
         index_off: bool = False,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -289,7 +295,7 @@ class GATK(External):
         index_off : bool
             If True, do not create BAM index after marking duplicates.
             Default is False.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -337,15 +343,18 @@ class GATK(External):
             artifacts["bai"] = output_bam.with_suffix(output_bam.suffix + ".bai")
 
         determinants = self.signature_determinants(params)
+        key, name = self.build_element_name(
+            tag, "MarkDuplicates", input=mapped.bam.stem
+        )
         return Element(
-            name=f"{mapped.bam.stem}_marked",
-            key=f"{mapped.bam.stem}_mark_duplicates_{self.name}",
+            name=name,
+            key=key,
             run=runner,
             tag=tag,
             artifacts=artifacts,
             determinants=determinants,
-            inputs=[mapped.bam],
-            pres=[mapped],
+            inputs=(mapped.bam,),
+            pres=(mapped,),
         )
 
     ###########################################################################
@@ -359,7 +368,7 @@ class GATK(External):
         output_model: Path | str,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Learn read orientation model for filtering artifacts.
 
         Creates a zero-argument callable that learns orientation bias from
@@ -394,18 +403,19 @@ class GATK(External):
             f1r2_files = [Path(f1r2_tar_gz)]
 
         # Build command: gatk LearnReadOrientationModel -I f1r2.tar.gz -O model.tar.gz
-        arguments = ["LearnReadOrientationModel"]
+        subcommand = "LearnReadOrientationModel"
+        arguments = [subcommand]
         for f in f1r2_files:
             arguments.extend(["-I", self.strabs(f)])
         arguments.extend(["-O", self.strabs(output_model)])
-        return arguments, [*f1r2_files, output_model], None, None, None
+        return arguments, subcommand, [*f1r2_files], [output_model], None, None, None
 
     @element
     def readorientation(
         self,
         mutect_element: Element,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -420,7 +430,7 @@ class GATK(External):
         ----------
         mutect_element : Element
             Element containing the F1R2 metrics file from a Mutect2 run.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -462,14 +472,20 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
+        key, name = self.build_element_name(
+            tag,
+            "LearnReadOrientationModel",
+            f1r2=f"{mutect_element.f1r2.stem}",
+        )
         return Element(
-            key=f"{tag.default_name}_{mutect_element.f1r2.stem}_learn_read_orientation_{self.version_name}",
+            key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[mutect_element.f1r2],
+            inputs=(mutect_element.f1r2,),
             artifacts={"orientation": output_model_file},
-            pres=[mutect_element],
+            pres=(mutect_element,),
         )
 
     ###########################################################################
@@ -491,7 +507,7 @@ class GATK(External):
         index_off: bool = False,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Run Mutect2 for somatic variant calling.
 
         Creates a zero-argument callable that runs GATK Mutect2 to call
@@ -542,38 +558,39 @@ class GATK(External):
         >>> mutect()
         """
         # Build command: gatk Mutect2 -R ref.fa -I tumor.bam -I normal.bam ...
-        arguments = ["Mutect2", "-R", self.strabs(reference)]
-        all_paths = [reference, output_vcf]
+        subcommand = "Mutect2"
+        arguments = [subcommand, "-R", self.strabs(reference)]
+        in_paths = [reference]
         names = []
 
         for name, bam in input_bams_tumor.items():
             arguments.extend(["-I", self.strabs(bam)])
             names.extend(["-tumor", name])
-            all_paths.append(bam)
+            in_paths.append(bam)
         if input_bams_normal:
             for name, bam in input_bams_normal.items():
                 arguments.extend(["-I", self.strabs(bam)])
                 names.extend(["-normal", name])
-                all_paths.append(bam)
+                in_paths.append(bam)
 
         if targets_padded_bed:
             arguments.extend(["-L", self.strabs(targets_padded_bed)])
-            all_paths.append(targets_padded_bed)
+            in_paths.append(targets_padded_bed)
         if germline_resource:
             arguments.extend(["--germline-resource", self.strabs(germline_resource)])
-            all_paths.append(germline_resource)
+            in_paths.append(germline_resource)
         if panel_of_normals:
             arguments.extend(["--panel-of-normals", self.strabs(panel_of_normals)])
-            all_paths.append(panel_of_normals)
+            in_paths.append(panel_of_normals)
         if f1r2_tar_gz:
             arguments.extend(["--f1r2-tar-gz", self.strabs(f1r2_tar_gz)])
-            all_paths.append(f1r2_tar_gz)
+            in_paths.append(f1r2_tar_gz)
 
         output = self.strabs(output_vcf)
         arguments.extend(["-O", output])
         # by default also calculate an index
-        post = self.index_feature_file(output, params, cfg) if not index_off else None
-        return arguments, all_paths, None, None, post
+        post = self.index_feature_file(output) if not index_off else None
+        return arguments, subcommand, in_paths, [output_vcf], None, None, post
 
     @element
     def mutect2(
@@ -587,7 +604,7 @@ class GATK(External):
         panel_of_normals: Element | None = None,
         f1r2_tar_gz: bool = True,
         index_off: bool = False,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -617,7 +634,7 @@ class GATK(External):
         index_off : bool
             If True, do not create an index for the output VCF file. By default,
             an index will be created.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -644,7 +661,6 @@ class GATK(External):
         ...     mapped_tumor, genome, marked_normal=mapped_normal
         ... )
         """
-        params = params or Params()
 
         def validate_input(marked_tumor):
             if marked_tumor is None:
@@ -653,7 +669,7 @@ class GATK(External):
                 marked_tumor = {marked_tumor.tag.root: marked_tumor}
             elif isinstance(marked_tumor, Mapping):
                 for element in marked_tumor.values():
-                    GATK.check_element(element)
+                    GATK.check_mapped(element)
             else:
                 raise ValueError(
                     f"marked_tumor argument must be an Element with a bam file or a mapping thereof, was {type(marked_tumor)}"  # noqa: E501
@@ -664,14 +680,14 @@ class GATK(External):
         marked_normal = validate_input(marked_normal)
         root = next(iter(marked_tumor))
         input_bams_tumor = {name: item.bam for name, item in marked_tumor.items()}
-        pres = list(marked_tumor.values())
-        inputs = list(input_bams_tumor.values())
+        pres = tuple(marked_tumor.values())
+        inputs = tuple(input_bams_tumor.values())
         input_bams_normal = None
         suffix = ""
         if marked_normal:
             input_bams_normal = {name: item.bam for name, item in marked_normal.items()}
-            pres += list(marked_normal.values())
-            inputs = list(input_bams_normal.values())
+            pres += tuple(marked_normal.values())
+            inputs = tuple(input_bams_normal.values())
             suffix = f"_against_{','.join([m.tag.default_name for m in marked_normal.values()])}"
         tag = ElementTag(
             root=root,
@@ -708,22 +724,22 @@ class GATK(External):
             params=params,
             cfg=cfg,
         )
-        determinants = self.signature_determinants(params)
-        key = f"{tag.default_name}_mutect2_on_{','.join([m.tag.default_name for m in marked_tumor.values()])}{suffix}"  # noqa: E501
-        pres.extend(
-            [
-                x
-                for x in [targets_padded, germline_resource, panel_of_normals]
-                if isinstance(x, Element)
-            ]
+        determinants = self.signature_determinants(params, "Mutect2")
+        tumor_str = ",".join([m.tag.default_name for m in marked_tumor.values()])
+        key, name = self.build_element_name(tag, "Mutect2", on=f"{tumor_str}{suffix}")
+        pres += tuple(
+            x
+            for x in [targets_padded, germline_resource, panel_of_normals]
+            if isinstance(x, Element)
         )
         artifacts = {"vcf": output}
-        if f1r2_tar_gz:
+        if f1r2:
             artifacts["f1r2"] = f1r2
         if not index_off:
             artifacts["tbi"] = output_index
         return Element(
             key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
@@ -746,7 +762,7 @@ class GATK(External):
         intervals: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Get pileup summaries for contamination estimation.
 
         Creates a zero-argument callable that calculates allele counts at
@@ -783,8 +799,9 @@ class GATK(External):
         >>> pileup()
         """
         # gatk GetPileupSummaries -I input.bam -V sites.vcf -O output.table
+        subcommand = "GetPileupSummaries"
         arguments = [
-            "GetPileupSummaries",
+            subcommand,
             "-I",
             self.strabs(input_bam),
             "-V",
@@ -795,10 +812,10 @@ class GATK(External):
         if intervals:
             arguments.extend(["-L", self.strabs(intervals)])
 
-        all_paths = [input_bam, variant_sites, output_table]
+        in_paths = [input_bam, variant_sites]
         if intervals:
-            all_paths.append(intervals)
-        return arguments, all_paths, None, None, None
+            in_paths.append(intervals)
+        return arguments, subcommand, in_paths, [output_table], None, None, None
 
     @element
     def pilesum(
@@ -807,7 +824,7 @@ class GATK(External):
         known_variants: Element | Path | str,
         targets_padded: Element | Path | str,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -826,7 +843,7 @@ class GATK(External):
             Element or file with VCF of common variant sites (e.g., gnomAD).
         targets_padded : Element | Path | str
             Element or file with a BED file or interval list restricting regions.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -851,7 +868,7 @@ class GATK(External):
         >>> gatk = GATK()
         >>> pileup_element = gatk.pilesum(mapped, known_variants, targets_padded)
         """
-        input_bam = mapped.bam
+        input_bam = Path(mapped.bam)
         tag = from_prior(
             mapped.tag,
             tag,
@@ -866,12 +883,12 @@ class GATK(External):
         variant_sites = (
             known_variants.vcf
             if isinstance(known_variants, Element)
-            else known_variants
+            else Path(known_variants)
         )
         intervals = (
             targets_padded.bed
             if isinstance(targets_padded, Element)
-            else targets_padded
+            else Path(targets_padded)
         )
 
         runner = self.get_pileup_summaries(
@@ -883,17 +900,21 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
-        pres = [mapped]
+        pres = (mapped,)
         if isinstance(known_variants, Element):
-            pres.append(known_variants)
+            pres += (known_variants,)
         if isinstance(targets_padded, Element):
-            pres.append(targets_padded)
+            pres += (targets_padded,)
+        key, name = self.build_element_name(
+            tag, "GetPileupSummaries", input=mapped.bam.stem
+        )
         return Element(
-            key=f"{tag.default_name}_pileup_summaries_{mapped.bam.stem}_{self.version_name}",
+            key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bam, variant_sites, intervals],
+            inputs=(input_bam, variant_sites, intervals),
             artifacts={"pileup": Path(output_table).absolute()},
             pres=pres,
         )
@@ -912,7 +933,7 @@ class GATK(External):
         output_segments: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Calculate contamination from pileup summaries.
 
         Creates a zero-argument callable that estimates cross-sample
@@ -948,8 +969,9 @@ class GATK(External):
         >>> contamination()
         """
         # gatk CalculateContamination -I tumor_pileup -O contamination.table
+        subcommand = "CalculateContamination"
         arguments = [
-            "CalculateContamination",
+            subcommand,
             "-I",
             self.strabs(tumor_pileup),
             "-O",
@@ -960,12 +982,13 @@ class GATK(External):
         if output_segments:
             arguments.extend(["--tumor-segmentation", self.strabs(output_segments)])
 
-        all_paths = [tumor_pileup, output_table]
+        in_paths = [tumor_pileup]
         if normal_pileup:
-            all_paths.append(normal_pileup)
+            in_paths.append(normal_pileup)
+        out_paths = [output_table]
         if output_segments:
-            all_paths.append(output_segments)
-        return arguments, all_paths, None, None, None
+            out_paths.append(output_segments)
+        return arguments, subcommand, in_paths, out_paths, None, None, None
 
     @element
     def contamination(
@@ -973,7 +996,7 @@ class GATK(External):
         tumor_pileup: Element,
         *,
         normal_pileup: Element | None = None,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         output_segments: Path | str | None = None,
@@ -991,7 +1014,7 @@ class GATK(External):
             Element containing the tumor pileup table from GetPileupSummaries.
         normal_pileup : Element | None
             Element containing the normal pileup table (optional).
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -1021,7 +1044,7 @@ class GATK(External):
         """
         tumor_table = tumor_pileup.pileup
         normal_table = normal_pileup.pileup if normal_pileup else None
-        default_tag = ElementTag(
+        tag = ElementTag(
             root=f"{tumor_pileup.name}.contamination",
             level=tumor_pileup.tag.level + 1,
             stage=Stage.CALL,
@@ -1029,8 +1052,7 @@ class GATK(External):
             state=State.MODEL,
             omics=tumor_pileup.tag.omics,
             ext="table",
-        )
-        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+        ).merge(tag)
         output_table = (
             Path(outdir or tumor_table.parent) / (filename or tag.default_output)
         ).absolute()
@@ -1044,24 +1066,26 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
-        key = f"{self.name}_calculate_contamination_{tumor_pileup.key}"
-        if normal_pileup:
-            key += f"_vs_{normal_pileup.key}"
-
         pres = [tumor_pileup]
         inputs = [tumor_table]
         if normal_pileup:
             pres.append(normal_pileup)
             inputs.append(normal_table)
+        params_str = tumor_pileup.key
+        if normal_pileup:
+            params_str += f"_vs_{normal_pileup.key}"
+        key, name = self.build_element_name(
+            tag, "CalculateContamination", params=params_str
+        )
         return Element(
-            name=f"{tumor_pileup.name}_contamination_{self.name}",
+            name=name,
             key=key,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=inputs,
+            inputs=tuple(inputs),
             artifacts={"contamination": Path(output_table).absolute()},
-            pres=pres,
+            pres=tuple(pres),
         )
 
     ###########################################################################
@@ -1081,7 +1105,7 @@ class GATK(External):
         index_off: bool = False,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Filter Mutect2 calls using contamination and orientation models.
 
         Creates a zero-argument callable that applies GATK filtering to
@@ -1125,8 +1149,9 @@ class GATK(External):
         >>> filter_calls()
         """
         # Build command: gatk FilterMutectCalls -R ref.fa -V input.vcf -O output.vcf
+        subcommand = "FilterMutectCalls"
         arguments = [
-            "FilterMutectCalls",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-V",
@@ -1141,17 +1166,17 @@ class GATK(External):
         if tumor_segmentation:
             arguments.extend(["--tumor-segmentation", self.strabs(tumor_segmentation)])
 
-        all_paths = [reference, input_vcf, output_vcf]
+        in_paths = [reference, input_vcf]
         if contamination:
-            all_paths.append(contamination)
+            in_paths.append(contamination)
         if orientation:
-            all_paths.append(orientation)
+            in_paths.append(orientation)
         if tumor_segmentation:
-            all_paths.append(tumor_segmentation)
+            in_paths.append(tumor_segmentation)
         post = (
             self.index_feature_file(output_vcf, params, cfg) if not index_off else None
         )
-        return arguments, all_paths, None, None, post
+        return arguments, subcommand, in_paths, [output_vcf], None, None, post
 
     @element
     def filter(
@@ -1162,7 +1187,7 @@ class GATK(External):
         contamination: Element | None = None,
         orientation: Element | None = None,
         tumor_segmentation: Element | None = None,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         index_off: bool = False,
@@ -1183,7 +1208,7 @@ class GATK(External):
             Element containing the read orientation model from LearnReadOrientationModel
         tumor_segmentation : Element | None
             Element containing the tumor segmentation table from CalculateContamination.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -1236,29 +1261,39 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
-        key = f"{tag.default_name}_filtered_{mutect_element.key}_{self.version_name}"
         pres = [mutect_element]
         inputs = [input_vcf]
         if contamination:
-            key += f"_{contamination.key}"
             pres.append(contamination)
             inputs.append(contamination.contamination)
         if orientation:
-            key += f"_{orientation.key}"
             pres.append(orientation)
             inputs.append(orientation.orientation)
         if tumor_segmentation:
-            key += f"_{tumor_segmentation.key}"
             pres.append(tumor_segmentation)
             inputs.append(tumor_segmentation.segments)
+
+        params_str = mutect_element.key
+        con = contamination.key if contamination else None
+        ori = orientation.key if orientation else None
+        seg = tumor_segmentation.key if tumor_segmentation else None
+        key, name = self.build_element_name(
+            tag,
+            "FilterMutectCalls",
+            on=mutect_element.key,
+            contamination=con,
+            orientation=ori,
+            segmentation=seg,
+        )
         return Element(
             key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=inputs,
+            inputs=tuple(inputs),
             artifacts={"vcf": output_vcf},
-            pres=pres,
+            pres=tuple(pres),
         )
 
     ###########################################################################
@@ -1269,14 +1304,14 @@ class GATK(External):
     def basecalibrate_bam(
         self,
         reference: Path | str,
-        sequence_dictionary: Path | str | None,
+        sequence_dictionary: Path | str,
         input_bams: list[Path | str],
         output_table: Path | str,
         known_sites: Path | str | list[Path | str] | None = None,
         intervals: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Run GATK BaseRecalibrator on BAM file(s).
 
         Creates a zero-argument callable that computes a BQSR recalibration
@@ -1286,6 +1321,8 @@ class GATK(External):
         ----------
         reference : Path | str
             Reference genome FASTA file.
+        sequence_dictionary: Path | str
+            Reference sequence dictionary file (e.g., .dict from Picard).
         input_bams : list[Path | str]
             List of input BAM files.
         output_table : Path | str
@@ -1315,8 +1352,9 @@ class GATK(External):
         >>> recal()
         """
         # gatk BaseRecalibrator -R ref.fa -I input.bam --known-sites sites.vcf -O recal.table  # noqa: E501
+        subcommand = "BaseRecalibrator"
         arguments = [
-            "BaseRecalibrator",
+            subcommand,
             "-R",
             self.strabs(reference),
             "--sequence-dictionary",
@@ -1325,22 +1363,24 @@ class GATK(External):
         for bam in input_bams:
             arguments.extend(["-I", self.strabs(bam)])
 
-        all_paths = [reference, *input_bams, output_table]
+        in_paths = [reference, *input_bams]
+        if sequence_dictionary:
+            in_paths.append(sequence_dictionary)
 
         if known_sites:
             if isinstance(known_sites, (list, tuple)):
                 for ks in known_sites:
                     arguments.extend(["--known-sites", self.strabs(ks)])
-                    all_paths.append(ks)
+                    in_paths.append(ks)
             else:
                 arguments.extend(["--known-sites", self.strabs(known_sites)])
-                all_paths.append(known_sites)
+                in_paths.append(known_sites)
         if intervals:
             arguments.extend(["-L", self.strabs(intervals)])
-            all_paths.append(intervals)
+            in_paths.append(intervals)
 
         arguments.extend(["-O", self.strabs(output_table)])
-        return arguments, all_paths, None, None, None
+        return arguments, subcommand, in_paths, [output_table], None, None, None
 
     @element
     def modelbsqr(
@@ -1349,7 +1389,7 @@ class GATK(External):
         reference: Genome,
         refdict_element: Element | None = None,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         known_sites: Path | str | list[Path | str] | Element | None = None,
@@ -1373,7 +1413,7 @@ class GATK(External):
             Optional Element containing the reference sequence dictionary. If not
             provided, the sequence dictionary will be inferred from the reference
             FASTA file.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -1416,11 +1456,10 @@ class GATK(External):
             param="bsqr",
         )
         output_table = outdir / (filename or tag.default_output)
-        intervals = (
-            intervals
-            if not isinstance(intervals, Element)
-            else intervals.output_files[0]
-        )
+
+        if isinstance(intervals, Element) and intervals.output_files:
+            intervals = next(iter(intervals.output_files))
+
         known_sites = (
             list(known_sites.artifacts.values())
             if isinstance(known_sites, Element)
@@ -1433,7 +1472,7 @@ class GATK(External):
                 if isinstance(refdict_element, Element)
                 else refdict_element
             ),
-            input_bams=input_bams,
+            input_bams=tuple(input_bams),
             output_table=output_table,
             known_sites=known_sites,
             intervals=intervals,
@@ -1441,15 +1480,18 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
-        key = f"{tag.default_name}_basecalibrate_{first_bam.stem}_{self.version_name}"
+        key, name = self.build_element_name(
+            tag, "BaseRecalibrator", first=first_bam.stem
+        )
         return Element(
             key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=input_bams,
+            inputs=tuple(input_bams),
             artifacts={"bsqr_table": Path(output_table).absolute()},
-            pres=mapped_list,
+            pres=tuple(mapped_list),
         )
 
     @subroutine
@@ -1464,7 +1506,7 @@ class GATK(External):
         intervals: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Run GATK ApplyBQSR on a BAM file.
 
         Creates a zero-argument callable that applies a pre-computed BQSR
@@ -1507,8 +1549,9 @@ class GATK(External):
         >>> apply()
         """
         # gatk ApplyBQSR -R ref.fa -I input.bam --bqsr-recal-file recal.table -O output.bam  # noqa: E501
+        subcommand = "ApplyBQSR"
         arguments = [
-            "ApplyBQSR",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-I",
@@ -1521,12 +1564,12 @@ class GATK(External):
         if intervals:
             arguments.extend(["-L", self.strabs(intervals)])
 
-        all_paths = [reference, input_bam, recal_table, output_bam]
+        in_paths = [reference, input_bam, recal_table]
         if intervals:
-            all_paths.append(intervals)
+            in_paths.append(intervals)
 
         post = None if index_off else GATK.index_by_sam(output_bam)
-        return arguments, all_paths, None, None, post
+        return arguments, subcommand, in_paths, [output_bam], None, None, post
 
     @element
     def applybsqr(
@@ -1535,9 +1578,9 @@ class GATK(External):
         bsqrmodel: Element,
         reference: Genome,
         *,
-        intervals: Path | str | None = None,
+        intervals: Path | str | Element | None = None,
         index_off: bool = False,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -1562,7 +1605,7 @@ class GATK(External):
         index_off : bool
             If True, do not create BAM index after recalibration. Default is
             False.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -1614,26 +1657,30 @@ class GATK(External):
         if not index_off:
             artifacts["bai"] = output.with_suffix(output.suffix + ".bai")
         determinants = self.signature_determinants(params)
-        key = f"{tag.default_name}_apply_bqsr_{mapped.bam.stem}_{bsqrmodel.key}"
-
+        key, name = self.build_element_name(
+            tag,
+            "ApplyBQSR",
+            input=f"{mapped.bam.stem}",
+            bsqr=f"{bsqrmodel.key}",
+        )
         return MappedElement(
-            key=key,  # noqa: E501
+            key=key,
+            name=name,
             run=bsqr_runner,
             tag=tag,
             determinants=determinants,
-            inputs=[mapped.bam, bsqrmodel.bsqr_table],
+            inputs=(mapped.bam, bsqrmodel.bsqr_table),
             artifacts={"bam": output.absolute()},
-            pres=pres,
+            pres=tuple(pres),
         )
 
-    @element
     def bsqr(
         self,
         mapped: MappedElement,
         reference: Genome,
         *,
         refdict_element: Element | None = None,
-        tags: Mapping[str, Tag | ElementTag] | None = None,
+        tags: Mapping[str, PartialElementTag | ElementTag] | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         known_sites: Path | str | list[Path | str] | Element | None = None,
@@ -1658,7 +1705,7 @@ class GATK(External):
             Optional Element containing the reference sequence dictionary. If
             not provided, the sequence dictionary will be inferred from the
             reference FASTA file.
-        tags : Mapping[str, Tag | ElementTag] | None
+        tags : Mapping[str,PartialElementTag| ElementTag] | None
             Partial or full Element tags for the output Element, used for default
             naming. If not provided, default tags will be generated based on
             the input Element's name.
@@ -1694,7 +1741,7 @@ class GATK(External):
         cfgs = cfgs or {}
         tags = tags or {}
         filename_model = Path(filename).with_suffix(".table").name if filename else None
-        model = self.modelbsqr(
+        model = self.modelbsqr(  # type: ignore[reportCallIssue]
             mapped=mapped,
             reference=reference,
             refdict_element=refdict_element,
@@ -1707,7 +1754,7 @@ class GATK(External):
             cfg=cfgs.get("modelbsqr", None),
             pre=pre,
         )
-        recalibrated = self.applybsqr(
+        recalibrated = self.applybsqr(  # type: ignore[reportCallIssue]
             mapped=mapped,
             bsqrmodel=model,
             reference=reference,
@@ -1733,7 +1780,7 @@ class GATK(External):
         output_pon: Path | str,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Create a Panel of Normals using GATK CreateSomaticPanelOfNormals.
 
         Creates a zero-argument callable that builds a panel of normals VCF
@@ -1765,11 +1812,13 @@ class GATK(External):
         >>> pon()
         """
         # gatk CreateSomaticPanelOfNormals -vcfs n1.vcf -vcfs n2.vcf -O pon.vcf.gz
-        arguments = ["CreateSomaticPanelOfNormals"]
+        subcommand = "CreateSomaticPanelOfNormals"
+        arguments = [subcommand]
+        input_vcfs = sorted(input_vcfs, key=str)
         for vcf in input_vcfs:
             arguments.extend(["-V", self.strabs(vcf)])
         arguments.extend(["-O", self.strabs(output_pon)])
-        return arguments, [*input_vcfs, output_pon], None, None, None
+        return arguments, subcommand, [*input_vcfs], [output_pon], None, None, None
 
     @element
     def pons(
@@ -1778,7 +1827,7 @@ class GATK(External):
         reference: Genome,
         *,
         index_off: bool = False,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params_mutect2: Params | None = None,
@@ -1801,7 +1850,7 @@ class GATK(External):
         index_off : bool
             If True, do not create BAM index after recalibration. Default is
             False.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -1833,7 +1882,11 @@ class GATK(External):
         >>> gatk = GATK()
         >>> pon_element = gatk.pons(all_normals, genome)
         """
-        cfg_mutect2 = cfg_mutect2 or ExternalRunConfig(threads=10)
+        all_normals = sorted(
+            all_normals, key=lambda e: e.name
+        )  # we need sorting for the name
+        # cfg_mutect2 = cfg_mutect2 or ExternalRunConfig()
+        # params_mutect2 = params_mutect2 or Params()
         tag = ElementTag(
             root=f"{reference.name}",
             level=all_normals[0].tag.level + 1,
@@ -1859,7 +1912,7 @@ class GATK(External):
                 cfg=cfg_mutect2,
             )
             pres_pon.append(called)
-
+        pres_pon = sorted(pres_pon, key=lambda e: e.name)
         input_vcfs = [e.vcf for e in pres_pon]
         runner = self.create_panel_of_normals(
             input_vcfs=input_vcfs,
@@ -1868,15 +1921,21 @@ class GATK(External):
             cfg=cfg_pon,
         )
         determinants = self.signature_determinants(params_pon)
-        key = f"{tag.default_name}_{reference}_pon_from_{','.join([n.name for n in all_normals])}"  # noqa: E501
+        key, name = self.build_element_name(
+            tag,
+            "CreateSomaticPanelOfNormals",
+            ref=f"{reference.name}",
+            fromf=f"{','.join(sorted([n.name for n in all_normals]))}",
+        )
         return Element(
             key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=input_vcfs,
+            inputs=tuple(input_vcfs),
             artifacts={"pon": output.absolute()},
-            pres=pres_pon,
+            pres=tuple(pres_pon),
         )
 
     ###########################################################################
@@ -1890,7 +1949,7 @@ class GATK(External):
         output_dict: Path | str,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Create a reference sequence dictionary using GATK CreateSequenceDictionary.
 
         Creates a zero-argument callable that generates a .dict file from a
@@ -1919,21 +1978,22 @@ class GATK(External):
         >>> create_dict()
         """
         # Build command: gatk CreateSequenceDictionary -R ref.fa -O ref.dict
+        subcommand = "CreateSequenceDictionary"
         arguments = [
-            "CreateSequenceDictionary",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-O",
             self.strabs(output_dict),
         ]
-        return arguments, [reference, output_dict], None, None, None
+        return arguments, subcommand, [reference], [output_dict], None, None, None
 
     @element
     def seqdict(
         self,
         reference: Genome,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -1948,7 +2008,7 @@ class GATK(External):
         ----------
         reference : Genome
             Reference genome object containing the FASTA file.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -1992,15 +2052,18 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
-        name = f"{reference.name}_sequence_dict"
+        key, name = self.build_element_name(
+            tag, "CreateSequenceDictionary", ref=reference.name
+        )
         return Element(
-            key=f"{tag.default_name}_{name}_{self.version_name}",
+            key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[reference.fasta],
+            inputs=(reference.fasta,),
             artifacts={"dict": output_dict.absolute()},
-            pres=[],
+            pres=(),
         )
 
     ###########################################################################
@@ -2015,7 +2078,7 @@ class GATK(External):
         sequence_dict: Path | str,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Convert a BED file to Picard interval_list format.
 
         Creates a zero-argument callable that converts a BED file to the
@@ -2050,8 +2113,9 @@ class GATK(External):
         >>> converter()
         """
         # Build command: gatk BedToIntervalList -I bed -O interval_list -SD dict
+        subcommand = "BedToIntervalList"
         arguments = [
-            "BedToIntervalList",
+            subcommand,
             "-I",
             self.strabs(input_bed),
             "-O",
@@ -2061,7 +2125,9 @@ class GATK(External):
         ]
         return (
             arguments,
-            [input_bed, output_interval_list, sequence_dict],
+            subcommand,
+            [input_bed, sequence_dict],
+            [output_interval_list],
             None,
             None,
             None,
@@ -2073,7 +2139,7 @@ class GATK(External):
         bed_element: Element | str | Path,
         sequence_dict: Element,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -2090,7 +2156,7 @@ class GATK(External):
             BED file or Element containing the BED file to convert.
         sequence_dict : Element
             Element containing the reference sequence dictionary (.dict file).
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -2128,7 +2194,7 @@ class GATK(External):
             ext="intervals",
         ).merge(tag)
         outdir = Path(outdir or input_bed.parent)
-        filename = filename or (input_bed.with_suffix(".intervals").name)
+        filename = filename or str(input_bed.with_suffix(".intervals").name)
         output_interval_list = outdir / filename
 
         runner = self.bed_to_interval_list(
@@ -2141,14 +2207,21 @@ class GATK(External):
         determinants = self.signature_determinants(params)
         pres = [bed_element] if is_element else []
         pres.append(sequence_dict)
+        key, name = self.build_element_name(
+            tag,
+            "BedToIntervalList",
+            sdict=f"{sequence_dict.key}",
+            input=f"{input_bed.stem}",
+        )
         return Element(
-            key=f"{tag.default_name}_{sequence_dict.key}_to_interval_list_{str(input_bed)}_{self.version_name}",
+            key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bed],
+            inputs=(input_bed,),
             artifacts={"intervals": output_interval_list},
-            pres=pres,
+            pres=tuple(pres),
         )
 
     ###########################################################################
@@ -2163,7 +2236,7 @@ class GATK(External):
         output_metrics: Path | str,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Collect alignment summary metrics using Picard CollectAlignmentSummaryMetrics
 
         Creates a zero-argument callable that collects comprehensive alignment
@@ -2198,8 +2271,9 @@ class GATK(External):
         >>> metrics()
         """
         # gatk CollectAlignmentSummaryMetrics -R ref.fa -I input.bam -O metrics.txt
+        subcommand = "CollectAlignmentSummaryMetrics"
         arguments = [
-            "CollectAlignmentSummaryMetrics",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-I",
@@ -2207,7 +2281,15 @@ class GATK(External):
             "-O",
             self.strabs(output_metrics),
         ]
-        return arguments, [reference, input_bam, output_metrics], None, None, None
+        return (
+            arguments,
+            subcommand,
+            [reference, input_bam],
+            [output_metrics],
+            None,
+            None,
+            None,
+        )
 
     @element
     def alignmetrics(
@@ -2215,7 +2297,7 @@ class GATK(External):
         mapped: MappedElement,
         reference: Genome,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -2232,7 +2314,7 @@ class GATK(External):
             MappedElement containing the BAM file.
         reference : Genome
             Reference genome object.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -2279,14 +2361,16 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
+        key, name = self.build_element_name(tag, "CollectAlignmentSummaryMetrics")
         return Element(
-            key=f"{tag.default_name}_alignment_summary_{self.version_name}",
+            key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bam, reference.fasta],
+            inputs=(input_bam, reference.fasta),
             artifacts={"metrics": output_metrics},
-            pres=[mapped],
+            pres=(mapped,),
         )
 
     ###########################################################################
@@ -2301,7 +2385,7 @@ class GATK(External):
         output_histogram: Path | str,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Collect insert size metrics using Picard CollectInsertSizeMetrics.
 
         Creates a zero-argument callable that collects insert size distribution
@@ -2336,8 +2420,9 @@ class GATK(External):
         >>> metrics()
         """
         # gatk CollectInsertSizeMetrics -I input.bam -O metrics.txt -H histogram.pdf
+        subcommand = "CollectInsertSizeMetrics"
         arguments = [
-            "CollectInsertSizeMetrics",
+            subcommand,
             "-I",
             self.strabs(input_bam),
             "-O",
@@ -2347,7 +2432,9 @@ class GATK(External):
         ]
         return (
             arguments,
-            [input_bam, output_metrics, output_histogram],
+            subcommand,
+            [input_bam],
+            [output_metrics, output_histogram],
             None,
             None,
             None,
@@ -2358,7 +2445,7 @@ class GATK(External):
         self,
         mapped: MappedElement,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -2374,7 +2461,7 @@ class GATK(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -2424,14 +2511,16 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
+        key, name = self.build_element_name(tag, "CollectInsertSizeMetrics")
         return Element(
-            key=f"{tag.default_name}_insert_size_{self.version_name}",
+            key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bam],
+            inputs=(input_bam,),
             artifacts={"metrics": output_metrics, "histogram": output_histogram},
-            pres=[mapped],
+            pres=(mapped,),
         )
 
     ###########################################################################
@@ -2449,7 +2538,7 @@ class GATK(External):
         per_target_coverage: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Collect hybrid selection (HS) metrics using Picard CollectHsMetrics.
 
         Creates a zero-argument callable that collects metrics for targeted
@@ -2493,8 +2582,9 @@ class GATK(External):
         >>> metrics()
         """
         # gatk CollectHsMetrics -R ref.fa -I bam -O metrics --BAIT_INTERVALS baits --TARGET_INTERVALS targets  # noqa: E501
+        subcommand = "CollectHsMetrics"
         arguments = [
-            "CollectHsMetrics",
+            subcommand,
             "-R",
             self.strabs(reference),
             "-I",
@@ -2506,10 +2596,9 @@ class GATK(External):
             "--TARGET_INTERVALS",
             self.strabs(target_intervals),
         ]
-        all_paths = [
+        in_paths = [
             reference,
             input_bam,
-            output_metrics,
             bait_intervals,
             target_intervals,
         ]
@@ -2518,9 +2607,9 @@ class GATK(External):
             arguments.extend(
                 ["--PER_TARGET_COVERAGE", self.strabs(per_target_coverage)]
             )
-            all_paths.append(per_target_coverage)
+            in_paths.append(per_target_coverage)
 
-        return arguments, all_paths, None, None, None
+        return arguments, subcommand, in_paths, [output_metrics], None, None, None
 
     @element
     def hs(
@@ -2530,7 +2619,7 @@ class GATK(External):
         baits: Element | Path | str,
         targets: Element | Path | str,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         per_target_coverage: Path | str | None = None,
@@ -2552,7 +2641,7 @@ class GATK(External):
             Element or file with interval list of bait regions.
         targets : Element | Path | str
             Element or file with interval list of target regions.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -2594,8 +2683,12 @@ class GATK(External):
             Path(outdir or default_outdir) / (filename or tag.default_output)
         ).absolute()
 
-        bait_path = baits.intervals if isinstance(baits, Element) else baits
-        target_path = targets.intervals if isinstance(targets, Element) else targets
+        bait_path = Path(
+            baits.intervals if isinstance(baits, Element) else baits
+        ).absolute()
+        target_path = Path(
+            targets.intervals if isinstance(targets, Element) else targets
+        ).absolute()
 
         runner = self.hs_metrics(
             reference=reference.fasta,
@@ -2608,7 +2701,7 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params)
-        pres = [mapped]
+        pres: list[Element] = [mapped]
         if isinstance(baits, Element):
             pres.append(baits)
         if isinstance(targets, Element) and targets != baits:
@@ -2618,14 +2711,18 @@ class GATK(External):
         if per_target_coverage:
             artifacts["per_target_coverage"] = Path(per_target_coverage).absolute()
 
+        key, name = self.build_element_name(
+            tag, "CollectHsMetrics", input=input_bam.stem
+        )
         return Element(
-            key=f"{tag.default_name}_{input_bam.stem}_hs_metrics_{self.version_name}",
+            key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bam, reference.fasta, bait_path, target_path],
+            inputs=(input_bam, reference.fasta, bait_path, target_path),
             artifacts=artifacts,
-            pres=pres,
+            pres=tuple(pres),
         )
 
     ###########################################################################
@@ -2638,7 +2735,7 @@ class GATK(External):
         element: Element | str | Path,
         filetype: str = "vcf",
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -2654,7 +2751,7 @@ class GATK(External):
             Element or file to index.
         filetype : str
             Type of the feature file (e.g., "vcf", "bed", "intervals").
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -2674,32 +2771,50 @@ class GATK(External):
         Element
             An Element that indexes the feature file when run.
         """
-        is_element = isinstance(element, Element)
-        input_path = getattr(element, filetype) if is_element else Path(element)
-        root = element.tag.root if is_element else input_path.stem
-        tag = ElementTag(
-            root=root,
-            level=element.tag.level + 1 if is_element else 1,
-            stage=Stage.PREP,
-            method=Method.GATK,
-            state=State.INDEX,
-            omics=element.tag.omics if is_element else Omics.DNA,
-            ext=input_path.suffix + ".idx",
-        ).merge(tag)
+        if isinstance(element, Element):
+            input_path = getattr(element, filetype, None)
+            if not isinstance(input_path, Path):
+                raise ValueError(
+                    f"Element {element} does not have a '{filetype}' artifact of type Path: {input_path}"  # noqa: E501
+                )
+            tag = from_prior(
+                element.tag,
+                tag,
+                stage=Stage.PREP,
+                method=Method.GATK,
+                state=State.INDEX,
+                ext=input_path.suffix + ".idx",
+            )
+            pres = (element,)
+        else:
+            input_path = Path(element)
+            pres = ()
+            tag = ElementTag(
+                root=input_path.stem,
+                level=1,
+                stage=Stage.PREP,
+                method=Method.GATK,
+                state=State.INDEX,
+                omics=Omics.DNA,
+                ext=input_path.suffix + ".idx",
+            )
         outdir = Path(outdir or input_path.parent)
-        filename = input_path.with_suffix(".idx")
+        filename = filename or input_path.with_suffix(".idx").name
         output_index = outdir / filename
         runner = self.index_feature_file(input_path, params, cfg)
         determinants = self.signature_determinants(params)
-
+        key, name = self.build_element_name(
+            tag, "IndexFeatureFile", input=input_path.stem
+        )
         return Element(
-            key=f"{tag.default_name}_{input_path.stem}_indexfile_{self.version_name}",
+            key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_path],
-            artifacts={tag.ext: output_index},
-            pres=[element] if isinstance(element, Element) else [],
+            inputs=(input_path,),
+            artifacts={"idx": output_index},
+            pres=pres,
         )
 
     @subroutine
@@ -2708,7 +2823,7 @@ class GATK(External):
         input_path: str | Path,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """
         Create a callable that indexes a feature file using GATK IndexFeatureFile.
 
@@ -2727,12 +2842,13 @@ class GATK(External):
             A zero-argument callable that executes the indexing command.
         """
 
+        subcommand = "IndexFeatureFile"
         arguments = [
-            "IndexFeatureFile",
+            subcommand,
             "-I",
             self.strabs(input_path),
         ]
-        return arguments, [input_path], None, None, None
+        return arguments, subcommand, [input_path], [], None, None, None
 
     ###########################################################################
     # Callable Loci
@@ -2752,7 +2868,7 @@ class GATK(External):
         output_json: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Collect callable loci regions using GATK CallableLoci.
 
         Creates a zero-argument callable that identifies regions in the
@@ -2802,8 +2918,9 @@ class GATK(External):
         >>> loci()
         """
         # gatk CallableLoci -R ref -I bam -L target -summary summary -o bed
+        subcommand = "CallableLoci"
         arguments = [
-            "CallableLoci",
+            subcommand,
             "-R",
             self.strabs(reference_fasta),
             "-I",
@@ -2821,9 +2938,11 @@ class GATK(External):
             "-O",
             self.strabs(output_bed),
         ]
-        all_paths = [reference_fasta, input_bam, target_bed, output_bed, output_summary]
+        output_summary = Path(output_summary)
+        in_paths = [reference_fasta, input_bam, target_bed]
+        out_paths = [output_bed, output_summary]
         if output_json:
-            all_paths.append(output_json)
+            out_paths.append(output_json)
 
         def _post():
             callable_bases, callable_mb = self.extract_callable_mb(output_summary)
@@ -2840,7 +2959,7 @@ class GATK(External):
                     json.dump(ret, f, indent=2)
             return ret
 
-        return arguments, all_paths, None, None, _post
+        return arguments, subcommand, in_paths, out_paths, None, None, _post
 
     @element
     def loci(
@@ -2848,7 +2967,7 @@ class GATK(External):
         mapped: MappedElement,
         reference: Genome,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         output_name_bed: str | None = None,
@@ -2871,7 +2990,7 @@ class GATK(External):
             MappedElement containing the BAM file.
         reference : Genome
             Reference genome object.
-        tag : Tag | ElementTag | None
+        tag :PartialElementTag| ElementTag | None
             Partial or full Element tag for the output Element, used for default
             naming. If not provided, a default tag will be generated based on
             the input Element's name.
@@ -2930,7 +3049,7 @@ class GATK(External):
         target_bed = targets.bed if isinstance(targets, Element) else targets
 
         inputs = [input_bam, reference.fasta]
-        pres = [mapped]
+        pres: list[Element] = [mapped]
         if isinstance(targets, Element):
             pres.append(targets)
             inputs.append(targets.bed)
@@ -2949,22 +3068,21 @@ class GATK(External):
             cfg=cfg,
         )
         determinants = self.signature_determinants(params, subroutine="CallableLoci")
-        key = f"{tag.default_name}_callable_loci_{self.version_name}_{params}"  # noqa: E501
-        if target_bed:
-            key += f"_{Path(target_bed).stem}"
-
+        targ = {Path(target_bed).stem} if target_bed else None
+        key, name = self.build_element_name(tag, "CallableLoci", targets=targ)
         return Element(
             key=key,
+            name=name,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=inputs,
+            inputs=tuple(inputs),
             artifacts={
                 "summary": output_summary,
                 "bed": output_bed,
                 "callable": output_json,
             },
-            pres=pres,
+            pres=tuple(pres),
         )
 
     @staticmethod
@@ -2973,9 +3091,9 @@ class GATK(External):
 
         with open(summary_file) as f:
             for line in f:
-                if line.startswith("CALLABLE"):
-                    callable_bases = int(line.split()[1])
+                if "CALLABLE" in line:
+                    callable_bases = int(line.split("CALLABLE")[1].strip())
                     break
 
-        callable_mb = callable_bases / 1_000_000
+        callable_mb = callable_bases / 1000000
         return callable_bases, callable_mb

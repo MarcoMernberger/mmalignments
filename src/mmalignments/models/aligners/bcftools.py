@@ -10,20 +10,26 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from mmalignments.models.callers import GATK
 from mmalignments.models.data import HardFilterThresholds
-from mmalignments.models.elements import Element, VcfElement, element
+from mmalignments.models.elements import (
+    Element,
+    VcfElement,
+    element,
+    generate_element_key_name,
+)
 from mmalignments.models.tags import (
     ElementTag,
-    PartialElementTag,
     Method,
+    PartialElementTag,
     Stage,
     State,
-    merge_tag,
+    from_prior,
 )
-from mmalignments.models.tags import ElementTag, from_prior
+from mmalignments.services.errors import PipelineError
 from mmalignments.services.io import ensure, from_json
-from mmalignments.models.callers import GATK
-from ..externals import External, ExternalRunConfig, subroutine
+
+from ..externals import External, ExternalRunConfig, SubroutineIn, subroutine
 from ..parameters import Params, ParamSet
 
 logger = logging.getLogger(__name__)
@@ -155,7 +161,7 @@ class BCFtools(External):
     @element
     def view(
         self,
-        called: VcfElement | Path | str,
+        called: VcfElement,
         *,
         targets: Element | Path | str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
@@ -172,9 +178,8 @@ class BCFtools(External):
 
         Parameters
         ----------
-        called : VcfElement | Path | str
-            Input VCF element (uses ``element.artifacts["vcf"]``) or a plain
-            path to a VCF file.
+        called : VcfElement
+            Input VCF element (uses ``element.artifacts["vcf"]``).
         targets : Element | Path | str | None
             BED file element for target-region restriction.
         tag : Tag | ElementTag | None
@@ -217,7 +222,9 @@ class BCFtools(External):
         out_vcf = Path(outdir or vcf.parent) / (filename or tag.default_output)
 
         targets_bed = targets.bed if isinstance(targets, Element) else targets
-        samples = samples or [called.name]
+        samples = samples or [called.tag.root]
+        if not samples:
+            raise ValueError("No samples specified for bcftools view.")
 
         runner = self.view_vcf(
             input_vcf=vcf,
@@ -230,23 +237,26 @@ class BCFtools(External):
             params=params,
             cfg=cfg,
         )
-        tag_str = "view"
-        tag_str += "_pass" if pass_only else ""
-        tag_str += "_biallelic" if biallelic else ""
+        tag_str = None
+        if pass_only or biallelic:
+            tag_str = "pass" if pass_only else ""
+            tag_str += "_biallelic" if biallelic else ""
 
-        key = f"{tag.default_name}_bcfview_{called.key}_{tag_str}_{self.version_name}"
-        pres = [called, targets] if isinstance(targets, Element) else [called]
-        if targets_bed:
-            key += f"_targets_{Path(targets_bed).stem}"
+        suffix = f"{Path(targets_bed).stem}" if targets_bed else None
+        key, name = generate_element_key_name(
+            tag, self.version_name, "view", suffix=suffix, params=tag_str
+        )
+        pres = (called, targets) if isinstance(targets, Element) else (called,)
         determinants = self.signature_determinants(params)
         return VcfElement(
             key=key,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[vcf],
+            inputs=(vcf,),
             artifacts={"vcf": out_vcf},
             pres=pres,
+            name=name,
         )
 
     @subroutine
@@ -262,7 +272,7 @@ class BCFtools(External):
         variant_type: str | list[str] | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], None]:
+    ) -> SubroutineIn:
         """Run ``bcftools view`` and write compressed VCF output.
 
         The output is always written with ``-Oz -o <output_vcf>``.
@@ -320,8 +330,8 @@ class BCFtools(External):
         if targets_bed is not None:
             arguments += ["-R", str(Path(targets_bed).absolute())]
         arguments += ["-Oz", "-o", str(output_vcf), str(input_vcf)]
-
-        return arguments, [input_vcf, output_vcf], None, None, None
+        subcommand = "view"
+        return arguments, subcommand, [input_vcf], [output_vcf], None, None, None
 
     ###########################################################################
     # Filter (High-level and Low-level wrapper)
@@ -330,7 +340,7 @@ class BCFtools(External):
     @element
     def filter(
         self,
-        called: VcfElement | Path | str,
+        called: VcfElement,
         *,
         include_expr: str | None = None,
         exclude_expr: str | None = None,
@@ -389,12 +399,15 @@ class BCFtools(External):
             params=params,
             cfg=cfg,
         )
-        key = f"{tag.default_name}_filtered_{self.version_name}"
-        if include_expr is not None:
-            key += f"_incl-{include_expr}"
-        elif exclude_expr is not None:
-            key += f"_excl-{exclude_expr}"
-        pres = [called]
+
+        key, name = generate_element_key_name(
+            tag,
+            self.version_name,
+            "filter",
+            include_expr=include_expr,
+            exclude_expr=exclude_expr,
+        )
+        pres = (called,)
         determinants = self.signature_determinants(params)
 
         return VcfElement(
@@ -402,9 +415,10 @@ class BCFtools(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[vcf],
+            inputs=(vcf,),
             artifacts={"vcf": out_vcf},
             pres=pres,
+            name=name,
         )
 
     @subroutine
@@ -417,7 +431,7 @@ class BCFtools(External):
         exclude_expr: str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], None]:
+    ) -> SubroutineIn:
         """Run ``bcftools filter`` and write compressed VCF output.
 
         Exactly one of *include_expr* or *exclude_expr* should be supplied.
@@ -457,7 +471,8 @@ class BCFtools(External):
         else:
             arguments += ["-e", exclude_expr]
         arguments += ["-Oz", "-o", str(output_vcf), str(input_vcf)]
-        return arguments, [input_vcf, output_vcf], None, None, None
+        subcommand = "filter"
+        return arguments, subcommand, [input_vcf], [output_vcf], None, None, None
 
     ###########################################################################
     # Indexing (High-level and Low-level wrapper)
@@ -513,18 +528,19 @@ class BCFtools(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[vcf],
+            inputs=(vcf,),
             artifacts={"tbi": tbi},
-            pres=pres,
+            pres=tuple(pres),
         )
 
+    @subroutine
     def index_vcf(
         self,
         vcf_file: Path | str,
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], None]:
+    ) -> SubroutineIn:
         """Create a tabix index (``.tbi``) with ``bcftools index -t``.
 
         Parameters
@@ -545,11 +561,7 @@ class BCFtools(External):
         vcf_file = Path(vcf_file).absolute()
         arguments: list[str] = ["index", "-t", str(vcf_file)]
 
-        return self.runnable(
-            arguments=arguments,
-            params=params,
-            cfg=cfg,
-        )
+        return arguments, "index", [vcf_file], [], None, None, None
 
     ###########################################################################
     # Counting (High-level and Low-level wrapper)
@@ -563,7 +575,7 @@ class BCFtools(External):
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], int]:
+    ) -> SubroutineIn:
         """Return a callable that counts variants in a VCF file.
 
         Runs ``bcftools view -H [-v <type>] <vcf>`` and counts output lines.
@@ -591,8 +603,8 @@ class BCFtools(External):
         if variant_type is not None:
             arguments += ["-v", variant_type]
         arguments.append(str(input_vcf))
-
-        return arguments, [input_vcf], None, None, None
+        subcommand = "view"
+        return arguments, subcommand, [input_vcf], [], None, None, None
 
     def count_variants_post_filter(
         self,
@@ -632,35 +644,58 @@ class BCFtools(External):
         """
 
         def __count(output_json=output_json) -> dict[str, int]:
-            ensure(Path(output_json).parent)
-            total = self.count_variants_vcf(
-                vcf_file, variant_type=None, params=params, cfg=cfg
-            )()
-            snps = self.count_variants_vcf(
-                vcf_file, variant_type="snps", params=params, cfg=cfg
-            )()
-            indels = self.count_variants_vcf(
-                vcf_file, variant_type="indels", params=params, cfg=cfg
-            )()
-            counts: dict[str, Any] = {
-                "total": total,
-                "snps": snps,
-                "indels": indels,
-            }
-            if sample_name:
-                counts["sample"] = sample_name
-            if loci_summary_or_mosdepth is not None:
-                callable_mb_data = from_json(loci_summary_or_mosdepth)
-                callable_mb = callable_mb_data.get("callable_mb")
-                mutational_load = total / callable_mb
-                counts["method"] = callable_mb_data.get("method")
-                counts["callable"] = callable_mb_data.get("callable")
-                counts["callable_mb"] = callable_mb
-                counts["mutational_load"] = mutational_load
+            "Here we need to combine multiple calls into one callable"
+            try:
+                ensure(Path(output_json).parent)
+                cp_total = self.count_variants_vcf(
+                    vcf_file, variant_type=None, params=params, cfg=cfg
+                )()
+                total = len(cp_total.stdout.splitlines())
 
-            with open(output_json, "w") as f:
-                json.dump(counts, f, indent=2)
-            return counts
+                cp_snps = self.count_variants_vcf(
+                    vcf_file, variant_type="snps", params=params, cfg=cfg
+                )()
+                snps = len(cp_snps.stdout.splitlines())
+                cp_indels = self.count_variants_vcf(
+                    vcf_file, variant_type="indels", params=params, cfg=cfg
+                )()
+                indels = len(cp_indels.stdout.splitlines())
+                counts: dict[str, Any] = {
+                    "total": total,
+                    "snps": snps,
+                    "indels": indels,
+                }
+                if sample_name:
+                    counts["sample"] = sample_name
+                if loci_summary_or_mosdepth is not None:
+                    callable_mb_data = from_json(Path(loci_summary_or_mosdepth))
+                    callable_mb = callable_mb_data.get("callable_mb", None)
+                    if not callable_mb:
+                        raise ValueError(
+                            f"Missing 'callable_mb' in {loci_summary_or_mosdepth}"
+                        )
+                    callable_mb = float(callable_mb)
+                    if callable_mb == 0:
+                        raise ValueError(
+                            f"Callable megabases is zero in {loci_summary_or_mosdepth}, cannot compute mutational load."  # noqa: E501
+                        )
+                    mutational_load = total / float(callable_mb)
+                    counts["method"] = callable_mb_data.get("method")
+                    counts["callable"] = callable_mb_data.get("callable")
+                    counts["callable_mb"] = callable_mb
+                    counts["mutational_load"] = mutational_load
+                else:
+                    raise NotImplementedError("we need a mosdepth call for that")
+
+                with open(output_json, "w") as f:
+                    json.dump(counts, f, indent=2)
+                return counts
+            except Exception as e:
+                err = PipelineError(
+                    e=e,
+                    phase="RUN (count_variants_post_filter)",
+                )
+                raise err
 
         return __count
 
@@ -733,9 +768,9 @@ class BCFtools(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[vcf],
+            inputs=(vcf,),
             artifacts={"json": output},
-            pres=[filtered, callable_mb],
+            pres=(filtered, callable_mb),
         )
 
     ###########################################################################
@@ -746,7 +781,7 @@ class BCFtools(External):
     def filltags(
         self,
         vcf_element: Element,
-        tags_to_fill: str = None,
+        tags_to_fill: str | None = None,
         *,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
@@ -824,9 +859,9 @@ class BCFtools(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_vcf],
+            inputs=(input_vcf,),
             artifacts=artifacts,
-            pres=[vcf_element],
+            pres=(vcf_element,),
         )
 
     @subroutine
@@ -839,7 +874,7 @@ class BCFtools(External):
         index_off=False,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], None]:
+    ) -> SubroutineIn:
         """
         Return a callable that runs bcftools +fill-tags on the input VCF file.
 
@@ -863,10 +898,11 @@ class BCFtools(External):
         Returns
         -------
         Callable[[], None]
-            A zero-argument callable that executes the bcftools +fill-tags command when called.
+            A zero-argument callable that executes the bcftools +fill-tags command when
+            called.
         """
         input_vcf = Path(input_vcf).absolute()
-        # bcftools +fill-tags /project/incoming/mgp_v5/C57BL_6NJ.mgp.v5.snps.dbSNP142.vcf.gz -- -t AF
+        # bcftools +fill-tags .../C57BL_6NJ.mgp.v5.snps.dbSNP142.vcf.gz -- -t AF
         arguments: list[str] = [
             "+fill-tags",
             "-t",
@@ -877,7 +913,8 @@ class BCFtools(External):
             self.strabs(input_vcf),
         ]
         post = GATK().index_feature_file(output_vcf) if not index_off else None
-        return arguments, [input_vcf, output_vcf], output_vcf, None, post
+        subcommand = "+fill-tags"
+        return arguments, subcommand, [input_vcf], [output_vcf], output_vcf, None, post
 
     ###########################################################################
     # Convenience methods for common workflows
@@ -889,18 +926,15 @@ class BCFtools(External):
         *,
         targets: Element | Path | str | None = None,
         thresholds: HardFilterThresholds | None = None,
-        output_vcf: Path | str | None = None,
         pass_only: bool = True,
         biallelic: bool = True,
         samples: str | list[str] | None = None,
         variant_type: str | None = "snps,indels",
-        tag: PartialElementTag | ElementTag | None = None,
+        tags: Mapping[str, PartialElementTag | ElementTag | None] | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
-        params_view: Params | None = None,
-        params_filter: Params | None = None,
-        cfg_view: ExternalRunConfig | None = None,
-        cfg_filter: ExternalRunConfig | None = None,
+        params: Mapping[str, Params | None] | None = None,
+        cfgs: Mapping[str, ExternalRunConfig | None] | None = None,
     ) -> VcfElement:
         """Run the full hard-filter pipeline on a Mutect2 VCF element.
 
@@ -929,9 +963,9 @@ class BCFtools(External):
             Sample(s) to extract; defaults to ``[called.name]``.
         variant_type : str | None
             Variant type filter passed as ``-v``; e.g. ``"snps,indels"``.
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default
-            naming. If not provided, a default tag will be generated based on
+        tags : Mapping[str, PartialElementTag | ElementTag | None] | None
+            Partial or full Element tags for the output Elements, used for default
+            naming. If not provided, default tags will be generated based on
             the input Element's name, with ``_hardfiltered`` appended.
         outdir : Path | str | None
             Directory for the output VCF file. If not provided, defaults to
@@ -957,7 +991,7 @@ class BCFtools(External):
         vcf = called.vcf
         thresholds = thresholds or HardFilterThresholds()
         outdir = Path(outdir or vcf.parent)
-        samples = samples or [called.name]
+        samples = samples or [called.tag.root]
         view = self.view(
             called,
             targets=targets,
@@ -965,19 +999,24 @@ class BCFtools(External):
             biallelic=biallelic,
             samples=samples,
             variant_type=variant_type,
-            tag=tag,
+            tag=tags.get("view") if tags else None,
             outdir=outdir,
-            params=params_view,
-            cfg=cfg_view,
+            params=params.get("view") if params else None,
+            cfg=cfgs.get("view") if cfgs else None,
         )
 
+        include_expr = (
+            "&&".join([thresholds.as_expression(s) for s in samples])
+            if len(samples) > 1
+            else thresholds.as_expression()
+        )
         filtered = self.filter(
             view,
-            include_expr=thresholds.as_expression(),
-            tag=tag,
+            include_expr=include_expr,
+            tag=tags.get("filter") if tags else PartialElementTag(param="hard"),
             outdir=outdir,
             filename=filename,
-            params=params_filter,
-            cfg=cfg_filter,
+            params=params.get("filter") if params else None,
+            cfg=cfgs.get("filter") if cfgs else None,
         )
         return filtered

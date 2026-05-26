@@ -8,11 +8,10 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Callable, Mapping, Union
 
-from mmalignments.models.elements import Element, element
-from mmalignments.models.tags import ElementTag, Method, State, merge_tag
-from mmalignments.models.tags import Tag
+from mmalignments.models.elements import Element, element, generate_element_key_name
+from mmalignments.models.tags import ElementTag, Method, State, PartialElementTag, from_prior
 
-from ..externals import External, ExternalRunConfig, subroutine
+from ..externals import External, ExternalRunConfig, subroutine, SubroutineIn
 from ..parameters import Params, ParamSet
 
 logger = logging.getLogger(__name__)
@@ -49,7 +48,7 @@ class Bedtools(External):
         primary_binary: str = "bedtools",
         version: str | None = None,
         source: str = "https://github.com/arq5x/bedtools2",
-        parameters: Mapping[str, ParamSet] | ParamSet | None = None,
+        parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None = None,
     ) -> None:
         """Initialize Bedtools wrapper.
 
@@ -69,7 +68,7 @@ class Bedtools(External):
             This will be used for default parameters, validation and
             constructing cli arguments in the ``build_cmd`` function.
         """
-        parameters_file = Path(__file__).parent / "bedtools.json"
+        parameters_file = Path(__file__).parent / f"{Path(__file__).stem}.json"
         parameters = parameters or parameters_file
 
         super().__init__(
@@ -205,7 +204,7 @@ class Bedtools(External):
         self,
         bed_element: Element,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -252,7 +251,7 @@ class Bedtools(External):
         """
         input_bed = bed_element.bed
         root = bed_element.tag.root or bed_element.bed.stem
-        default_tag = ElementTag(
+        tag = ElementTag(
             root=root,
             level=bed_element.tag.level + 1,
             stage=bed_element.tag.stage,
@@ -260,8 +259,7 @@ class Bedtools(External):
             state=State.SORT,
             omics=bed_element.tag.omics,
             ext="bed",
-        )
-        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+        ).merge(tag)
 
         output_bed = self.build_outfile(outdir, filename, tag, input_bed)
         params = params or Params()
@@ -275,14 +273,16 @@ class Bedtools(External):
             cfg=cfg,
         )
         # build element
+        key, name = generate_element_key_name(tag, self.version_name, "sort")
         element = Element(
-            key=f"{tag.default_name}_sorted_{self.version_name}",
+            key=key,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bed],
+            inputs=(input_bed,),
             artifacts={"bed": output_bed},
-            pres=[bed_element],
+            pres=(bed_element,),
+            name=name
         )
         return element
 
@@ -294,7 +294,7 @@ class Bedtools(External):
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """
         Sort a BED file using bedtools sort.
 
@@ -327,7 +327,8 @@ class Bedtools(External):
         """
         # Build command: bedtools sort -i input.bed > output.bed
         arguments = ["sort", "-i", str(input_bed)]
-        return arguments, [output_bed], output_bed, None, None
+        subcommand = "sort"
+        return arguments, subcommand, [input_bed], [output_bed], output_bed, None, None
 
     ###########################################################################
     # Slop (High-level and Low-level wrapper)
@@ -339,7 +340,7 @@ class Bedtools(External):
         bed_element: Element,
         genomesizes: Element,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -391,7 +392,7 @@ class Bedtools(External):
         """
         input_bed = bed_element.bed
         genome_file = genomesizes.sizes
-        default_tag = ElementTag(
+        tag = ElementTag(
             root=bed_element.tag.root or bed_element.bed.stem,
             level=bed_element.tag.level + 1,
             stage=bed_element.tag.stage,
@@ -399,11 +400,9 @@ class Bedtools(External):
             state=State.PADDED,
             omics=bed_element.tag.omics,
             ext="bed",
-        )
-        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+        ).merge(tag)
         output_bed = self.build_outfile(outdir, filename, tag, input_bed)
 
-        print(f"Slop parameters ", self.get_paramset("slop"))
         if slop_bp:
             if slop_bp > 0:
                 params = Params(b=slop_bp, **(params.to_dict() if params else {}))
@@ -423,9 +422,9 @@ class Bedtools(External):
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bed, genome_file],
+            inputs=(input_bed, genome_file),
             artifacts={"bed": output_bed},
-            pres=[bed_element],
+            pres=(bed_element,),
         )
         return element
 
@@ -438,7 +437,7 @@ class Bedtools(External):
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Extend BED intervals using bedtools slop.
 
         Creates a zero-argument callable that extends intervals in the input
@@ -471,8 +470,6 @@ class Bedtools(External):
         ... )
         >>> slop_runner()  # Execute the slop
         """
-        paths = [input_bed, genome_file, output_bed]
-
         # Build command: bedtools slop -i input.bed -g genome -b 100 > output.bed
         arguments = [
             "slop",
@@ -482,7 +479,8 @@ class Bedtools(External):
             self.strabs(genome_file),
         ]
 
-        return arguments, paths, self.abs(output_bed), None, None
+        subcommand = "slop"
+        return arguments, subcommand, [input_bed, genome_file], [self.abs(output_bed)], self.abs(output_bed), None, None
 
     ###########################################################################
     # Merge (High-level and Low-level wrapper)
@@ -493,7 +491,7 @@ class Bedtools(External):
         self,
         bed_element: Element,
         *,
-        tag: Tag | ElementTag | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
@@ -540,7 +538,7 @@ class Bedtools(External):
         >>> merged_elem.run()  # Execute the merge
         """
         input_bed = bed_element.bed
-        default_tag = ElementTag(
+        tag = ElementTag(
             root=bed_element.tag.root or bed_element.bed.stem,
             level=bed_element.tag.level + 1,
             stage=bed_element.tag.stage,
@@ -548,8 +546,7 @@ class Bedtools(External):
             state=State.MERGED,
             omics=bed_element.tag.omics,
             ext="bed",
-        )
-        tag = merge_tag(default_tag, tag) if tag is not None else default_tag
+        ).merge(tag)
         output_bed = self.build_outfile(outdir, filename, tag, input_bed)
         params = params or Params()
         cfg = cfg or ExternalRunConfig()
@@ -561,16 +558,17 @@ class Bedtools(External):
             params=params,
             cfg=cfg,
         )
-        # nuild element
+        # build element
+        key, name = generate_element_key_name(tag, self.version_name, "merge")
         element = Element(
-            key=f"{tag.default_name}_merged_{self.version_name}",
+            key=key,
             run=runner,
             tag=tag,
             determinants=determinants,
-            inputs=[input_bed],
+            inputs=(input_bed,),
             artifacts={"bed": output_bed},
-            pres=[bed_element],
-            name=None,  # name=f"{input_element.name}.merged",
+            pres=(bed_element,),
+            name=name,
         )
         return element
 
@@ -582,7 +580,7 @@ class Bedtools(External):
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Callable[[], CompletedProcess]:
+    ) -> SubroutineIn:
         """Merge overlapping intervals using bedtools merge.
 
         Creates a zero-argument callable that merges overlapping intervals
@@ -614,7 +612,8 @@ class Bedtools(External):
         """
         # Build command: bedtools merge -i input.bed > output.bed
         arguments = ["merge", "-i", str(input_bed)]
-        return arguments, [output_bed], output_bed, None, None
+        subcommand = "merge"
+        return arguments, subcommand, [input_bed], [output_bed], output_bed, None, None
 
     ###########################################################################
     # Conevenience methods for common workflows
@@ -745,7 +744,7 @@ class Bedtools(External):
             slop_bp=slop_bp,
         )
         tag_merge, _, _ = self.get_tag_params_cfg(tags, parameters, cfgs, "merge")
-        tag_sort = Tag(tag_sort, state=State.PADDED)
+        tag_sort = from_prior(tag_sort, None, state=State.PADDED)
         merged_element = self.mergesort(
             bed_element=slopped,
             outdir=outdir,
