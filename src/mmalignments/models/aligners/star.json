@@ -1,0 +1,333 @@
+{
+  "genomeGenerate": {
+    "_thread_spec": {
+      "flag": "runThreadN",
+      "max_threads": null,
+      "fraction": 1.0,
+      "multi": true
+    },
+    "runThreadN": {
+      "flag": "--runThreadN",
+      "dtype": ["int"],
+      "default": 1,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Number of threads to run STAR."
+    },
+    "genomeSAindexNbases": {
+      "flag": "--genomeSAindexNbases",
+      "dtype": ["int"],
+      "default": 14,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Length (bases) of the SA pre-indexing string. Scale down to min(14, log2(GenomeLength)/2 - 1) for small genomes."
+    },
+    "genomeChrBinNbits": {
+      "flag": "--genomeChrBinNbits",
+      "dtype": ["int"],
+      "default": 18,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "log2(chrBin) where chrBin is the size of the bins for genome storage."
+    },
+    "genomeSAsparseD": {
+      "flag": "--genomeSAsparseD",
+      "dtype": ["int"],
+      "default": 1,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Suffix array sparsity (distance between indices). Larger values decrease RAM at the cost of speed."
+    },
+    "sjdbGTFfile": {
+      "flag": "--sjdbGTFfile",
+      "dtype": ["str"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Path to the GTF file with annotations."
+    },
+    "sjdbOverhang": {
+      "flag": "--sjdbOverhang",
+      "dtype": ["int"],
+      "default": 100,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Length of donor/acceptor sequence on each side of junctions. Ideally = (read_length - 1)."
+    },
+    "limitGenomeGenerateRAM": {
+      "flag": "--limitGenomeGenerateRAM",
+      "dtype": ["int"],
+      "default": 31000000000,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Maximum available RAM (bytes) for genome generation."
+    }
+  },
+  "alignReads": {
+    "_thread_spec": {
+      "flag": "runThreadN",
+      "max_threads": null,
+      "fraction": 1.0,
+      "multi": true
+    },
+    "runThreadN": {
+      "flag": "--runThreadN",
+      "dtype": ["int"],
+      "default": 1,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Number of threads to run STAR."
+    },
+    "outSAMtype": {
+      "flag": "--outSAMtype",
+      "dtype": ["str"],
+      "default": "BAM SortedByCoordinate",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Type of SAM/BAM output. E.g. 'BAM SortedByCoordinate' or 'BAM Unsorted'."
+    },
+    "outSAMattributes": {
+      "flag": "--outSAMattributes",
+      "dtype": ["str"],
+      "default": "NH HI AS NM",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "SAM attributes to include. Preset 'Standard'=NH HI AS nM, 'All'=NH HI AS nM NM MD jM jI MC ch."
+    },
+    "outSAMattrRGline": {
+      "flag": "--outSAMattrRGline",
+      "dtype": ["str"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "SAM/BAM read group line. Must start with 'ID:', e.g. 'ID:foo SM:bar'."
+    },
+    "readFilesCommand": {
+      "flag": "--readFilesCommand",
+      "dtype": ["str"],
+      "default": null,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Command to decompress reads, e.g. 'zcat' for .gz files."
+    },
+    "outFilterMultimapNmax": {
+      "flag": "--outFilterMultimapNmax",
+      "dtype": ["int"],
+      "default": 10,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Maximum number of loci the read is allowed to map to."
+    },
+    "outFilterMismatchNmax": {
+      "flag": "--outFilterMismatchNmax",
+      "dtype": ["int"],
+      "default": 10,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Alignment will be output only if it has no more mismatches than this value."
+    },
+    "outFilterMismatchNoverReadLmax": {
+      "flag": "--outFilterMismatchNoverReadLmax",
+      "dtype": ["float"],
+      "default": 1.0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Alignment output only if ratio of mismatches to read length <= this value."
+    },
+    "alignIntronMin": {
+      "flag": "--alignIntronMin",
+      "dtype": ["int"],
+      "default": 21,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum intron size."
+    },
+    "alignIntronMax": {
+      "flag": "--alignIntronMax",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Maximum intron size. 0 = determined automatically."
+    },
+    "alignMatesGapMax": {
+      "flag": "--alignMatesGapMax",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Maximum gap between two mates. 0 = determined automatically."
+    },
+    "alignSJoverhangMin": {
+      "flag": "--alignSJoverhangMin",
+      "dtype": ["int"],
+      "default": 5,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum overhang for unannotated spliced alignments."
+    },
+    "alignSJDBoverhangMin": {
+      "flag": "--alignSJDBoverhangMin",
+      "dtype": ["int"],
+      "default": 3,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum overhang for annotated (sjdb) spliced alignments."
+    },
+    "alignEndsType": {
+      "flag": "--alignEndsType",
+      "dtype": ["str"],
+      "default": "Local",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Type of read ends alignment: Local, EndToEnd, Extend5pOfRead1, Extend5pOfReads12."
+    },
+    "sjdbGTFfile": {
+      "flag": "--sjdbGTFfile",
+      "dtype": ["str"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Path to the GTF file with annotations (on-the-fly splice junction insertion)."
+    },
+    "sjdbOverhang": {
+      "flag": "--sjdbOverhang",
+      "dtype": ["int"],
+      "default": 100,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Donor/acceptor overhang length. Ideally = (read_length - 1)."
+    },
+    "quantMode": {
+      "flag": "--quantMode",
+      "dtype": ["str"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Types of quantification: 'TranscriptomeSAM', 'GeneCounts', or '-' for none."
+    },
+    "twopassMode": {
+      "flag": "--twopassMode",
+      "dtype": ["str"],
+      "default": "None",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "2-pass mapping mode: None (1-pass) or Basic (2-pass with on-the-fly junction insertion)."
+    },
+    "limitBAMsortRAM": {
+      "flag": "--limitBAMsortRAM",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Maximum RAM (bytes) for BAM sorting. 0 = genome index size."
+    },
+    "outBAMsortingThreadN": {
+      "flag": "--outBAMsortingThreadN",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": false,
+      "render": "value",
+      "description": "Number of threads for BAM sorting. 0 = min(6, runThreadN)."
+    },
+    "outReadsUnmapped": {
+      "flag": "--outReadsUnmapped",
+      "dtype": ["str"],
+      "default": "None",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Output of unmapped reads: 'None' or 'Fastx' (separate fasta/fastq files)."
+    },
+    "chimSegmentMin": {
+      "flag": "--chimSegmentMin",
+      "dtype": ["int"],
+      "default": 0,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Minimum chimeric segment length. 0 = no chimeric output."
+    },
+    "outWigType": {
+      "flag": "--outWigType",
+      "dtype": ["str"],
+      "default": "None",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Type of wiggle/bedGraph output. Requires sorted BAM. E.g. 'bedGraph' or 'wiggle'."
+    },
+    "soloType": {
+      "flag": "--soloType",
+      "dtype": ["str"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Type of single-cell RNA-seq: CB_UMI_Simple, CB_UMI_Complex, CB_samTagOut, SmartSeq."
+    },
+    "soloCBwhitelist": {
+      "flag": "--soloCBwhitelist",
+      "dtype": ["str"],
+      "default": null,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "File with whitelist of cell barcodes."
+    },
+    "soloCBlen": {
+      "flag": "--soloCBlen",
+      "dtype": ["int"],
+      "default": 16,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Cell barcode length."
+    },
+    "soloUMIlen": {
+      "flag": "--soloUMIlen",
+      "dtype": ["int"],
+      "default": 10,
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "UMI length."
+    },
+    "soloFeatures": {
+      "flag": "--soloFeatures",
+      "dtype": ["str"],
+      "default": "Gene",
+      "required": false,
+      "affects_output": true,
+      "render": "value",
+      "description": "Genomic features for UMI counts per Cell Barcode: Gene, SJ, GeneFull, etc."
+    }
+  }
+}

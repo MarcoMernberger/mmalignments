@@ -12,40 +12,84 @@ from subprocess import CompletedProcess
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, ParamSpec, TypeVar, cast, overload
 from pandas import DataFrame
+from dataclass import dataclass
 import pandas as pd
 
 from mmalignments.models.data import Pairing
 from mmalignments.services.io import parents, paths_exists
-from mmalignments.services.io import parents, paths_exists
+from mmalignments.services.dependencies import function_hash, file_sig, stable_hash, collect_code_dependency
 
 from .registry import current_element_registry
-from .tags import ElementTag, Method, PartialElementTag, Stage, State
-
-
-def file_sig(p: Path, head_bytes: int = 65_536) -> dict[str, Any]:
-    if not p.exists():
-        return {"path": str(p), "missing": True}
-    st = p.stat()
-    # Content-hash of first 64kb plus file size for speed
-    h = hashlib.sha256()
-    with p.open("rb") as f:
-        h.update(f.read(head_bytes))
-    return {
-        "path": str(p),
-        "size": st.st_size,
-        "head_sha256": h.hexdigest(),
-    }
+from .tags import ElementTag, Method, PartialElementTag, Stage, State, Omics
 
 
 
-def stable_hash(obj: Any) -> str:
-    payload = json.dumps(obj, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+###############################################################################
+# External Wrapper
+###############################################################################
+
+@dataclass(frozen=True)
+class Artifact:
+    name: str
+    kind: str  # "file" | "value"
+    value: Any
+
+    def stable_repr(self) -> str:
+        if self.kind == "file":
+            return self.file_hash(Path(self.value))
+        return self.value_repr()
+
+    def file_hash(self, path: Path) -> str:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def value_repr(self) -> str:
+        return str(self.value)
 
 
-def short_hash(signature: str, n: int = 8) -> str:
-    return signature[:n]
+class Runnable:
+    def __init__(
+        self,
+        fn: Callable[[], CompletedProcess | None],
+        cmd: list[str],
+        display: str,
+    ):
+        self._fn = fn
+        self.command = cmd
+        self.command_display = display
+        self.last_result: CompletedProcess | None = None
+        self._fingerprint = self._compute_fingerprint()
 
+    @property
+    def fingerprint(self) -> str:
+        return self._fingerprint
+
+    def __call__(self) -> CompletedProcess | None:
+        result = self._fn()
+        self.last_result = result
+        return result
+
+    def __name__(self) -> str:
+        return getattr(self._fn, "__name__", repr(self._fn))
+
+    def _compute_fingerprint(self) -> str:
+        all_fns = collect_code_dependency(self._fn)
+
+        safe_fns = (fn for fn in all_fns if fn is not None)
+
+        hashes = [function_hash(fn) for fn in safe_fns]
+
+        return hashlib.sha256(
+            "|".join(hashes).encode()
+        ).hexdigest()
+
+
+###############################################################################
+# Elements
+###############################################################################
 
 class ValidationPolicy(Enum):
     CHECK = "check"  # default behaviour
@@ -193,6 +237,9 @@ class Element:
             "artifacts": self._artifact_sig(),
             "pre_sigs": sorted([pre.signature for pre in self.pres]),
         }
+        if isinstance(self.run, Runnable):
+            sig_data["run_hash"] = self.run.fingerprint
+
         return sig_data
 
     def _compute_signature(self) -> str:
@@ -458,14 +505,27 @@ class FilesElement(Element):
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
         ext: str | None = None,
+        is_prefix: bool = False,
+        pres: tuple[Element, ...] | None = None,
     ):
 
-        paths = (
-            path
-            if isinstance(path, Mapping)
-            else {Path(path).stem: Path(path).absolute()}
-        )
+        if is_prefix:
+            paths = {}
+            p = Path(path)
+            file_dir = p.parent
+            prefix = p.stem
+            for p in file_dir.iterdir():
+                if p.stem.startswith(prefix):
+                    paths[p.stem] = p.absolute()
+        else:
+            paths = (
+                path
+                if isinstance(path, Mapping)
+                else {Path(path).stem: Path(path).absolute()}
+            )
+        print("paths:", paths)
         artifacts = {k: Path(v).absolute() for k, v in paths.items()}
+        print("artifacts:", artifacts)
         first = artifacts.values().__iter__().__next__()
         root = root or first.stem
         ext = ext or first.suffix.lstrip(".")
@@ -479,13 +539,15 @@ class FilesElement(Element):
             ext=ext,
         ).merge(tag)
 
-        runner = paths_exists(
-            *paths.values()
+        runner = Runnable(
+            paths_exists(
+                *paths.values()
+            ),
+            cmd=["check_exists", *paths.values()],
+            display="check_exists",
         )  # no-op runner, validation is done by skip logic
-        runner.threads = 1
-        runner.command = [f"check_exists({artifacts.values()})"]  # type: ignore[attr-defined]
         key = (
-            f"{tag.default_name}_files_{'::'.join(str(p) for p in artifacts.values())}"
+            f"{tag.default_name}::{'::'.join(str(p) for p in artifacts.values())}"
         )
         super().__init__(
             key=key,
@@ -494,6 +556,7 @@ class FilesElement(Element):
             validator=self.validate,
             inputs=tuple(artifacts.values()),
             artifacts=artifacts,
+            pres=pres,
         )
         self.ext = tag.ext
 
@@ -552,26 +615,42 @@ class Sample(FilesElement):
         *,
         root: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
-        name: str | None = None,
+        is_prefix: bool = False,
+        pres: tuple[Element, ...] | None = None,
+
     ):
-        super().__init__(path, root=root, tag=tag)
+        super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
 
-
+    
 class NextGenSampleElement(Sample):
 
     def __init__(
         self,
         path: Path | str | Mapping[str, Path | str],
         *,
-        root: str,
+        root: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         read_group: str | None = None,
         reverse_reads: bool = False,
         cache_dir: Path | None = None,
         result_dir: Path | None = None,
-        name: str | None = None,
+        is_prefix: bool = False,
+        pres: tuple[Element, ...] | None = None,
     ):
-        super().__init__(path, root=root, tag=tag)
+        if isinstance(path, (str, Path)):
+            root = root or Path(path).stem
+        else:
+            first = next(iter(path.values()))
+            root = root or Path(first).stem       
+        tag = ElementTag(
+            root=root,
+            level=0,
+            omics=Omics.DNA,
+            stage=Stage.INPUT,
+            method=Method.CHECK,
+            state=State.RAW,
+        ).merge(tag)
+        super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
         self.reverse_reads = reverse_reads
         self.read_group = read_group
         self.cache_dir = cache_dir or Path("cache") / "samples" / self.name
@@ -579,6 +658,7 @@ class NextGenSampleElement(Sample):
         self.pairing: Pairing = (
             Pairing.PAIRED if len(self.artifacts) > 1 else Pairing.SINGLE
         )
+        self.name = self.tag.default_name or root
 
     @property
     def input_files(self) -> list[Path]:
@@ -739,7 +819,6 @@ class TableElement(Element):
             artifacts["tsv"] = self._tsv
         if self._parquet:
             artifacts["parquet"] = self._parquet
-        print(default_root, root, tag)
         root = root or default_root
         tag = ElementTag(
             root=root,

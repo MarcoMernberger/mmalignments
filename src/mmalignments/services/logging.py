@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+import inspect
 from datetime import datetime
 from logging import FileHandler, Logger
 from pathlib import Path
@@ -357,3 +358,30 @@ def safe_log_error(logger, msg: str):
             logger.error(msg)
     except Exception:
         print(f"[LOGGER FAILED]\n{msg}\n")
+
+
+
+def current_call_to_string() -> str:
+    frame = inspect.currentframe().f_back
+
+    func_name = frame.f_code.co_name
+
+    arg_info = inspect.getargvalues(frame)
+
+    parts = []
+
+    for arg in arg_info.args:
+        value = arg_info.locals[arg]
+        parts.append(f"{arg}={value!r}")
+
+    # *args
+    if arg_info.varargs:
+        values = arg_info.locals[arg_info.varargs]
+        parts.extend(repr(v) for v in values)
+
+    # **kwargs
+    if arg_info.keywords:
+        kwargs = arg_info.locals[arg_info.keywords]
+        parts.extend(f"{k}={v!r}" for k, v in kwargs.items())
+
+    return f"{func_name}({', '.join(parts)})"

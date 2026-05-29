@@ -53,7 +53,7 @@ from mmalignments.services.errors import (
 from mmalignments.services.io import parents
 from mmalignments.services.logging import ExternalLogger
 
-from .elements import ElementTag, generate_element_key_name
+from .elements import ElementTag, generate_element_key_name, Runnable
 
 logger = logging.getLogger(__name__)
 
@@ -129,29 +129,6 @@ class ExternalRunConfig:
             raise ValueError(f"log_dir must be a directory: {type(self.log_dir)}")
         if self.threads < 1:
             raise ValueError("threads must be a positive integer")
-
-
-###############################################################################
-# External Wrapper
-###############################################################################
-
-
-class Runnable:
-    def __init__(
-        self, fn: Callable[[], CompletedProcess | None], cmd: list[str], display: str
-    ):
-        self._fn = fn
-        self.command = cmd
-        self.command_display = display
-        self.last_result: CompletedProcess | None = None
-
-    def __call__(self) -> CompletedProcess | None:
-        result = self._fn()
-        self.last_result = result
-        return result
-
-    def __name__(self) -> str:
-        return self._fn.__name__
 
 
 ###############################################################################

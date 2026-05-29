@@ -176,7 +176,6 @@ class Executor:
             else all_keys - self._baseline_keys  # noqa: E501
         )
         targets = [e for k in new_keys if (e := self.registry.get(k)) is not None]
-        print("targets", len(targets), targets)
         if log_run_only:
             self.log(
                 None,

@@ -47,13 +47,11 @@ class State(str, Enum):
     LOCI = "loci"
     METRIC = "metric"
     REPORT = "report"
-<<<<<<< HEAD
     DEMULTIPLEX = "demultiplex"
-=======
     DIFF = "diff"
     CLUSTER = "cluster"
     PCA = "pca"
->>>>>>> f2698d16def7b2b3929deccf3167d87159bc2420
+    CONFIG = "config"
 
 
 class Method(str, Enum):
@@ -73,14 +71,12 @@ class Method(str, Enum):
     CHECK = "check"
     BCFTOOLS = "bcftools"
     CUSTOM = "custom"  # for custom python functions
-<<<<<<< HEAD
     FASTQGRAB = "fastqgrab"
-=======
     EDGER = "edger"
     CLUSTERING = "clustering"
     MAGECK = "mageck"
->>>>>>> f2698d16def7b2b3929deccf3167d87159bc2420
-
+    MMFQCOUNT = "mmfqcount"
+    
 
 def level(level: int) -> str:
     return f"S{level:02d}"
