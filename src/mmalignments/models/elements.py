@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import traceback
+import pandas as pd
 from numpy import ndarray
 from pathlib import Path
 from enum import Enum
@@ -10,14 +11,21 @@ from functools import cached_property, wraps
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, ParamSpec, TypeVar, cast, overload
+from typing import Any, Callable, Iterable, Mapping, ParamSpec, TypeVar, cast, overload, Literal
 from pandas import DataFrame
-from dataclass import dataclass
-import pandas as pd
-
+from dataclasses import dataclass, field
+from mmalignments.services.logging import current_call_to_string
 from mmalignments.models.data import Pairing
 from mmalignments.services.io import parents, paths_exists
-from mmalignments.services.dependencies import function_hash, file_sig, stable_hash, collect_code_dependency
+from mmalignments.services.dependencies import (
+    function_hash, 
+    file_sig, 
+    stable_hash, 
+    collect_code_dependency, 
+    file_signature, 
+    DynamicValue
+)
+from abc import ABC
 
 from .registry import current_element_registry
 from .tags import ElementTag, Method, PartialElementTag, Stage, State, Omics
@@ -28,38 +36,132 @@ from .tags import ElementTag, Method, PartialElementTag, Stage, State, Omics
 # External Wrapper
 ###############################################################################
 
+ArtifactType = Literal["file", "value"]
+ArtifactLifeTime = Literal["persistent", "transient", "ephemeral"]
+
+class Artifact(ABC):
+    def resolve(self) -> Any:
+        raise NotImplementedError
+
+    def signature(self) -> str:
+        raise NotImplementedError
+
+
 @dataclass(frozen=True)
-class Artifact:
-    name: str
-    kind: str  # "file" | "value"
+class FileArtifact(Artifact):
+    path: Path
+
+    def resolve(self) -> Path:
+        return self.path
+
+    def signature(self) -> str:
+        return file_signature(self.path)
+
+@dataclass(frozen=True)
+class ValueArtifact(Artifact):
     value: Any
 
-    def stable_repr(self) -> str:
-        if self.kind == "file":
-            return self.file_hash(Path(self.value))
-        return self.value_repr()
+    def resolve(self) -> Any:
+        return self.value
 
-    def file_hash(self, path: Path) -> str:
-        h = hashlib.sha256()
-        with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
+    def signature(self) -> str:
+        return stable_hash(self.value)
+    
+@dataclass(frozen=True)
+class DynamicArtifact(Artifact):
+    value: DynamicValue
 
-    def value_repr(self) -> str:
-        return str(self.value)
+    def resolve(self) -> Any:
+        return self.value.resolve()
+
+    def signature(self) -> str:
+        return self.value.signature
+
+@dataclass(frozen=True)
+class TransientArtifact(Artifact):
+    value: Any
+
+    def resolve(self) -> Any:
+        return self.value
+
+    def signature(self) -> str:
+        return "transient" # transient artifacts are not considered for signature
+
+# @dataclass(frozen=True)
+# class Artifact:
+#     kind: Literal["file", "value", "dynamic"]
+#     lifetime: Literal["persistent", "transient", "ephemeral"]
+#     value: str | int | float | bool | Path | None | DynamicValue
+
+#     def resolve(self) -> Any:
+#         if isinstance(self.value, DynamicValue):
+#             return self.value.resolve()
+#         return self.value
+
+#     @cached_property
+#     def signature(self) -> str:
+#         if self.kind == "dynamic":
+#             if isinstance(self.value, DynamicValue):
+#                 return self.value.signature()
+#             else:
+#                 raise TypeError(f"Expected DynamicValue for dynamic artifact, got {type(self.value)}")
+#         elif self.kind == "file":
+#             if isinstance(self.value, Path):
+#                 return file_signature(self.value)
+#             else:
+#                 return file_signature(Path(self.value))
+#         else:
+#             return stable_hash(self.value)
+
+    # def stable_repr(self) -> str:  # for signature hashing
+    #     if self.kind == "file":
+    #         if isinstance(self.value, Path):
+    #             return file_signature(self.value)
+    #         else:
+    #             return file_signature(Path(self.value))
+    #     # elif self.kind == "dynamic":
+    #     #     if isinstance(self.value, DynamicValue):
+    #     #         return self.__dynamic_sig()
+    #     #     else:
+    #     #         raise TypeError(f"Expected DynamicValue for dynamic artifact, got {type(self.value)}")
+    #     else:
+            
+    #         return str(self.value)
+
+    # def __file_hash(self, path: Path) -> str:
+    #     h = hashlib.sha256()
+    #     with path.open("rb") as f:
+    #         for chunk in iter(lambda: f.read(1024 * 1024), b""):
+    #             h.update(chunk)
+    #     return h.hexdigest()
+
+# @dataclass(frozen=True)
+# class Artifact:
+#     name: str
+#     value: Any
+#     kind: ArtifactType = "file"
+#     lifetime: ArtifactLifeTime = "persistent"
+
+#     def stable_repr(self) -> str:
+#         if self.kind == "file":
+#             return self.file_hash(Path(self.value))
+#         return self.value_repr()
+
+
+#     def value_repr(self) -> str:
+#         return str(self.value)
 
 
 class Runnable:
     def __init__(
         self,
         fn: Callable[[], CompletedProcess | None],
-        cmd: list[str],
-        display: str,
+        cmd: list[str] | None = None,
+        display: str | None = None,
     ):
         self._fn = fn
-        self.command = cmd
         self.command_display = display
+        self.command = cmd or [display]
         self.last_result: CompletedProcess | None = None
         self._fingerprint = self._compute_fingerprint()
 
@@ -87,6 +189,19 @@ class Runnable:
         ).hexdigest()
 
 
+@dataclass(frozen=True)
+class CallSpec:
+    path: tuple[str, ...]
+    args: tuple[Any, ...] = field(default_factory=tuple)
+    kwargs: dict[str, Any] = field(default_factory=dict)
+
+    def render(self) -> str:
+        callargs = ", ".join(repr(a) for a in self.args)
+        callargs += ", ".join(
+            f"{k}={repr(v)}" for k, v in self.kwargs.items()
+        )
+        return f"{'.'.join(self.path)}({callargs})"
+    
 ###############################################################################
 # Elements
 ###############################################################################
@@ -247,6 +362,7 @@ class Element:
             return stable_hash(self.sig_data())
         except Exception as e:
             print(e)
+            print(self.sig_data())
             raise RuntimeError(f"Failed to compute signature for {self.key!r}")
 
     def print_sig_data(self) -> None:
@@ -282,17 +398,41 @@ class Element:
     def _artifact_sig(self) -> dict[str, Any]:
         sig: dict[str, Any] = {}
         for k, v in sorted(self.artifacts.items()):
+            if isinstance(v, TransientArtifact):
+                continue
             if isinstance(v, Path):
                 sig[k] = str(v)
             elif isinstance(v, (str, int, float, bool)) or v is None:
                 sig[k] = v
+            elif isinstance(v, Artifact):
+                sig[k] = v.signature()
             else:
                 raise TypeError(
                     f"artifact '{k}' has unsupported type for signature: {type(v)}"
                 )
         return sig
 
-    def skip(self, cached_signature: str | None = None) -> tuple[bool, str]:
+    def _explain_signature_diff(self, cached_sig_data: dict[str, Any] | None) -> str:
+        """Compare current sig_data against a previously stored one and return
+        a human-readable diff.  When *cached_sig_data* is ``None`` or the two
+        dicts share no keys the method falls back to a simple mismatch message.
+        """
+        current = self.sig_data()
+        if not cached_sig_data:
+            return "Cached signature does not match (no cached sig_data available)"
+        lines: list[str] = []
+        all_keys = sorted(set(current) | set(cached_sig_data))
+        for k in all_keys:
+            old_v = cached_sig_data.get(k, "<missing>")
+            new_v = current.get(k, "<missing>")
+            if stable_hash(old_v) != stable_hash(new_v):
+                lines.append(f"  {k}: {old_v!r} → {new_v!r}")
+        if lines:
+            return "Signature mismatch in:\n" + "\n".join(lines)
+        # hashes of individual keys matched but overall hash differs (ordering/encoding)
+        return "Cached signature does not match (unknown diff)"
+
+    def skip(self, cached_signature: str | None = None, cached_sig_data: dict[str, Any] | None = None) -> tuple[bool, str]:
         # TODO turn this into Validation Policy
         if self.validation_policy == ValidationPolicy.FORCE_RUN:
             return False, "Validation policy forces run"
@@ -304,7 +444,7 @@ class Element:
             return False, "First run"
 
         if cached_signature != self.signature:
-            return False, "Cached signature does not match"
+            return False, self._explain_signature_diff(cached_sig_data)
 
         check_output, reason = self.outputs_ok()
         if not check_output:
@@ -326,17 +466,14 @@ class Element:
 
     def describe(self) -> str:
         artifactlist = [f"{k}: {v}" for k, v in self.artifacts.items()]
-        siglist = [f"{k}: {v}" for k, v in self.sig_data().items()]
         return (
             f"{self.__class__.__name__}:\n"
             f"  key:          {self.key}\n"
             f"  threads:      {self.threads}\n"
-            f"  signature:    {self.signature}\n"
             f"  determinants: {', '.join(self.determinants)}\n"
             f"  inputs:       {[str(p) for p in self.inputs]}\n"
             f"  artifacts:    {{ {', '.join(artifactlist)}}}\n"
-            f"  pres:         {[p.key for p in self.pres]}"
-            f"  sigdata:      {{ {', '.join(siglist)}}}\n"
+            f"  pres:         {[p.key for p in self.pres]}\n"
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -523,9 +660,7 @@ class FilesElement(Element):
                 if isinstance(path, Mapping)
                 else {Path(path).stem: Path(path).absolute()}
             )
-        print("paths:", paths)
         artifacts = {k: Path(v).absolute() for k, v in paths.items()}
-        print("artifacts:", artifacts)
         first = artifacts.values().__iter__().__next__()
         root = root or first.stem
         ext = ext or first.suffix.lstrip(".")
@@ -543,8 +678,7 @@ class FilesElement(Element):
             paths_exists(
                 *paths.values()
             ),
-            cmd=["check_exists", *paths.values()],
-            display="check_exists",
+            display=CallSpec(path=("io", "paths_exists"),args=tuple(paths.values())).render(),
         )  # no-op runner, validation is done by skip logic
         key = (
             f"{tag.default_name}::{'::'.join(str(p) for p in artifacts.values())}"
@@ -594,6 +728,7 @@ class FilesElement(Element):
 
 class FileElement(FilesElement):
 
+
     def __init__(
         self,
         filepath: Path | str,
@@ -602,10 +737,13 @@ class FileElement(FilesElement):
         root: str | None = None,
     ):
         path = Path(filepath).absolute()
-        ext = path.suffix.lstrip(".")
-        by_suffix = {ext: path}
+        self.ext = path.suffix.lstrip(".")
+        by_suffix = {self.ext: path}
         super().__init__(by_suffix, root=root, tag=tag)
 
+    @property
+    def file(self) -> Path:
+        return self.artifacts[self.ext]
 
 class Sample(FilesElement):
 
@@ -687,6 +825,10 @@ def sample_fastqs(
         return r1, r2, name, rg
 
 
+@element
+def register(element: Element):
+    return element
+
 class TableElement(Element):
     """An Element that produces a TSV (for humans) and a Parquet file (for the pipeline).
 
@@ -758,7 +900,7 @@ class TableElement(Element):
     def __init__(
         self,
         key: str,
-        run: Callable[[], CompletedProcess] | Path | str | None = None,
+        run: Runnable | Callable[[], CompletedProcess] | Path | str | None = None,
         *,
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
@@ -768,6 +910,7 @@ class TableElement(Element):
         determinants: tuple | None = None,
         inputs: tuple[Path, ...] | None = None,
         pres: tuple[Element, ...] | None = None,
+        artifacts: Mapping[str, Any] | None = None,
         name: str | None = None,
         index: str | None = None,
     ) -> None:
@@ -814,7 +957,7 @@ class TableElement(Element):
         self.index_column = index
         self.column_roles: dict[str, str] = dict(column_roles or {})
 
-        artifacts: dict[str, Any] = {}
+        artifacts: dict[str, Any] = artifacts or {}
         if self._tsv:
             artifacts["tsv"] = self._tsv
         if self._parquet:
@@ -863,6 +1006,10 @@ class TableElement(Element):
         """Return the name of the DataFrame index column."""
         return self.df.index.name
 
+    @property
+    def file(self) -> Path:
+        return self.parquet if self._parquet is not None else self.tsv
+    
     # ------------------------------------------------------------------
     # column_roles helpers
     # ------------------------------------------------------------------
@@ -1410,7 +1557,7 @@ def generate_element_key_name(
     tuple[str, str]
         The generated element key.
     """
-    parts = [tag.default_name, tool_name]
+    parts = [tag.default_name]
     if subcommand:
         parts.append(subcommand)
     short = "_".join(parts)
@@ -1431,10 +1578,10 @@ def explain_signature_diff(
     store: dict[str, Any],
 ) -> tuple[bool, str]:
     """
-    Vergleicht die sig_data eines Elements mit dem gespeicherten Eintrag.
+    Compares the sig_data of an Element with the stored entry.
 
-    Returns True wenn identisch, False wenn unterschiedlich.
-    Gibt bei Unterschieden eine detaillierte Erklärung aus.
+    Returns True if identical, False if different.
+    Provides a detailed explanation in case of differences.
     """
     key = element.key
     current = element.sig_data()
@@ -1507,7 +1654,7 @@ def explain_signature_diff(
             detail_lines.append(f"    only in stored:  {sorted(only_stored)}")
         diffs.append("\n".join(detail_lines))
 
-    # --- Ergebnis ---
+    # --- Result ---
     if not diffs:
         result = True
         msg = f"[✓] No differences in sig_data for {key!r}"

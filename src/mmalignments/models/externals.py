@@ -46,6 +46,7 @@ from mmalignments.models.parameters import (
 from mmalignments.models.resources import (
     ResourceConfig,  # type: ignore[import]
     current_resources,
+    current_tool_log_dir,
 )
 from mmalignments.services.errors import (
     PipelineError,
@@ -566,16 +567,18 @@ class External:
     ) -> Path:
         """Determine the log directory based on the configuration.
 
-        Parameters
-        ----------
-        cfg : ExternalRunConfig
-            Configuration for the run, which may specify log_dir or cwd.
-
-        Returns
-        -------
-        Path
-            The directory where logs should be stored.
+        Priority:
+        1. ``cfg.log_dir`` (explicitly set on the run config)
+        2. The Executor's ``tool_log_dir`` ContextVar (``cache/.run/logs/tools``)
+        3. ``self.folder / ".logs"`` when a tool folder is set
+        4. Output-path-adjacent ``.logs`` sub-directory
+        5. ``cwd / .logs`` fallback
         """
+        if cfg.log_dir is not None:
+            return Path(cfg.log_dir)
+        ctx = current_tool_log_dir()
+        if ctx is not None:
+            return ctx
         current = Path.cwd().resolve()
         fallback = current / ".logs"
         if self.folder:

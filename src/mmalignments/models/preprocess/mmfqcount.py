@@ -27,12 +27,14 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import numpy as np
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Callable
 
 from mmalignments.models.elements import (
     Element,
     NextGenSampleElement,
+    TableElement,
     element,
 )
 from mmalignments.models.parameters import (
@@ -52,6 +54,7 @@ from mmalignments.models.tags import (
     State,
     from_prior,
 )
+from mmalignments.models.dependency import function_hash
 from ..externals import External, ExternalRunConfig, Runnable, SubroutineIn, subroutine
 
 logger = logging.getLogger(__name__)
@@ -62,101 +65,49 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _build_param_registry() -> ParamRegistry:
-    """Construct the ParamRegistry for mmfqcount from the known stable CLI.
+    """Parameter registry for mmfqcount.
 
-    Parameters are read directly from the tool's --help output structure, which
-    is stable because we maintain the Rust source.  This avoids the JSON
-    indirection used for third-party tools like GATK.
+    Defined here in Python because we own and maintain the Rust source —
+    the CLI is stable and there is no need to parse --help output or maintain
+    a separate JSON file.  If the CLI ever grows new flags, add them here.
+
+    count subcommand
+    ----------------
+    --trim-start   str   Trim read from the first occurrence of this k-mer (inclusive).
+    --trim-stop    str   Trim read up to (exclusive) the last occurrence of this k-mer.
+    --trim-length  int   Keep at most this many bases after adapter trimming.
+    --split-by     str   Split counts by this tag in read names (e.g. "sgRNAid").
+
+    match subcommand
+    ----------------
+    --seq-col      str   Column holding the R1 sequence.   default: "Sequence"
+    --r2-col       str   Column holding the R2 sequence (paired mode).
+    --id-col       str   Column holding the sequence identifier.  default: "Name"
     """
-
-    def _spec(
-        name: str,
-        flag: str,
-        dtype: type,
-        *,
-        required: bool = False,
-        default=None,
-        affects_output: bool = True,
-        description: str = "",
-    ) -> ParamSpec:
-        return ParamSpec(
-            name=name,
-            flag=flag,
-            dtype=dtype,
-            required=required,
-            default=default,
-            affects_output=affects_output,
-            description=description,
-            render=render_value,
-        )
-
-    # ── count subcommand ──────────────────────────────────────────────────
-    count_specs = {
-        "trim_start": _spec(
-            "trim_start",
-            "--trim-start",
-            str,
-            description=(
-                "Trim read from the first occurrence of this k-mer (inclusive). "
-                "Reads without the k-mer are discarded."
-            ),
-        ),
-        "trim_stop": _spec(
-            "trim_stop",
-            "--trim-stop",
-            str,
-            description=(
-                "Trim read up to (exclusive) the last occurrence of this k-mer."
-            ),
-        ),
-        "trim_length": _spec(
-            "trim_length",
-            "--trim-length",
-            int,
-            description="Keep at most this many bases after adapter trimming.",
-        ),
+    count_specs: dict[str, ParamSpec] = {
+        "trim_start":  ParamSpec("trim_start",  "--trim-start",  str, render=render_value,
+                                 description="Trim from first occurrence of k-mer (inclusive)."),
+        "trim_stop":   ParamSpec("trim_stop",   "--trim-stop",   str, render=render_value,
+                                 description="Trim up to (exclusive) last occurrence of k-mer."),
+        "trim_length": ParamSpec("trim_length", "--trim-length", int, render=render_value,
+                                 description="Keep at most this many bases after trimming."),
+        "split_by":    ParamSpec("split_by",    "--split-by",    str, render=render_value,
+                                 description="Split counts by this read-name tag (e.g. 'sgRNAid')."),
     }
-
-    # ── match subcommand ──────────────────────────────────────────────────
-    match_specs = {
-        "seq_col": _spec(
-            "seq_col",
-            "--seq-col",
-            str,
-            default="Sequence",
-            affects_output=True,
-            description=(
-                "Column in the predefined TSV holding the R1 sequence to match."
-            ),
-        ),
-        "r2_col": _spec(
-            "r2_col",
-            "--r2-col",
-            str,
-            description=(
-                "Column in the predefined TSV holding the R2 sequence "
-                "(paired mode). Omit for single-end matching."
-            ),
-        ),
-        "id_col": _spec(
-            "id_col",
-            "--id-col",
-            str,
-            default="Name",
-            affects_output=True,
-            description=(
-                "Column in the predefined TSV holding the sequence identifier."
-            ),
-        ),
+    match_specs: dict[str, ParamSpec] = {
+        "seq_col": ParamSpec("seq_col", "--seq-col", str, default="Sequence", render=render_value,
+                             description="Column holding the R1 sequence."),
+        "r2_col":  ParamSpec("r2_col",  "--r2-col",  str, render=render_value,
+                             description="Column holding the R2 sequence (paired mode)."),
+        "id_col":  ParamSpec("id_col",  "--id-col",  str, default="Name", render=render_value,
+                             description="Column holding the sequence identifier."),
     }
-
-    count_set = ParamSet(count_specs, "mmfqcount", "count")
-    match_set = ParamSet(match_specs, "mmfqcount", "match")
-    default_set = ParamSet({}, "mmfqcount", "default")
-
     return ParamRegistry(
-        default=default_set,
-        by_subcommand={"count": count_set, "match": match_set},
+        default=ParamSet({}, "mmfqcount", "default"),
+        by_subcommand={
+            "count": ParamSet(count_specs, "mmfqcount", "count"),
+            "match": ParamSet(match_specs, "mmfqcount", "match"),
+        },
     )
 
 
@@ -340,7 +291,6 @@ class MmFqCount(External):
         Element
             Element whose artifact ``"tsv"`` is the path to the counts TSV.
         """
-        print(sample.name, "artifacts:", sample.artifacts)
         fastq_r1 = sample.fastq_r1
         fastq_r2 = sample.fastq_r2 if sample.fastq_r2 else None
 
@@ -426,11 +376,6 @@ class MmFqCount(External):
         if fastq_r2 is not None:
             arguments += ["--r2", str(Path(fastq_r2).absolute())]
 
-        # Append trimming flags from params
-        params = params or Params()
-        cli_extras = self.to_cli(params, subroutine="count")
-        arguments += cli_extras
-
         in_paths = [fastq_r1] + ([Path(fastq_r2).absolute()] if fastq_r2 else [])
         out_paths = [output_tsv]
 
@@ -462,7 +407,7 @@ class MmFqCount(External):
         filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> Element:
+    ) -> TableElement:
         """Match counted sequences against a predefined-sequences table.
 
         Runs ``mmfqcount match`` on the counts TSV produced by :meth:`count`
@@ -567,7 +512,7 @@ class MmFqCount(External):
         )
         determinants = self.signature_determinants(merged_params, subroutine="match")
 
-        return Element(
+        return TableElement(
             key,
             runner,
             tag=tag,
@@ -642,6 +587,124 @@ class MmFqCount(External):
             None,
             None,
         )
+
+    # -----------------------------------------------------------------------
+    # match — high-level @element
+    # -----------------------------------------------------------------------
+
+    @element
+    def compare(
+        self,
+        compare: TableElement,
+        against: TableElement,
+        *,
+        score: Callable[[int, int], float] | None = None,
+        column_prefix: str = "Count",
+        exclude_score: float | None | Callable = None,
+        seq_col: str = "R2",
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+        params: Params | None = None,
+        cfg: ExternalRunConfig | None = None,
+    ) -> TableElement:
+        """
+        compare the counts of two count results and output a tsv with the counts of 
+        both samples and a predefined score between them.
+        Both input elements should be TableElements with a "tsv" artifact. The 
+        TSVs must have the same counts columns (e.g. "Count") and the same 
+        sequence identifier columns (e.g. "Sequence").
+
+        The result will produce 2 tsv files: a score TSV with all sequences 
+        from the "against" table, with the counts from both inputs and the 
+        score; and a filtered score TSV with only sequences that meet the score 
+        threshold (if exclude_score is set).
+        
+        Parameters
+        ----------
+        compare : NextGenSampleElement
+            Element containing the counts TSV to compare (condition).
+        against : NextGenSampleElement
+            Element containing the counts TSV to compare against (control).
+        score : Callable[[int, int], float]] | None, optional
+            Function that takes two counts (compare, against) and returns a score.
+            Default is log2 fold change with inf if denominator is zero.
+        column_prefix : str, optional
+            Prefix for the count columns in the input TSV (e.g. "Count (sample)")
+        exclude_score : float | None | Callable, optional
+            If set, sequences with a score equal to this will be excluded from 
+            the filtered score TSV. If a callable is provided, it will be called 
+            with the score and should return True if the sequence should be 
+            excluded.
+        tag : PartialElementTag | ElementTag | None
+            Optional tag override.
+        outdir : Path | str | None, optional
+            Optional output directory override.
+        filename : Path | str | None, optional
+            Optional filename override. 
+        params : Params | None, optional
+            Additional parameters, by default None
+        cfg : ExternalRunConfig | None, optional
+            Runtime configuration, by default None
+
+        Returns
+        -------
+        TableElement
+            Element with artifacts:
+
+            "score" → TSV with all sequences and their scores
+            "filtered_score" → TSV with sequences that meet the score threshold
+        """
+        def default_score(count1: int, count2: int) -> float:
+            if count2 == 0:
+                return float('inf') if count1 > 0 else 0.0
+            return np.log2(count1 / count2)
+        if score is None:
+            score = default_score
+
+        tag = from_prior(
+            compare.tag,
+            tag,
+            stage=Stage.QUANT,
+            method=Method.MMFQCOUNT,
+            state=State.SCORE,
+            ext="tsv",
+        )
+        output_dir = Path(outdir or compare.tag.default_output_dir).absolute()
+        score_filename = filename or tag.default_output
+        score_tsv = output_dir / score_filename
+        filtered_score_tsv = score_tsv.with_suffix(".filtered.tsv")
+        pres = (compare, against)
+        inputs = (compare.file, against.file)
+        determinants = [function_hash(score), column_prefix, exclude_score]
+        # Resolve predefined path
+        runner = self.compare_counts(
+            compare_tsv=compare.file,
+            against_tsv=against.file,
+            score_tsv=score_tsv,
+            filtered_score_tsv=filtered_score_tsv,
+            score_func=score,
+            column_prefix=column_prefix,
+            exclude_score=exclude_score,
+            params=params,
+            cfg=cfg,
+        )
+
+        key, name = self.build_element_name(
+            tag, "compare", param_str="_against=" + against.tag.root,
+        )
+
+        return TableElement(
+            key,
+            runner,
+            tag=tag,
+            artifacts={"tsv": score_tsv, "filtered_tsv": filtered_score_tsv},
+            determinants=determinants,
+            inputs=inputs,
+            pres=pres,
+            name=name,
+        )
+
 
     # -----------------------------------------------------------------------
     # Convenience

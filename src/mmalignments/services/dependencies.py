@@ -3,7 +3,21 @@ import inspect
 import json
 from pathlib import Path
 from typing import Any
-from functools import wraps, lru_cache
+from functools import wraps, lru_cache, cached_property
+from typing import Callable
+
+
+class DynamicValue:
+    def __init__(self, resolver: Callable[[], Any], dependency: list[Any] | None = None):
+        self.resolver = resolver
+        self.dependency = dependency or []
+
+    def resolve(self) -> Any:
+        return self.resolver()
+
+    @property
+    def signature(self):
+        return combined_signature(function_hash(self.resolver),*self.dependency)
 
 
 def depends(*deps):
@@ -56,6 +70,17 @@ def file_sig(p: Path, head_bytes: int = 65_536) -> dict[str, Any]:
         "head_sha256": h.hexdigest(),
     }
 
+def file_signature(p: Path, head_bytes: int = 65_536) -> str:
+    return str(file_sig(p, head_bytes))
+
+
+def file_hash(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def stable_hash(obj: Any) -> str:
     payload = json.dumps(obj, sort_keys=True, default=str).encode("utf-8")
@@ -64,3 +89,21 @@ def stable_hash(obj: Any) -> str:
 
 def short_hash(signature: str, n: int = 8) -> str:
     return signature[:n]
+
+
+def combined_signature(*args) -> str:
+    sigs = []
+    for arg in args:
+        if hasattr(arg, "signature"):
+            sigs.append(arg.signature)
+        elif isinstance(arg, Path):
+            sigs.append(file_signature(arg))
+        elif isinstance(arg, DynamicValue):
+            sigs.append(arg.signature)
+        elif callable(arg):
+            sigs.append(function_hash(arg))
+        elif isinstance(arg, (str, int, float, bool)):
+            sigs.append(str(arg))
+        else:
+            sigs.append(stable_hash(arg))
+    return stable_hash(sigs)

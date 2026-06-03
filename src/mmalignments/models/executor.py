@@ -19,7 +19,7 @@ from rich.console import Console  # type: ignore[import]
 from mmalignments.models.elements import Element, explain_signature_diff
 from mmalignments.models.externals import External
 from mmalignments.models.registry import ElementRegistry, element_build_context
-from mmalignments.models.resources import ResourceConfig, _current_resources
+from mmalignments.models.resources import ResourceConfig, _current_resources, _current_tool_log_dir
 from mmalignments.models.status import (
     NodeState,  # type: ignore[import]
     ProgressReporter,
@@ -82,8 +82,10 @@ class Executor:
         self.cache_dir = self.main_dir / "store"
         self.resources = resources or ResourceConfig.detect()
         self.log_dir = self.main_dir / "logs"
+        self.tool_log_dir = self.log_dir / "tools"
         self.elements_file = self.log_dir / f"order_{now_as_str()}.txt"
-        ensure(self.log_dir, self.cache_dir)
+        ensure(self.log_dir, self.cache_dir, self.tool_log_dir)
+        self._cleanup_old_run_logs()
         self.logger = logger or initlog(console=True, log_dir=self.log_dir)
         self.signature_store_path = self.cache_dir / "signatures.json"
         self.signature_data_path = self.cache_dir / "signature_data.json"
@@ -99,6 +101,20 @@ class Executor:
         # Keys present in the registry at the time record() was called.
         # play() will only run elements whose keys were added after record().
         self._baseline_keys: set[str] | None = None
+
+    def _cleanup_old_run_logs(self, keep: int = 5) -> None:
+        """Remove old executor run-log files from log_dir, keeping the *keep* most recent.
+
+        Files matching ``run_*.log`` and ``order_*.txt`` are pruned independently,
+        each keeping the *keep* newest files so that recent history is preserved.
+        """
+        for pattern in ("run_*.log", "order_*.txt"):
+            files = sorted(self.log_dir.glob(pattern))
+            for old in files[:-keep] if len(files) > keep else []:
+                try:
+                    old.unlink()
+                except Exception:
+                    pass  # best-effort: never crash the pipeline over a log file
 
     def _handle_interrupt(self, signum, frame):
         self.logger.warning("Interrupt received — stopping pipeline...")
@@ -131,6 +147,7 @@ class Executor:
         ...     marked = gatk.mark(mapped)
         """
         resources_token = _current_resources.set(self.resources)
+        tool_log_token = _current_tool_log_dir.set(self.tool_log_dir)
         try:
             External.add_main_logger(self.logger)
             with element_build_context(self.registry):
@@ -138,6 +155,7 @@ class Executor:
         finally:
             External.remove_main_logger()
             _current_resources.reset(resources_token)
+            _current_tool_log_dir.reset(tool_log_token)
 
     ###########################################################################
     # record / play
@@ -509,9 +527,9 @@ class Executor:
                 return True
         return False
 
-    def _evaluate_node(self, node, cache) -> tuple[bool, str]:
+    def _evaluate_node(self, node, cache, cached_sig_data: dict | None = None) -> tuple[bool, str]:
         cached_sig = cache.get(node.key)
-        skip, reason = node.skip(cached_signature=cached_sig)
+        skip, reason = node.skip(cached_signature=cached_sig, cached_sig_data=cached_sig_data)
         return skip, reason
 
     def _log_node(self, node, reporter, skip, reason, log_run_only, verbose) -> str:
@@ -582,6 +600,7 @@ class Executor:
         verbose: bool,
     ) -> tuple[list[tuple[str, str, PipelineError]], ProgressReporter | None]:
         sigstore = self.load_sigstore(self.signature_data_path)
+        old_sigstore = dict(sigstore)  # snapshot before overwriting with current data
         # Keys of nodes that failed or were blocked by an upstream failure.
         # Used to propagate UPSTREAM_FAILED to their dependents.
         blocked_keys: set[str] = set()
@@ -589,12 +608,12 @@ class Executor:
         need_to_run: list[Element] = []
         skipped: set[str] = set()
         for node in order:
-            sigdata = dict(node.sig_data())  #
-            sigdata["name"] = node.tag.default_name
+            sigdata = dict(node.sig_data())
             sigstore[node.key] = sigdata
             self.save_sigstore(self.signature_data_path, sigstore)
             # check if the node must run or skipped
-            skip, reason = self._evaluate_node(node, cache)
+            cached_sig_data = old_sigstore.get(node.key)
+            skip, reason = self._evaluate_node(node, cache, cached_sig_data)
             if skip:
                 skipped.add(node.key)
                 # log skipped node
@@ -671,7 +690,10 @@ class Executor:
     ) -> tuple[list[tuple[str, str, PipelineError]], ProgressReporter | None]:
 
         by_key, pending_deps, successors = self._init_pending_and_successors(order)
+        sigstore = self.load_sigstore(self.signature_data_path)
+        old_sigstore = dict(sigstore)  # snapshot before current run overwrites entries
         cache_lock = threading.Lock()
+        sigstore_lock = threading.Lock()
         done_event = threading.Event()
         active: set[str] = set()
         completed: set[str] = set()
@@ -724,7 +746,8 @@ class Executor:
                 if abort.is_set():
                     return
                 node = by_key[key]
-                skip, reason = self._evaluate_node(node, cache)
+                cached_sig_data = old_sigstore.get(node.key)
+                skip, reason = self._evaluate_node(node, cache, cached_sig_data)
                 self._log_node(node, reporter, skip, reason, log_run_only, verbose)
                 if skip:
                     if reporter:
@@ -737,6 +760,10 @@ class Executor:
                         with cache_lock:
                             cache[node.key] = node.signature
                             self.save_cache(self.signature_store_path, cache)
+                        sigdata = dict(node.sig_data())
+                        with sigstore_lock:
+                            sigstore[node.key] = sigdata
+                            self.save_sigstore(self.signature_data_path, sigstore)
                         if reporter:
                             reporter.mark_done(node.key)
                     except Exception as e:

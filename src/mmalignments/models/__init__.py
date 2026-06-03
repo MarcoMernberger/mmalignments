@@ -3,6 +3,7 @@
 from .aligners import BCFtools, Bedtools, BWAMem2, Samtools  # noqa: F401
 from .callers import GATK  # noqa: F401
 from .data import Genome, Sample  # noqa: F401
+from .genome import EnsemblGenome, GenomeBase, LocalGenome  # noqa: F401
 from .elements import Element, FileElement, FilesElement, NextGenSampleElement
 from .executor import Executor  # noqa: F401
 from .qc import (  # noqa: F401
@@ -36,7 +37,10 @@ __all__ = [
     "FileElement",
     "FilesElement",
     "GATK",
+    "EnsemblGenome",
     "Genome",
+    "GenomeBase",
+    "LocalGenome",
     "merge_tag",
     "MutationalLoadReport",
     "NextGenSampleElement",

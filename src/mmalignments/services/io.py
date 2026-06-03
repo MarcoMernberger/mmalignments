@@ -169,3 +169,10 @@ def exists(path: Path | str) -> Callable[[], bool]:
         return Path(path).exists()
 
     return check
+
+
+def write_fasta(path: Path, sequences: dict[str, str]) -> None:
+    parents(path)
+    with open(path, "w") as f:
+        for name, seq in sequences.items():
+            f.write(f">{name}\n{seq}\n")

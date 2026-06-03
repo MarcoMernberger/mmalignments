@@ -1,4 +1,4 @@
 from .mmfqcount import MmFqCount
-from .fastq import FastGrab
+from .fastgrab import FastGrab
 
 __all__ = ["MmFqCount", "FastGrab"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 def _detect_cpus() -> int:
@@ -22,6 +23,11 @@ _current_resources: ContextVar[ResourceConfig | None] = ContextVar(
     "current_resources", default=None
 )
 
+# ContextVar: log-Verzeichnis für External-Tool-Logs, gesetzt vom Executor
+_current_tool_log_dir: ContextVar[Path | None] = ContextVar(
+    "current_tool_log_dir", default=None
+)
+
 
 def current_resources() -> ResourceConfig:
     """Return the ResourceConfig set by the active Executor build context.
@@ -30,6 +36,11 @@ def current_resources() -> ResourceConfig:
     """
     r = _current_resources.get()
     return r if r is not None else ResourceConfig.detect()
+
+
+def current_tool_log_dir() -> Path | None:
+    """Return the tool log directory set by the active Executor, or None."""
+    return _current_tool_log_dir.get()
 
 
 @dataclass

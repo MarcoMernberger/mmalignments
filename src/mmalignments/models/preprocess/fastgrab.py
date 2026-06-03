@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
-import gzip
+import pandas as pd
 from pathlib import Path
-from typing import Mapping
-
-from tomlkit import TOMLDocument, document, dumps, loads, table, nl
+from typing import Mapping, Sequence, Callable
+from collections.abc import Iterator
+from tomlkit import TOMLDocument, document, dumps, loads, table, nl, inline_table
 
 from mmalignments.models.elements import (
     Element,
@@ -16,6 +16,9 @@ from mmalignments.models.elements import (
     NextGenSampleElement,
     element,
     sample_fastqs,
+    TableElement,
+    FileArtifact,
+    CallSpec
 )
 from mmalignments.models.tags import (
     ElementTag,
@@ -26,7 +29,7 @@ from mmalignments.models.tags import (
     State,
     from_prior,
 )
-from mmalignments.services.io import parents
+from mmalignments.services.io import parents, write_fasta
 from mmalignments.services.logging import current_call_to_string
 from mmalignments.services.toml import indent_regular_tables
 from mmalignments.services.dependencies import depends
@@ -156,12 +159,13 @@ class FastGrab(External):
     # Configuration (high-level @element + low-level @subroutine)
     # -----------------------------------------------------------------------
 
+
     @element
     def configure(
         self,
         sample: NextGenSampleElement,
-        template: FileElement,
-        sample_barcodes: Mapping[str, str],
+        template: FileElement | Sequence[FileElement],
+        barcodes: Callable | Element | Mapping[str, Element],
         *,
         primers: tuple[str, str] | None = None,
         demultiplex_dir: Path | None = None,
@@ -182,12 +186,12 @@ class FastGrab(External):
         ----------
         sample : NextGenSampleElement
             Input sample with paired FASTQ files.
-        sample_barcodes : BarcodeMap
-            Mapping of single barcode sequence → sample name
-            (e.g. ``{"CTGGCA": "sample1"}``).
-        barcode_search : list[str] | None
-            Explicit list of barcode sequences to search for.  When *None*,
-            the keys of *sample_barcodes* are used.
+        template : FileElement | Sequence[FileElement]
+            TOML template(s) with steps to be resolved by fastgrab.
+        barcodes : Callable | Element | Mapping[str, Element]
+            Mapping of barcode set name → Element with FASTA artifact or Callable 
+            returning such a mapping. If it's just a single demultipolexing step, 
+            this can be a single Element with FASTA artifact.
         output_prefix : str | Path | None
             Prefix for fastqgrab output files (passed to the ``[output]``
             section of the TOML).  When *None*, a default path is derived
@@ -225,7 +229,6 @@ class FastGrab(External):
             omics=Omics.DNA,
             ext="toml",
         )
-
         output_dir = Path(outdir or self.default_config_dir(sample.root))
         config_file = filename or tag.default_output
         config_path = output_dir / config_file
@@ -233,31 +236,39 @@ class FastGrab(External):
             sample.root
         )
         demultiplex_destination = demultiplex_destination / sample.root
-        forward_primer, reverse_primer = primers or (None, None)
+        # forward_primer, reverse_primer = primers or (None, None)
+        # Allow `template` to be a single FileElement or a sequence thereof
+        if isinstance(template, (list, tuple)):
+            template_paths = [t.toml for t in template]
+            pres=tuple([sample] + template)
+        else:
+            template_paths = template.toml
+            pres=(sample, template)
+        determinants = None
+        barcodes_map: Mapping[str, dict[str, str] | Path] = {}
+        if barcodes is callable(barcodes):
+            barcodes_map = barcodes()
+            determinants = [str(sorted(barcodes.items()))]
+        elif isinstance(barcodes, Element):
+            # we assume the element has a Callable Artifact that returns the barcode map
+            barcodes_map[barcodes.root] = barcodes.fasta
+            pres += (barcodes,)
+        else:
+            for name, elem in barcodes.items():
+                barcodes_map[name] = elem.fasta
+            pres += tuple(barcodes.values())
+
         runner = self.write_config(
             fastq_r1=fastq_r1,
             fastq_r2=fastq_r2,
             config_path=config_path,
-            sample_barcodes=sample_barcodes,
-            template_path=template.toml,
-            forward_primer=forward_primer,
-            reverse_primer=reverse_primer,
-            barcode_hamming_distance=params.get("barcode_hamming_distance", 1),
-            primer_hamming_distance=params.get("primer_hamming_distance", 3),
-            barcode_anchor_distance=params.get("barcode_anchor_distance", 12),
+            barcodes_map=barcodes_map,
+            template_path=template_paths,
+            variables=params.to_dict(),
             output_prefix=str(demultiplex_destination),
         )
         key, name = self.build_element_name(tag, "configure")
         artifacts = {"toml": config_path, "prefix": str(demultiplex_destination)}
-        determinants = tuple(
-            [str(sorted(sample_barcodes.items())),
-            str(params.get("barcode_hamming_distance", 1)),
-            str(params.get("primer_hamming_distance", 3)),
-            str(params.get("barcode_anchor_distance", 1)),
-            forward_primer,
-            reverse_primer,
-            ] + list(sample_barcodes.keys())
-        )
         return Element(
             key,
             runner,
@@ -265,7 +276,7 @@ class FastGrab(External):
             artifacts=artifacts,
             determinants=determinants,
             inputs=(fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,),
-            pres=(sample, template),
+            pres=pres,
             name=name,
         )
 
@@ -274,14 +285,10 @@ class FastGrab(External):
         fastq_r1: Path | str,
         fastq_r2: Path | str | None,
         config_path: Path | str,
-        sample_barcodes: BarcodeMap,
-        template_path: Path | str,
+        barcodes_map: Mapping[str, dict[str, str] | Path],
+        template_path: Path | str | Sequence[Path | str],
         *,
-        forward_primer: str | None = None,
-        reverse_primer: str | None = None,
-        barcode_hamming_distance: int = 1,
-        primer_hamming_distance: int = 3,
-        barcode_anchor_distance: int = 12,
+        variables: Mapping[str, str] | None = None,
         output_prefix: str = "output",
     ) -> Runnable:
         """Write a fastqgrab TOML configuration file and return a subroutine tuple.
@@ -300,8 +307,8 @@ class FastGrab(External):
             Absolute path to the R2 FASTQ file, or *None* for single-end.
         config_path : Path | str
             Destination path for the written TOML file.
-        sample_barcodes : BarcodeMap
-            Mapping of sample/replicate name → barcode sequence.
+        barcodes : BarcodeMap | Callable[[], Mapping[str, str]]
+            Mapping of sample/replicate name → barcode sequence or a callable returning such a mapping.
         template_path : Path | str
             Path to the TOML template file with ``${variable}`` placeholders.
         output_prefix : str
@@ -324,16 +331,18 @@ class FastGrab(External):
         config_path = Path(config_path).absolute()
         fastq_r1 = Path(fastq_r1).absolute()
 
+        # Normalize template_path to a list of absolute Paths
+        if isinstance(template_path, (list, tuple)):
+            template_paths = [Path(p).absolute() for p in template_path]
+        else:
+            template_paths = [Path(template_path).absolute()]
+
         toml_doc = _build_demultiplex_toml(
-            template_path=Path(template_path).absolute(),
+            template_paths=template_paths,
             fastq_r1=fastq_r1,
             fastq_r2=Path(fastq_r2).absolute() if fastq_r2 else None,
-            sample_barcodes=dict(sample_barcodes),
-            forward_primer=forward_primer,
-            reverse_primer=reverse_primer,
-            barcode_hamming_distance=barcode_hamming_distance,
-            primer_hamming_distance=primer_hamming_distance,
-            barcode_anchor_distance=barcode_anchor_distance,
+            barcodes_map=barcodes_map,
+            variables=variables or {},
             output_prefix=output_prefix,
         )
 
@@ -349,19 +358,6 @@ class FastGrab(External):
             cmd=[current_call_to_string()],
             display="write_config",
         )
-
-        # pre = write the file before the (no-op) command
-        # We encode the file-write as the pre-hook and pass an empty argument
-        # list so the subroutine machinery does not try to call a binary.
-        # The actual "command" is represented as a python:// pseudo-URI so
-        # that runners can log it meaningfully.
-        # return (
-        #     ["python://write_toml", str(config_path)],
-        #     [config_path],
-        #     None,
-        #     _write,
-        #     None,
-        # )
 
     # -----------------------------------------------------------------------
     # Process (high-level @element + low-level @subroutine)
@@ -413,18 +409,17 @@ class FastGrab(External):
             tag,
             stage=Stage.PREP,
             method=Method.FASTQGRAB,
-            state=State.REPORT,
-            ext=None,
+            state=State.DEMULTIPLEX,
+            ext="html",
         )
         key, name = self.build_element_name(tag, "process")
-
         determinants = self.signature_determinants(params, subroutine="process")
 
         return Element(
             key,
             runner,
             tag=tag,
-            artifacts={"html": Path(config.prefix + "_report.html"), "json": Path(config.prefix + "_report.json")},
+            artifacts={"html": Path(config.prefix + ".html"), "json": Path(config.prefix + ".json")},
             determinants=determinants,
             inputs=(config.toml,),
             pres=(config,),
@@ -574,8 +569,9 @@ class FastGrab(External):
         self,
         process: Element,
         config: Element,
-        sample_barcodes: Mapping[str, str],
         *,
+        rename: Callable[[str], str] | None = None,
+        names: Iterator[str] | list[str] | None = None,
         tag: PartialElementTag | ElementTag | None = None,
     ) -> Element:
         """Create an Element that consolidates demultiplexed FASTQ files.
@@ -606,49 +602,49 @@ class FastGrab(External):
             the undetermined FASTQs.
         """
         prefix = Path(config.prefix)
-        sample_names = list(sample_barcodes.keys())
-
-
         tag = from_prior(
             process.tag,
             tag,
             stage=Stage.PREP,
             method=Method.FASTQGRAB,
-            state=State.REPORT,
+            state=State.DEMULTIPLEX,
             ext="fq",
         )
 
         key, name = self.build_element_name(tag, "consolidate")
         # Build artifacts: one per sample (R1 + R2) plus undetermined
         artifacts = {}
-        for sample_name in sample_names:
-            artifacts[f"{sample_name}_R1"] = prefix.parent / f"{prefix.name}_{sample_name}_R1.fq"
+        # for sample_name in sample_names:
+        #     artifacts[f"{sample_name}_R2"] = prefix.parent / f"{prefix.name}_{sample_name}_R2.fq"
+        #     artifacts[f"{sample_name}_R1"] = prefix.parent / f"{prefix.name}_{sample_name}_R1.fq"
+        for sample_name in names:
             artifacts[f"{sample_name}_R2"] = prefix.parent / f"{prefix.name}_{sample_name}_R2.fq"
+            artifacts[f"{sample_name}_R1"] = prefix.parent / f"{prefix.name}_{sample_name}_R1.fq"
+
         artifacts["undetermined_R1"] = prefix.parent / f"{prefix.name}_undetermined_R1.fq"
         artifacts["undetermined_R2"] = prefix.parent / f"{prefix.name}_undetermined_R2.fq"
 
         # Input files (all the process-generated FASTQs)
         input_pattern = str(prefix / f"{prefix.name}_barcode_unambiguous=*")
-        
         runner = self.run_consolidate(
             prefix=prefix,
-            sample_names=sample_names,
+            rename=rename,
         )
         return Element(
             key,
             runner,
             tag=tag,
             artifacts=artifacts,
-            determinants=tuple(sorted(sample_names)),
-            inputs=(process.html, process.json),  # symbolic dependency
+            inputs=(),
             pres=(process,),
             name=name,
+            empty_ok=True,
         )
 
     def run_consolidate(
         self,
         prefix: Path,
-        sample_names: list[str],
+        rename: Callable[[str], str] = None,
     ) -> Runnable:
         """Consolidate demultiplexed FASTQ files.
 
@@ -665,6 +661,10 @@ class FastGrab(External):
             Runnable that performs the file consolidation.
         """
 
+        def rename(filename: str) -> str:
+            return filename.replace("barcode_unambiguous=true_", "").replace("_read2", "_R2").replace("_read1", "_R1")
+
+        rename = rename or default_rename
         prefix = Path(prefix).absolute()
         prefix_dir = prefix.parent
         prefix_name = prefix.name
@@ -672,11 +672,13 @@ class FastGrab(External):
         def _consolidate():
             """Consolidate FASTQ files after demultiplexing."""
             # Collect files
-            all_fqs = list(prefix_dir.glob(f"{prefix_name}_barcode_unambiguous=*"))
-            
+            input_pattern = f"{prefix_name}*.fq"
+            all_fqs = list(prefix_dir.glob(input_pattern))
             undetermined_r1 = prefix_dir / f"{prefix_name}_undetermined_R1.fq"
             undetermined_r2 = prefix_dir / f"{prefix_name}_undetermined_R2.fq"
             consolidated_log = prefix_dir / f"{prefix_name}_consolidation.log"
+            sucessful_fqs = []
+            temp_fqs = []
             with open(consolidated_log, 'w') as log_fh:
                 log_fh.write(f"Consolidating FASTQ files for prefix {prefix_name}\n")
                 log_fh.write(f"Found {len(all_fqs)} FASTQ files:\n")
@@ -688,26 +690,27 @@ class FastGrab(External):
                         fq_name = fq_path.name
                         
                         # Skip if unambiguous=true (these get renamed, not merged)
-                        if "barcode_unambiguous=true" in fq_name:
-                            continue
-                        
-                        # Determine reason tag
-                        if "nobarcode" in fq_name:
-                            reason = "reason:nobarcode"
-                        elif "barcode_unambiguous=false" in fq_name:
-                            reason = "reason:ambiguous_barcode"
+                        if "barcode_unambiguous=false" in fq_name or ("nobarcode" in fq_name):
+                            # Determine reason tag
+                            if "nobarcode" in fq_name:
+                                reason = "reason:nobarcode"
+                            elif "barcode_unambiguous=false" in fq_name:
+                                reason = "reason:ambiguous_barcode"
+                            else:
+                                raise ValueError(f"Unexpected undetermined FASTQ file name: {fq_name}")
+                            if "_read1.fq" in fq_name:
+                                log_fh.write(f"Adding {fq_name} to undetermined_R1.fq with tag {reason}\n")
+                                out_fh = out_r1
+                            elif "_read2.fq" in fq_name:
+                                log_fh.write(f"Adding {fq_name} to undetermined_R2.fq with tag {reason}\n")
+                                out_fh = out_r2
+                            else:
+                                raise ValueError(f"Unexpected FASTQ file name (cannot determine read direction): {fq_name}")
+                            temp_fqs.append(fq_path)
                         else:
+                            sucessful_fqs.append(fq_path)
                             continue
-                        
                         # Determine read direction
-                        if "_read1.fq" in fq_name:
-                            log_fh.write(f"Adding {fq_name} to undetermined_R1.fq with tag {reason}\n")
-                            out_fh = out_r1
-                        elif "_read2.fq" in fq_name:
-                            log_fh.write(f"Adding {fq_name} to undetermined_R2.fq with tag {reason}\n")
-                            out_fh = out_r2
-                        else:
-                            continue
                         
                         # Copy reads with modified names
                         with open(fq_path, 'r') as in_fh:
@@ -725,27 +728,97 @@ class FastGrab(External):
                                     out_fh.write(lines[i + 2])  # plus
                                     out_fh.write(lines[i + 3])  # quality
 
+                    
                 # Rename unambiguous=true files
-                for sample_name in sample_names:
-                    for read_num, read_suffix in [(1, "read1"), (2, "read2")]:
-                        old_name = prefix_dir / f"{prefix_name}_barcode_unambiguous=true_{sample_name}_{read_suffix}.fq"
-                        new_name = prefix_dir / f"{prefix_name}_{sample_name}_R{read_num}.fq"
-                        
-                        log_fh.write(f"Renaming {old_name} to {new_name}\n")
-                        if old_name.exists():
-                            old_name.rename(new_name)
+                
+                for fq_path in sucessful_fqs:
+                    if "barcode_unambiguous=true" not in fq_path.name:
+                        continue
+                    temp_fqs.append(fq_path)
+                    old_name = fq_path.name
+                    new_name = rename(old_name)
+                    new_path = prefix_dir / new_name
 
-                # Clean up intermediate files
-                for fq_path in all_fqs:
+                    log_fh.write(f"Renaming {str(fq_path)} to {new_name}\n")
                     if fq_path.exists():
+                        fq_path.rename(new_path)
+                # Clean up intermediate files
+                for fq_path in temp_fqs:
+                    if fq_path.exists(): # the renamed and newly created undetermined files are not in all_fqs
                         log_fh.write(f"Removing intermediate file {fq_path}\n")
                         fq_path.unlink()
-                
+                    
         return Runnable(
             _consolidate,
             cmd=[current_call_to_string()],
             display="consolidate",
         )
+
+
+    # -----------------------------------------------------------------------
+    # create barcode fasta
+    # -----------------------------------------------------------------------
+
+    @element
+    def barcodefasta(
+            self, 
+            sensors: TableElement,
+            *,
+            name_column: str = "sample",
+            sequence_column: str = "barcode",
+            outdir: Path | str | None = None,
+            filename: Path | str | None = None,
+            outfile: Path = Path("CBE_TP53_Sensor_Library_with_sgRNAid_id.tsv")
+        ) -> FileElement:
+        
+        tag = from_prior(
+                sensors.tag,
+                state=State.PREPROCESS,
+                method=Method.FASTQGRAB,
+                ext="fasta",
+            )
+        sensorfile = sensors.file
+        output_dir = Path(outdir or self.default_config_dir(sensors.root))
+        filename = filename or tag.default_output
+        outfile = output_dir / filename
+        key = f"{tag.default_name}_flanks_fasta"
+        runner = self.write_barcode_fasta(
+            sensorfile=sensorfile,
+            outfile=outfile,
+            name_column=name_column,
+            sequence_column=sequence_column,
+        )
+        artifacts = {
+            "fasta": outfile,
+        }
+        return Element(
+            key,
+            runner,
+            tag=tag,
+            inputs=(sensorfile,),
+            pres=(sensors,),
+            artifacts=artifacts,
+            name=key,
+        )
+
+    def write_barcode_fasta(self, sensorfile: Path, outfile: Path, name_column: str, sequence_column: str) -> Runnable:
+
+        def __run():
+            df_constructs = pd.read_csv(sensorfile, sep="\t")
+            sample_barcodes = dict(zip(df_constructs[name_column], df_constructs[sequence_column]))
+            write_fasta(outfile, sample_barcodes)
+        
+        callspec = CallSpec(
+            "write_barcode_fasta",
+            kwargs={"sensorfile": sensorfile, "outfile": outfile, "name_column": name_column, "sequence_column": sequence_column}
+        ).render()
+        return Runnable(
+            __run,
+            display=callspec,
+        )
+
+    # we also need a "trim and mark" element here to extract the flanking regions and marc the reads accordingly, also to trim off the scaffold parts
+
 
     # -----------------------------------------------------------------------
     # Convenience
@@ -754,10 +827,11 @@ class FastGrab(External):
     def grabfast(
         self,
         sample: NextGenSampleElement,
-        template: FileElement,
-        sample_barcodes: Mapping[str, str],
+        template: FileElement | Sequence[FileElement],
+        barcodes: Callable | Element | Mapping[str, Element],
         *,
-        primers: tuple[str, str] | None = None,
+        rename: Callable[[str], str] | None = None,
+        names: Iterator[str] | list[str] = None,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         configdir: Path | None = None,
@@ -774,18 +848,24 @@ class FastGrab(External):
         ----------
         sample : NextGenSampleElement
             Input sample with paired FASTQ files.
-        sample_barcodes : BarcodeMap
-            Barcode → sample mapping.
-        barcode_search : list[str] | None
-            Explicit barcode sequences to search for.
-        output_prefix : str | Path | None
-            Prefix for fastqgrab output files.
-        output_dir : Path | None
-            Base output directory.
-        max_mismatches : int
-            Mismatches for IUPAC extraction.
-        max_hamming_distance : int
-            Hamming distance for correction.
+        template : FileElement | Sequence[FileElement]
+            TOML template(s) with steps to be resolved by fastgrab.
+        barcodes : Callable | Element | Mapping[str, Element]
+            Mapping of barcode set name → Element with FASTA artifact or Callable 
+            returning such a mapping. If it's just a single demultipolexing step, 
+            this can be a single Element with FASTA artifact.
+        rename : Callable[[str], str] | None
+            Optional function to rename consolidated FASTQ files. If *None*, a default renaming scheme is applied that removes the "barcode_unambiguous=true_" prefix and replaces "_read1" and "_read2" with "_R1" and "_R2".
+        names : Iterator[str] | list[str] | None
+            Optional list of sample names to expect in the consolidated output. If *None*, all samples found in the process output are included.
+        tag : PartialElementTag | ElementTag | None
+            Optional tag override for all created Elements.
+        outdir : Path | str | None
+            Base output directory for the demultiplexed FASTQs.  If *None*, a default directory is derived from the sample name.
+        configdir : Path | None
+            Directory in which to write the configuration file.  If *None*, a default directory is derived from the sample name.
+        filename : Path | str | None
+            Filename for the configuration file.  If *None*, a default name is derived from the
         params : Mapping[str, Params] | None
             Parameter sets keyed by step name (``"configure"``,
             ``"process"``).
@@ -800,8 +880,7 @@ class FastGrab(External):
         config_el = self.configure(
             sample=sample,
             template=template,
-            sample_barcodes=sample_barcodes,
-            primers=primers,
+            barcodes=barcodes,
             demultiplex_dir=outdir,
             tag=tag,
             outdir=configdir,
@@ -814,29 +893,33 @@ class FastGrab(External):
         # )  # this is now a pre call before process, not a separate element
         process_el = self.process(
             config=config_el,
+            tag=tag
         )
         consolidate_el = self.consolidate(
             process=process_el,
             config=config_el,
-            sample_barcodes=sample_barcodes,
+            rename=rename,
+            names=names,
+            tag=tag
         )
+        print(consolidate_el.output_files)
         return consolidate_el, process_el, config_el
-
-
+        
     def demultiplex(
         self,
         sample: NextGenSampleElement,
-        template: FileElement,
-        sample_barcodes: Mapping[str, str],
+        template: FileElement | Sequence[FileElement],
+        barcodes: Callable | Element | Mapping[str, Element],
         *,
-        primers: tuple[str, str] | None = None,
+        rename: Callable[[str], str] | None = None,
+        names: Iterator[str] | list[str] = None,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         configdir: Path | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> dict[str, NextGenSampleElement]:
+    ) -> tuple[dict[str, NextGenSampleElement], NextGenSampleElement]:
         """Configure and process a demultiplexing run in one step.
 
         In addition, a mapping of sample name → demultiplexed 
@@ -847,18 +930,24 @@ class FastGrab(External):
         ----------
         sample : NextGenSampleElement
             Input sample with paired FASTQ files.
-        sample_barcodes : BarcodeMap
-            Barcode → sample mapping.
-        barcode_search : list[str] | None
-            Explicit barcode sequences to search for.
-        output_prefix : str | Path | None
-            Prefix for fastqgrab output files.
-        output_dir : Path | None
-            Base output directory.
-        max_mismatches : int
-            Mismatches for IUPAC extraction.
-        max_hamming_distance : int
-            Hamming distance for correction.
+        template : FileElement | Sequence[FileElement]
+            TOML template(s) with steps to be resolved by fastgrab.
+        barcodes : Callable | Element | Mapping[str, Element]
+            Mapping of barcode set name → Element with FASTA artifact or Callable 
+            returning such a mapping. If it's just a single demultipolexing step, 
+            this can be a single Element with FASTA artifact.
+        rename : Callable[[str], str] | None
+            Optional function to rename consolidated FASTQ files. If *None*, a default renaming scheme is applied that removes the "barcode_unambiguous=true_" prefix and replaces "_read1" and "_read2" with "_R1" and "_R2".
+        names : Iterator[str] | list[str] | None
+            Optional list of sample names to expect in the consolidated output. If *None*, all samples found in the process output are included.
+        tag : PartialElementTag | ElementTag | None
+            Optional tag override for all created Elements.
+        outdir : Path | str | None
+            Base output directory for the demultiplexed FASTQs.  If *None*, a default directory is derived from the sample name.
+        configdir : Path | None
+            Directory in which to write the configuration file.  If *None*, a default directory is derived from the sample name.
+        filename : Path | str | None
+            Filename for the configuration file.  If *None*, a default name is derived from the sample name.
         params : Mapping[str, Params] | None
             Parameter for the ``"configure"`` step.
         cfgs : Mapping[str, ExternalRunConfig] | None
@@ -872,8 +961,9 @@ class FastGrab(External):
         consolidate_el, _, _ = self.grabfast(
             sample=sample,
             template=template,
-            sample_barcodes=sample_barcodes,
-            primers=primers,
+            barcodes=barcodes,
+            rename=rename,
+            names=names,
             tag=tag,
             outdir=outdir,
             configdir=configdir,
@@ -881,9 +971,10 @@ class FastGrab(External):
             params=params,
             cfg=cfg,
         )
-        return self.samples(consolidate_el)
+        samples, undetermined = self.samples(consolidate_el)
+        return samples, undetermined
 
-    def samples(self, consolidate_el: Element) -> tuple[dict[str, NextGenSampleElement], Element]:
+    def samples(self, consolidate_el: Element) -> tuple[dict[str, NextGenSampleElement], NextGenSampleElement]:
         """Create NextGenSampleElements for each demultiplexed sample.
 
         This method takes the consolidation Element (which has artifacts for
@@ -938,8 +1029,8 @@ class FastGrab(External):
                 tag=tag,
                 pres=(consolidate_el,),
             )
-        
-        return sample_elements, consolidate_el
+        undetermined = self.undetermined(consolidate_el)
+        return sample_elements, undetermined
     
     def undetermined(self, consolidate_el: Element) -> NextGenSampleElement:
         """Create a NextGenSampleElement for the undetermined reads."""
@@ -971,15 +1062,17 @@ class FastGrab(External):
 
 def _build_demultiplex_toml(
     *,
-    template_path: Path,
+    template_paths: Sequence[Path],
     fastq_r1: Path,
     fastq_r2: Path | None,
-    sample_barcodes: dict[str, str],
-    forward_primer: str | None = None,
-    reverse_primer: str | None = None,
-    barcode_hamming_distance: int = 1,
-    primer_hamming_distance: int = 3,
-    barcode_anchor_distance: int = 12,
+    # these are all variables .... 
+    barcodes_map: dict[str, str] | Path | Mapping[str, dict[str, str] | Path],
+    variables: dict[str, object] | None = None,
+    # forward_primer: str | None = None,
+    # reverse_primer: str | None = None,
+    # barcode_hamming_distance: int = 1,
+    # primer_hamming_distance: int = 3,
+    # barcode_anchor_distance: int = 12,
     output_prefix: str = "output",
 ) -> TOMLDocument:
     """Build a fastqgrab TOML configuration document.
@@ -1020,21 +1113,26 @@ def _build_demultiplex_toml(
     TOMLDocument
         Complete TOML document ready to be written to disk.
     """
-    # substitute variables inside the step text
-    text = template_path.read_text()
+    # substitute variables inside the step text for each template and
+    # concatenate the resulting [[step]] blocks in the order provided.
+    # variables: dict[str, object] = {
+    #     "fwd_primer": forward_primer or "",
+    #     "rev_primer": reverse_primer or "",
+    #     "primer_hamming_distance": primer_hamming_distance,
+    #     "barcode_hamming_distance": barcode_hamming_distance,
+    #     "barcode_anchor_distance": barcode_anchor_distance,
+    #     "sample_barcodes": list(sample_barcodes.values()),
+    # }
 
-    variables: dict[str, object] = {
-        "fwd_primer": forward_primer or "",
-        "rev_primer": reverse_primer or "",
-        "primer_hamming_distance": primer_hamming_distance,
-        "barcode_hamming_distance": barcode_hamming_distance,
-        "barcode_anchor_distance": barcode_anchor_distance,
-        "sample_barcodes": list(sample_barcodes.values()),
-    }
-    text = _substitute_template_vars(text, variables)
-    # extract steps
-    steps = loads(text).get("step", [])
-    
+    steps: list = []
+    for tp in template_paths:
+        text = Path(tp).read_text()
+        text = _substitute_template_vars(text, variables)
+        steps_part = loads(text).get("step", [])
+        if steps_part:
+            # extend in-order so templates append sequentially
+            steps.extend(steps_part)
+
     # build the document
     doc = document()
 
@@ -1048,15 +1146,29 @@ def _build_demultiplex_toml(
     doc.add(nl())
 
     # [barcodes]
-    sample_barcodes_table = table()
-    for sample_name, barcode in sample_barcodes.items():
-        sample_barcodes_table.add(barcode, sample_name)
+    if callable(barcodes_map):
+        barcodes_map = barcodes_map()
+    
     barcodes_section = table()
-    barcodes_section.add("sample_barcodes", sample_barcodes_table)
+    for map_name, sample_barcodes in barcodes_map.items():
+        subtable = table()
+        if isinstance(sample_barcodes, Path):
+            # if it is a file pointer
+            from_file = inline_table()
+            from_file["filename"] = str(sample_barcodes)
+            subtable["from_file"] = from_file
+            barcodes_section[map_name] = subtable
+        else:
+            # if it is a direct mapping
+            sample_barcodes_table = table()
+            for sample_name, barcode in sample_barcodes.items():
+                sample_barcodes_table.add(barcode, sample_name)
+                barcodes_section = table()
+                barcodes_section.add(map_name, sample_barcodes_table)
+
     doc.add("barcodes", barcodes_section)
     doc.add(nl())
     doc.add(nl())
-
     # [[step]] taken from template
     doc.add("step", steps)
 
@@ -1077,9 +1189,9 @@ _TEMPLATE_VAR_RE = re.compile(r"""(['"])\$\{(\w+):(int|str|list)\}(['"])""")
 def _substitute_template_vars(text: str, variables: dict) -> str:
     """Replace ``${varname:type}`` placeholders in *text*.
 
-    - ``int``  – TOML-Quotes werden entfernt, Wert wird ein bare integer.
-    - ``str``  – TOML-Quotes bleiben, nur der Platzhalter-Inhalt wird ersetzt.
-    - ``list`` – TOML-Quotes werden entfernt, Wert wird ein Inline-Array.
+    - ``int``  – remove TOML-Quotes, value will be a bare integer.
+    - ``str``  – TOML-Quotes remain, only the placeholder content is replaced.
+    - ``list`` – remove TOML-Quotes, value will be an inline array.
     """
 
     def _replace(m: re.Match) -> str:

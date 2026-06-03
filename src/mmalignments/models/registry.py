@@ -56,11 +56,6 @@ class ElementRegistry:
             self._by_key[e.key] = e
             return e
 
-        ex_sig = getattr(existing, "signature", None)
-        e_sig = getattr(e, "signature", None)
-        if ex_sig is not None and e_sig is not None and ex_sig != e_sig:
-            raise ValueError(f"Key collision with different signature: {e.key}")
-
         return existing
 
     def keys(self) -> Iterator[str]:
@@ -74,15 +69,10 @@ class ElementRegistry:
     def print(self) -> None:
         """Print all registered Elements to stdout."""
         print("ElementRegistry:")
-        for key, element in sorted(self._by_key.items()):
-            sig = getattr(element, "signature", None)
-            if sig:
-                print(f"  {key}  [{sig}]")
-            else:
-                print(f"  {key}")
+        for key in sorted(self._by_key):
+            print(f"  {key}")
 
     def write_registry(self, outfile: Path) -> None:
         with open(outfile, "w") as outp:
             for key, element in sorted(self._by_key.items()):
-                sig = getattr(element, "signature", None)
-                outp.write(f"{key}:\n{element.describe()}\nSignature={sig}\n\n")
+                outp.write(f"{key}:\n{element.describe()}\n")

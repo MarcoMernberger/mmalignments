@@ -52,7 +52,10 @@ class State(str, Enum):
     CLUSTER = "cluster"
     PCA = "pca"
     CONFIG = "config"
-
+    DOWNLOAD = "download"
+    PREPROCESS = "preprocess"
+    ANNOTATE = "annotate"
+    SCORE = "score"
 
 class Method(str, Enum):
     FASTP = "fastp"
@@ -76,6 +79,7 @@ class Method(str, Enum):
     CLUSTERING = "clustering"
     MAGECK = "mageck"
     MMFQCOUNT = "mmfqcount"
+    ENSEMBL = "ensembl"
     
 
 def level(level: int) -> str:

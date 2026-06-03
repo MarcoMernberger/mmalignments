@@ -154,7 +154,7 @@ class ProgressReporter:
         self._lock = threading.Lock()
         self._live: Live | None = None
         self._renderable: _LiveLayout | None = None
-        self.log_width = self._console.size.width // 2 - 2
+        self.log_width = self._console.size.width# // 2 - 2
 
     ###########################################################################
     # Node Status handling
