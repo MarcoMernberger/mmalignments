@@ -902,7 +902,6 @@ class FastGrab(External):
             names=names,
             tag=tag
         )
-        print(consolidate_el.output_files)
         return consolidate_el, process_el, config_el
         
     def demultiplex(

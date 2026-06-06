@@ -54,8 +54,10 @@ class State(str, Enum):
     CONFIG = "config"
     DOWNLOAD = "download"
     PREPROCESS = "preprocess"
-    ANNOTATE = "annotate"
     SCORE = "score"
+    ENRICHMENT = "enrichment"
+    RANK = "rank"
+    TRANSLATE = "translate"
 
 class Method(str, Enum):
     FASTP = "fastp"
@@ -80,6 +82,8 @@ class Method(str, Enum):
     MAGECK = "mageck"
     MMFQCOUNT = "mmfqcount"
     ENSEMBL = "ensembl"
+    GSEA = "gsea"
+    MSIGDB = "msigdb"
     
 
 def level(level: int) -> str:

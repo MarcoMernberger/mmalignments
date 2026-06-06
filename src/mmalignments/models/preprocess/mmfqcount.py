@@ -28,6 +28,7 @@ import logging
 import re
 import subprocess
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Mapping, Callable
 
@@ -36,7 +37,9 @@ from mmalignments.models.elements import (
     NextGenSampleElement,
     TableElement,
     element,
+    CallSpec
 )
+from mmalignments.services.io import parents
 from mmalignments.models.parameters import (
     Params,
     ParamSet,
@@ -54,7 +57,7 @@ from mmalignments.models.tags import (
     State,
     from_prior,
 )
-from mmalignments.models.dependency import function_hash
+from mmalignments.services.dependencies import function_hash
 from ..externals import External, ExternalRunConfig, Runnable, SubroutineIn, subroutine
 
 logger = logging.getLogger(__name__)
@@ -230,7 +233,7 @@ class MmFqCount(External):
     # -----------------------------------------------------------------------
     # Default paths
     # -----------------------------------------------------------------------
-
+    
     def default_output_dir(self, sample_name: str) -> Path:
         """Return the default output directory for a given sample."""
         return Path("results") / "counts" / self.version_name / sample_name
@@ -319,10 +322,11 @@ class MmFqCount(External):
         determinants = self.signature_determinants(params, subroutine="count")
         inputs = (fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,)
 
-        return Element(
+        return TableElement(
             key,
             runner,
             tag=tag,
+            tsv=output_tsv,
             artifacts={"tsv": output_tsv},
             determinants=determinants,
             inputs=inputs,
@@ -375,7 +379,6 @@ class MmFqCount(External):
         ]
         if fastq_r2 is not None:
             arguments += ["--r2", str(Path(fastq_r2).absolute())]
-
         in_paths = [fastq_r1] + ([Path(fastq_r2).absolute()] if fastq_r2 else [])
         out_paths = [output_tsv]
 
@@ -599,9 +602,9 @@ class MmFqCount(External):
         against: TableElement,
         *,
         score: Callable[[int, int], float] | None = None,
-        column_prefix: str = "Count",
-        exclude_score: float | None | Callable = None,
         seq_col: str = "R2",
+        column_prefix: str = "Count",
+        exclude_score: float | None | Callable = 0.0,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
@@ -616,7 +619,7 @@ class MmFqCount(External):
         sequence identifier columns (e.g. "Sequence").
 
         The result will produce 2 tsv files: a score TSV with all sequences 
-        from the "against" table, with the counts from both inputs and the 
+        from the "compare" table, with the counts from both inputs and the 
         score; and a filtered score TSV with only sequences that meet the score 
         threshold (if exclude_score is set).
         
@@ -629,6 +632,9 @@ class MmFqCount(External):
         score : Callable[[int, int], float]] | None, optional
             Function that takes two counts (compare, against) and returns a score.
             Default is log2 fold change with inf if denominator is zero.
+        seq_col : str, optional
+            Column name in the input TSVs that contains the sequence 
+            identifiers. Default is "R2".
         column_prefix : str, optional
             Prefix for the count columns in the input TSV (e.g. "Count (sample)")
         exclude_score : float | None | Callable, optional
@@ -670,19 +676,23 @@ class MmFqCount(External):
             state=State.SCORE,
             ext="tsv",
         )
-        output_dir = Path(outdir or compare.tag.default_output_dir).absolute()
+        output_dir = Path(outdir or compare.file.parent).absolute()
         score_filename = filename or tag.default_output
         score_tsv = output_dir / score_filename
         filtered_score_tsv = score_tsv.with_suffix(".filtered.tsv")
         pres = (compare, against)
         inputs = (compare.file, against.file)
-        determinants = [function_hash(score), column_prefix, exclude_score]
+        determinants = [function_hash(score), seq_col, column_prefix, exclude_score]
         # Resolve predefined path
+
         runner = self.compare_counts(
+            compare=compare.tag.root,
+            against=against.tag.root,
             compare_tsv=compare.file,
             against_tsv=against.file,
             score_tsv=score_tsv,
             filtered_score_tsv=filtered_score_tsv,
+            seq_col=seq_col,
             score_func=score,
             column_prefix=column_prefix,
             exclude_score=exclude_score,
@@ -698,13 +708,125 @@ class MmFqCount(External):
             key,
             runner,
             tag=tag,
-            artifacts={"tsv": score_tsv, "filtered_tsv": filtered_score_tsv},
+            artifacts={"tsv": score_tsv, "filtered": filtered_score_tsv},
+            tsv=score_tsv,
             determinants=determinants,
             inputs=inputs,
             pres=pres,
             name=name,
         )
 
+    # -----------------------------------------------------------------------
+    # compare_counts — low-level helper
+    # -----------------------------------------------------------------------
+
+    def compare_counts(
+        self,
+        compare: str,
+        against: str,
+        compare_tsv: Path | str,
+        against_tsv: Path | str,
+        score_tsv: Path | str,
+        filtered_score_tsv: Path | str,
+        *,
+        seq_col: str = "R2",
+        score_func: Callable[[int, int], float],
+        column_prefix: str = "Count",
+        exclude_score: float | None | Callable = None,
+        params: Params | None = None,
+        cfg: ExternalRunConfig | None = None,
+    ) -> Runnable:
+        """Compare two count TSVs and assign a score to each sequence."""
+
+        compare_path = Path(compare_tsv)
+        against_path = Path(against_tsv)
+        score_path = Path(score_tsv)
+        filtered_path = Path(filtered_score_tsv)
+
+        def _find_count_column(df):
+            if column_prefix in df.columns:
+                return column_prefix
+            matches = [c for c in df.columns if c.lower().startswith(column_prefix.lower())]
+            if len(matches) > 0:
+                return matches
+            else:
+                raise ValueError(
+                    f"Prefix not in count columns for prefix {column_prefix!r}: {matches}"
+                )
+            
+        def rename_column(name: str) -> Callable[[str], str]:
+            def _rename(column_name: str) -> str:
+                return f"{column_name} ({name})"
+            return _rename
+
+        def _runner() -> None:
+
+            parents(score_path, filtered_path)
+            compare_df = pd.read_csv(compare_path, sep="\t")
+            against_df = pd.read_csv(against_path, sep="\t")
+            read_cols_main = [c for c in compare_df.columns if c.startswith(column_prefix)]
+            read_cols_other = [c for c in against_df.columns if c.startswith(column_prefix)]
+            read_cols_common = set(read_cols_main) & set(read_cols_other)
+            # rename Read Count columns
+            rename_compare = rename_column(compare)
+            rename_against = rename_column(against)
+            compare_df = compare_df.rename(columns={c: rename_compare(c) for c in read_cols_main})
+            against_df = against_df.rename(columns={c: rename_against(c) for c in read_cols_other})
+            additional_columns = [rename_against(c) for c in read_cols_common]
+            against_df = against_df[[seq_col] + additional_columns]
+
+            # ḿerge on sequence
+            merged = compare_df.merge(
+                against_df,
+                on=f"{seq_col}",
+                how="left",
+            )
+            # sequences missing in against_df get NaN → treat as 0
+            merged[additional_columns] = merged[additional_columns].fillna(0)
+            # intersection of comparable count columns
+            score_columns = []
+            for col in read_cols_common:
+                col_compare = rename_compare(col)
+                col_against = rename_against(col)
+
+                score_col = f"Score {col.replace(column_prefix, '').strip()} ({compare} vs {against})"
+                score_columns.append(score_col)
+                merged[score_col] = merged.apply(
+                    lambda row: (
+                        score_func(row[col_compare], row[col_against])
+                        if pd.notna(row[col_compare]) and pd.notna(row[col_against])
+                        else pd.NA
+                    ),
+                    axis=1
+                )
+            merged.to_csv(score_path, sep="\t", index=False)
+
+            # Keep only rows where at least one count column (compare or against) is > 0.
+            # Rows where every count is 0 (sequence invisible in both conditions) are discarded.
+            all_count_cols = (
+                [rename_compare(c) for c in read_cols_common]
+                + [rename_against(c) for c in read_cols_common]
+            )
+            if all_count_cols:
+                filtered = merged.loc[(merged[all_count_cols] > 0).any(axis=1)]
+            else:
+                filtered = merged
+
+            filtered.to_csv(filtered_path, sep="\t", index=False)
+
+        callspec = CallSpec(
+            "compare_counts",
+            kwargs={
+                "compare": compare_tsv, "against": against_tsv, 
+                "compare_tsv": compare_tsv, "against_tsv": against_tsv, 
+                "score_tsv": score_tsv, "filtered_score_tsv": filtered_score_tsv, 
+                "seq_col": seq_col, 
+                "column_prefix": column_prefix},
+        ).render()
+        return Runnable(
+            _runner,
+            display=callspec,
+        )
 
     # -----------------------------------------------------------------------
     # Convenience
@@ -775,6 +897,53 @@ class MmFqCount(External):
             cfg=cfg,
         )
         return match_el, count_el
+
+    def samplecount(
+            self, 
+            samples: Mapping[str, NextGenSampleElement], 
+            *,
+            tag: PartialElementTag | ElementTag | None = None,
+            outdir: Path | str | None = None,
+            params: Params | None = None,
+            cfg: ExternalRunConfig | None = None,
+        ) -> dict[str, Element]:
+        """
+        samplecount is a convenience method that takes a mapping of sample names
+        to NextGenSampleElements and runs the count method on each sample, 
+        returning a mapping of sample names to their corresponding count 
+        Elements. This allows for easy batch processing of multiple samples 
+        without having to manually call count for each one.
+
+        Parameters
+        ----------
+        samples : Mapping[str, NextGenSampleElement]
+            A mapping of sample names to NextGenSampleElements to be counted.
+        tag : PartialElementTag | ElementTag | None, optional
+            Optional tag override applied to all count elements, by default None.
+        outdir : Path | str | None, optional
+            Output directory for all count elements, by default None. If None, 
+            defaults to results/counts/<version>/<sample_name> for each sample.
+        params : Params | None, optional
+            Parameters for the count method, by default None.
+        cfg : ExternalRunConfig | None, optional
+            Configuration for external run, by default None.
+
+        Returns
+        -------
+        dict[str, Element]
+            A mapping of sample names to their corresponding count Elements.
+        """
+        count_elements = {}
+        for sample_name, sample in samples.items():
+            output_dir = Path(outdir) / sample_name if outdir else self.default_output_dir(sample)
+            counted = self.count(
+                sample, 
+                tag=tag,
+                outdir=output_dir,
+                params=params
+            )
+            count_elements[sample_name] = counted
+        return count_elements
 
 
 # ---------------------------------------------------------------------------
