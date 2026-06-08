@@ -674,10 +674,9 @@ class FilesElement(Element):
             state=State.RAW,
             ext=ext,
         ).merge(tag)
-
         runner = runner or self.exist        
         key = (
-            f"{tag.default_name}::{'::'.join(str(p) for p in artifacts.values())}"
+            f"{tag.default_name}::{'::'.join([str(p) for p in artifacts.values()])}"
         )
         super().__init__(
             key=key,
@@ -736,13 +735,14 @@ class FileElement(FilesElement):
         self,
         filepath: Path | str,
         *,
+        runner: Runnable | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
     ):
         path = Path(filepath).absolute()
-        self.ext = path.suffix.lstrip(".")
-        by_suffix = {self.ext: path}
-        super().__init__(by_suffix, root=root, tag=tag)
+        ext = path.suffix.lstrip(".")
+        by_suffix = {ext: path}
+        super().__init__(by_suffix, runner=runner, tag=tag, root=root, ext=self.ext)
 
     @property
     def file(self) -> Path:
@@ -805,6 +805,28 @@ class NextGenSampleElement(Sample):
     def input_files(self) -> list[Path]:
         return sorted(self.artifacts.values(), key=str)
 
+
+def samples_from_df(path: Path | str, samples_df: DataFrame) -> dict[str, NextGenSampleElement]:
+    sammples_dict = {}
+    for _, row in samples_df.iterrows():
+        sample_name = str(row["name"])
+        prefix = row.get("prefix", sample_name)
+        file_prefix = path / prefix
+        sample_element = NextGenSampleElement(
+            path=file_prefix,
+            root=sample_name,
+            tag=ElementTag(
+                root=sample_name,
+                level=0,
+                omics=Omics.DNA,
+                stage=Stage.INPUT,
+                method=Method.CHECK,
+                state=State.RAW,
+            ),
+            is_prefix=True,
+        )
+        sammples_dict[sample_name] = register(sample_element)
+    return sammples_dict
 
 def sample_fastqs(
     sample: Sample | Element,

@@ -4,7 +4,7 @@ from .aligners import BCFtools, Bedtools, BWAMem2, Samtools  # noqa: F401
 from .callers import GATK  # noqa: F401
 from .data import Genome, Sample  # noqa: F401
 from .genome import EnsemblGenome, GenomeBase, LocalGenome  # noqa: F401
-from .elements import Element, FileElement, FilesElement, NextGenSampleElement
+from .elements import Element, FileElement, FilesElement, NextGenSampleElement, samples_from_df
 from .executor import Executor  # noqa: F401
 from .qc import (  # noqa: F401
     FastQC,
@@ -55,6 +55,7 @@ __all__ = [
     "State",
     "Sample",
     "Samtools",
+    "samples_from_df"
 ]
 # from .qc_metrics import (
 #     AlignmentMetrics,
