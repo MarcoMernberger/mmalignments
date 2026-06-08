@@ -639,6 +639,7 @@ class FilesElement(Element):
         self,
         path: str | Path | Mapping[str, Path | str],
         *,
+        runner: Runnable | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
         ext: str | None = None,
@@ -674,12 +675,7 @@ class FilesElement(Element):
             ext=ext,
         ).merge(tag)
 
-        runner = Runnable(
-            paths_exists(
-                *paths.values()
-            ),
-            display=CallSpec(path=("io", "paths_exists"),args=tuple(paths.values())).render(),
-        )  # no-op runner, validation is done by skip logic
+        runner = runner or self.exist        
         key = (
             f"{tag.default_name}::{'::'.join(str(p) for p in artifacts.values())}"
         )
@@ -725,6 +721,13 @@ class FilesElement(Element):
                 md5 += f"{k}:{hashlib.md5(path.read_bytes()).hexdigest()};"
         return md5
 
+    def exist(self):
+        return Runnable(
+            paths_exists(
+                *self.artifacts.values()
+            ),
+            display=CallSpec(path=("io", "paths_exists"),args=tuple(self.artifacts.values())).render(),
+        )  # no-op runner, validation is done by skip logic
 
 class FileElement(FilesElement):
 

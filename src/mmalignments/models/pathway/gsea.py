@@ -496,21 +496,6 @@ class MSigDB:
         "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2026.1.Hs"
     )
 
-    _COLLECTION_FILES: dict[str, str] = {
-        "H":  "h.all.v2023.2.Hs.symbols.gmt",
-        "C1": "c1.all.v2023.2.Hs.symbols.gmt",
-        "C2": "c2.all.v2023.2.Hs.symbols.gmt",
-        "C3": "c3.all.v2023.2.Hs.symbols.gmt",
-        "C4": "c4.all.v2023.2.Hs.symbols.gmt",
-        "C5": "c5.all.v2023.2.Hs.symbols.gmt",
-        "C6": "c6.all.v2023.2.Hs.symbols.gmt",
-        "C7": "c7.all.v2023.2.Hs.symbols.gmt",
-        "C8": "c8.all.v2023.2.Hs.symbols.gmt",
-        # Mouse collections
-        "H_mm":  "h.all.v2023.2.Mm.symbols.gmt",
-        "C2_mm": "c2.all.v2023.2.Mm.symbols.gmt",
-        "C5_mm": "c5.all.v2023.2.Mm.symbols.gmt",
-    }
 
     def __init__(self, cache_dir: Path | str | None = None, version: str = "2026.1", species: Species = "Homo_sapiens") -> None:
         """
@@ -523,7 +508,40 @@ class MSigDB:
         self.cache_dir = Path(cache_dir or "cache/msigdb")
         self._version = version
         self._species = species
+        self._species_short = "Hs" if species == "Homo_sapiens" else "Mm"
 
+    @property
+    def url(self) -> str:
+        return f"https://data.broadinstitute.org/gsea-msigdb/msigdb/release/{self._version}.{self._species_short}.Hs"
+
+
+    @property
+    def collections_files(self) -> dict[str, str]:
+        if self._species == "Homo_sapiens":
+            return {
+                "H":  f"h.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "C1": f"c1.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "C2": f"c2.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "C3": f"c3.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "C4": f"c4.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "C5": f"c5.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "C6": f"c6.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "C7": f"c7.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "C8": f"c8.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "C9": f"c9.all.v{self._version}.{self._species_short}.symbols.gmt",
+            }
+        else:
+            # Mouse collections
+            return {
+                "MH": f"mh.all.v{self._version}.Mm.symbols.gmt",
+                "M1": f"m1.all.v{self._version}.Mm.symbols.gmt",
+                "M2": f"m2.all.v{self._version}.Mm.symbols.gmt",
+                "M3": f"m3.all.v{self._version}.Mm.symbols.gmt",
+                "M4": f"m4.all.v{self._version}.Mm.symbols.gmt",
+                "M5": f"m5.all.v{self._version}.Mm.symbols.gmt",
+                "M6": f"m6.all.v{self._version}.Mm.symbols.gmt",
+                "M7": f"m7.all.v{self._version}.Mm.symbols.gmt",
+            }
     def get_version(self) -> str:
         """
         Returns
@@ -543,7 +561,6 @@ class MSigDB:
         self,
         collection: str,
         *,
-        organism: str = "Human",
         tag: PartialElementTag | ElementTag | None = None,
     ) -> FileElement:
         """Download a MSigDB gene-set collection as a GMT file.
@@ -556,9 +573,6 @@ class MSigDB:
         collection : str
             MSigDB collection identifier, e.g. ``"H"``, ``"C2"``, ``"C5"``.
             Append ``"_mm"`` for mouse (``"H_mm"``, ``"C2_mm"``).
-        organism : str
-            ``"Human"`` or ``"Mouse"`` (informational; the collection key
-            encodes the organism).
         tag : PartialElementTag | ElementTag | None
             Optional tag override.
 
@@ -569,7 +583,7 @@ class MSigDB:
         """
 
         collection_key = collection.upper()
-        if collection_key not in self._COLLECTION_FILES:
+        if collection_key not in self.collections_files():
             raise ValueError(
                 f"Unknown MSigDB collection: {collection!r}.  "
                 f"Known collections: {sorted(self._COLLECTION_FILES)}"
@@ -577,7 +591,7 @@ class MSigDB:
         filename = self._COLLECTION_FILES[collection_key]
         gmt_path = self.cache_dir / filename
 
-        base_tag = PTag(
+        tag = PTag(
             root=f"msigdb_{collection_key.lower()}",
             level=0,
             stage=Stage.INPUT,
@@ -597,88 +611,90 @@ class MSigDB:
 
         runner = Runnable(_run, display=f"msigdb.download({collection_key})")
 
-        key = f"msigdb.{collection_key.lower()}.download"
-        name = base_tag.default_name
 
-        return FileElement.__new__(FileElement)  # placeholder; see below
-
-        # We cannot use FileElement directly (it validates existence on init),
-        # so we build a plain Element and return it.  Callers that need the
-        # gmt path can do ``element.gmt`` (via __getattr__ artifact lookup).
-
-    @element
-    def download_as_element(
-        self,
-        collection: str,
-        *,
-        organism: str = "Human",
-        tag: PartialElementTag | ElementTag | None = None,
-    ) -> Element:
-        """Download a MSigDB gene-set collection; return a plain Element.
-
-        Identical to :meth:`download` but returns a plain :class:`Element`
-        (not a :class:`FileElement`) so the output file does not need to
-        exist yet at element-construction time.
-
-        The ``gmt`` artifact holds the path to the downloaded GMT file.
-
-        Parameters
-        ----------
-        collection : str
-            MSigDB collection identifier, e.g. ``"H"``, ``"C2"``.
-        organism : str
-            ``"Human"`` or ``"Mouse"``.
-        tag : PartialElementTag | ElementTag | None
-            Optional tag override.
-
-        Returns
-        -------
-        Element
-            ``gmt`` artifact → path to local GMT file.
-        """
-        from mmalignments.models.tags import PartialElementTag as PTag
-
-        collection_key = collection.upper()
-        if collection_key not in self._COLLECTION_FILES:
-            raise ValueError(
-                f"Unknown MSigDB collection: {collection!r}.  "
-                f"Known: {sorted(self._COLLECTION_FILES)}"
-            )
-        filename = self._COLLECTION_FILES[collection_key]
-        gmt_path = self.cache_dir / filename
-
-        base_tag = PTag(
-            root=f"msigdb_{collection_key.lower()}",
-            level=0,
-            stage=Stage.INPUT,
-            method=Method.MSIGDB,
-            state=State.DOWNLOAD,
+        return FileElement(
+            path=gmt_path,
+            runner=runner,
+            tag=tag,
+            root=collection_key,
             ext="gmt",
-        ).merge(tag).resolve()
-
-        @depends(_download_gmt)
-        def _run():
-            _download_gmt(
-                collection_key=collection_key,
-                filename=filename,
-                gmt_path=gmt_path,
-                base_url=self._MSIGDB_GMT_URL,
-            )
-
-        runner = Runnable(_run, display=f"msigdb.download({collection_key})")
-        key = base_tag.default_name
-        name = base_tag.default_name
-
-        return Element(
-            key,
-            runner,
-            tag=base_tag,
-            artifacts={"gmt": gmt_path},
-            inputs=(),
+            is_prefix=False,
             pres=(),
-            name=name,
-            empty_ok=False,
         )
+
+    # @element
+    # def download_as_element(
+    #     self,
+    #     collection: str,
+    #     *,
+    #     organism: str = "Human",
+    #     tag: PartialElementTag | ElementTag | None = None,
+    # ) -> Element:
+    #     """Download a MSigDB gene-set collection; return a plain Element.
+
+    #     Identical to :meth:`download` but returns a plain :class:`Element`
+    #     (not a :class:`FileElement`) so the output file does not need to
+    #     exist yet at element-construction time.
+
+    #     The ``gmt`` artifact holds the path to the downloaded GMT file.
+
+    #     Parameters
+    #     ----------
+    #     collection : str
+    #         MSigDB collection identifier, e.g. ``"H"``, ``"C2"``.
+    #     organism : str
+    #         ``"Human"`` or ``"Mouse"``.
+    #     tag : PartialElementTag | ElementTag | None
+    #         Optional tag override.
+
+    #     Returns
+    #     -------
+    #     Element
+    #         ``gmt`` artifact → path to local GMT file.
+    #     """
+    #     from mmalignments.models.tags import PartialElementTag as PTag
+
+    #     collection_key = collection.upper()
+    #     if collection_key not in self._COLLECTION_FILES:
+    #         raise ValueError(
+    #             f"Unknown MSigDB collection: {collection!r}.  "
+    #             f"Known: {sorted(self._COLLECTION_FILES)}"
+    #         )
+    #     filename = self._COLLECTION_FILES[collection_key]
+    #     gmt_path = self.cache_dir / filename
+
+    #     base_tag = PTag(
+    #         root=f"msigdb_{collection_key.lower()}",
+    #         level=0,
+    #         stage=Stage.INPUT,
+    #         method=Method.MSIGDB,
+    #         state=State.DOWNLOAD,
+    #         ext="gmt",
+    #     ).merge(tag).resolve()
+
+    #     @depends(_download_gmt)
+    #     def _run():
+    #         _download_gmt(
+    #             collection_key=collection_key,
+    #             filename=filename,
+    #             gmt_path=gmt_path,
+    #             base_url=self._MSIGDB_GMT_URL,
+    #         )
+
+    #     runner = Runnable(_run, display=f"msigdb.download({collection_key})")
+    #     key = base_tag.default_name
+    #     name = base_tag.default_name
+
+    #     return Element(
+    #         key,
+    #         runner,
+    #         tag=base_tag,
+    #         artifacts={"gmt": gmt_path},
+    #         inputs=(),
+    #         pres=(),
+    #         name=name,
+    #         empty_ok=False,
+    #     )
 
     # ------------------------------------------------------------------
     # to_ensembl
