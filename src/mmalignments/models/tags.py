@@ -5,7 +5,6 @@ from functools import cached_property
 from typing import Any
 
 
-
 class Omics(str, Enum):
     DNA = "dna"
     RNA = "rna"
@@ -58,6 +57,9 @@ class State(str, Enum):
     ENRICHMENT = "enrichment"
     RANK = "rank"
     TRANSLATE = "translate"
+    PROCESSED = "processed"
+    GENERATED = "generated"
+
 
 class Method(str, Enum):
     FASTP = "fastp"
@@ -84,7 +86,8 @@ class Method(str, Enum):
     ENSEMBL = "ensembl"
     GSEA = "gsea"
     MSIGDB = "msigdb"
-    
+    TABLE = "table"
+
 
 def level(level: int) -> str:
     return f"S{level:02d}"

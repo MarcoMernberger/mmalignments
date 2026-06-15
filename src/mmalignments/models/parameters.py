@@ -59,6 +59,22 @@ class Params:
         except KeyError:
             raise AttributeError(f"Params has no attribute '{key}'")
 
+    def update(self, partial_params: "Params") -> "Params":
+        if partial_params is None:
+            return self
+        return self.override(**partial_params.to_dict())
+
+    def determinants(self) -> tuple[str, ...]:
+        if len(self._override_params) == 0:
+            return ()
+        dets = tuple(
+            [
+                f"{k}={v}" if v is not None else f"{k}=None"
+                for k, v in sorted(self._override_params.items())
+            ]
+        )
+        return dets
+
 
 ###############################################################################
 # Rendering

@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 from typing import IO, Any, Callable
 
+import pandas as pd  # type: ignore[import]
+from pandas import DataFrame  # type: ignore[import]
+
 
 def ensure(*files: Path | str) -> bool:
     """
@@ -162,6 +165,17 @@ def paths_exists(*paths: Path | str) -> Callable[[], bool]:
     return check
 
 
+def paths_exists_raise(*paths: Path | str) -> Callable[[], None]:
+    """Check if all given paths exist."""
+
+    def check():
+        for p in paths:
+            if not Path(p).exists():
+                raise FileNotFoundError(f"Required path does not exist: {p}")
+
+    return check
+
+
 def exists(path: Path | str) -> Callable[[], bool]:
     """Check if a file or directory exists at the given path."""
 
@@ -176,3 +190,34 @@ def write_fasta(path: Path, sequences: dict[str, str]) -> None:
     with open(path, "w") as f:
         for name, seq in sequences.items():
             f.write(f">{name}\n{seq}\n")
+
+
+def write_frame(df: DataFrame, path: Path, **kwargs) -> None:
+    ext = path.suffix.lower()
+    parents(path)
+    params = {"sep": "\t", "index": False}
+    params.update(kwargs)
+    if ext in (".tsv", ".csv", ".txt"):
+        df.to_csv(path, **params)
+    elif ext == ".parquet":
+        params.pop("sep", None)
+        df.to_parquet(path, **params)
+    elif ext in (".xlsx", ".xls"):
+        params.pop("sep", None)
+        df.to_excel(path, **params)
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+
+
+def read_frame(path: Path, **kwargs) -> DataFrame:
+
+    if path.suffix == ".tsv":
+        return pd.read_csv(path, sep="\t", **kwargs)
+    elif path.suffix == ".parquet":
+        return pd.read_parquet(path, **kwargs)
+    elif path.suffix in (".csv", ".txt"):
+        return pd.read_csv(path, **kwargs)
+    elif path.suffix in (".xlsx", ".xls"):
+        return pd.read_excel(path, **kwargs)
+    else:
+        raise ValueError(f"Unsupported file format: {path.suffix}")

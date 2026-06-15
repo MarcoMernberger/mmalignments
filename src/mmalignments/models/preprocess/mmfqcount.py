@@ -27,37 +27,37 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+from pathlib import Path
+from typing import Callable, Mapping
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Mapping, Callable
 
 from mmalignments.models.elements import (
+    CallSpec,
     Element,
     NextGenSampleElement,
     TableElement,
     element,
-    CallSpec
 )
-from mmalignments.services.io import parents
 from mmalignments.models.parameters import (
+    ParamRegistry,
     Params,
     ParamSet,
     ParamSpec,
-    ParamRegistry,
     render_value,
-    render_flag,
 )
 from mmalignments.models.tags import (
     ElementTag,
     Method,
-    Omics,
     PartialElementTag,
     Stage,
     State,
     from_prior,
 )
 from mmalignments.services.dependencies import function_hash
+from mmalignments.services.io import parents
+
 from ..externals import External, ExternalRunConfig, Runnable, SubroutineIn, subroutine
 
 logger = logging.getLogger(__name__)
@@ -233,7 +233,7 @@ class MmFqCount(External):
     # -----------------------------------------------------------------------
     # Default paths
     # -----------------------------------------------------------------------
-    
+
     def default_output_dir(self, sample_name: str) -> Path:
         """Return the default output directory for a given sample."""
         return Path("results") / "counts" / self.version_name / sample_name
@@ -753,7 +753,7 @@ class MmFqCount(External):
                 raise ValueError(
                     f"Prefix not in count columns for prefix {column_prefix!r}: {matches}"
                 )
-            
+
         def rename_column(name: str) -> Callable[[str], str]:
             def _rename(column_name: str) -> str:
                 return f"{column_name} ({name})"
@@ -817,10 +817,10 @@ class MmFqCount(External):
         callspec = CallSpec(
             "compare_counts",
             kwargs={
-                "compare": compare_tsv, "against": against_tsv, 
-                "compare_tsv": compare_tsv, "against_tsv": against_tsv, 
-                "score_tsv": score_tsv, "filtered_score_tsv": filtered_score_tsv, 
-                "seq_col": seq_col, 
+                "compare": compare_tsv, "against": against_tsv,
+                "compare_tsv": compare_tsv, "against_tsv": against_tsv,
+                "score_tsv": score_tsv, "filtered_score_tsv": filtered_score_tsv,
+                "seq_col": seq_col,
                 "column_prefix": column_prefix},
         ).render()
         return Runnable(
@@ -899,8 +899,8 @@ class MmFqCount(External):
         return match_el, count_el
 
     def samplecount(
-            self, 
-            samples: Mapping[str, NextGenSampleElement], 
+            self,
+            samples: Mapping[str, NextGenSampleElement],
             *,
             tag: PartialElementTag | ElementTag | None = None,
             outdir: Path | str | None = None,
@@ -937,7 +937,7 @@ class MmFqCount(External):
         for sample_name, sample in samples.items():
             output_dir = Path(outdir) / sample_name if outdir else self.default_output_dir(sample)
             counted = self.count(
-                sample, 
+                sample,
                 tag=tag,
                 outdir=output_dir,
                 params=params

@@ -1,14 +1,13 @@
 import hashlib
-import inspect
 import json
 from pathlib import Path
-from typing import Any
-from functools import wraps, lru_cache, cached_property
-from typing import Callable
+from typing import Any, Callable
 
 
 class DynamicValue:
-    def __init__(self, resolver: Callable[[], Any], dependency: list[Any] | None = None):
+    def __init__(
+        self, resolver: Callable[[], Any], dependency: list[Any] | None = None
+    ):
         self.resolver = resolver
         self.dependency = dependency or []
 
@@ -17,7 +16,7 @@ class DynamicValue:
 
     @property
     def signature(self):
-        return combined_signature(function_hash(self.resolver),*self.dependency)
+        return combined_signature(function_hash(self.resolver), *self.dependency)
 
 
 def depends(*deps):
@@ -25,6 +24,7 @@ def depends(*deps):
         fn.__dependencies__ = set(getattr(fn, "__dependencies__", set()))
         fn.__dependencies__.update(deps)
         return fn
+
     return decorator
 
 
@@ -70,6 +70,7 @@ def file_sig(p: Path, head_bytes: int = 65_536) -> dict[str, Any]:
         "head_sha256": h.hexdigest(),
     }
 
+
 def file_signature(p: Path, head_bytes: int = 65_536) -> str:
     return str(file_sig(p, head_bytes))
 
@@ -107,3 +108,12 @@ def combined_signature(*args) -> str:
         else:
             sigs.append(stable_hash(arg))
     return stable_hash(sigs)
+
+
+def try_cast(v: str) -> Any:
+    for cast in (int, float):
+        try:
+            return cast(v)
+        except ValueError:
+            pass
+    return v

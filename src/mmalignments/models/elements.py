@@ -3,34 +3,57 @@ from __future__ import annotations
 import hashlib
 import json
 import traceback
-import pandas as pd
-from numpy import ndarray
-from pathlib import Path
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from enum import Enum
 from functools import cached_property, wraps
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, ParamSpec, TypeVar, cast, overload, Literal
-from pandas import DataFrame
-from dataclasses import dataclass, field
-from mmalignments.services.logging import current_call_to_string
-from mmalignments.models.data import Pairing
-from mmalignments.services.io import parents, paths_exists
-from mmalignments.services.dependencies import (
-    function_hash, 
-    file_sig, 
-    stable_hash, 
-    collect_code_dependency, 
-    file_signature, 
-    DynamicValue
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Literal,
+    Mapping,
+    ParamSpec,
+    TypeVar,
+    cast,
+    overload,
 )
-from abc import ABC
+
+import pandas as pd
+from numpy import ndarray
+from pandas import DataFrame, Series
+
+from mmalignments.models.data import Pairing
+from mmalignments.services.dependencies import (
+    DynamicValue,
+    collect_code_dependency,
+    file_sig,
+    file_signature,
+    function_hash,
+    stable_hash,
+    try_cast,
+)
+from mmalignments.services.io import (
+    parents,
+    paths_exists,
+    paths_exists_raise,
+    read_frame,
+    write_frame,
+)
 
 from .registry import current_element_registry
-from .tags import ElementTag, Method, PartialElementTag, Stage, State, Omics
-
-
+from .tags import (
+    ElementTag,
+    Method,
+    Omics,
+    PartialElementTag,
+    Stage,
+    State,
+    from_prior,
+)
 
 ###############################################################################
 # External Wrapper
@@ -38,6 +61,7 @@ from .tags import ElementTag, Method, PartialElementTag, Stage, State, Omics
 
 ArtifactType = Literal["file", "value"]
 ArtifactLifeTime = Literal["persistent", "transient", "ephemeral"]
+
 
 class Artifact(ABC):
     def resolve(self) -> Any:
@@ -57,6 +81,7 @@ class FileArtifact(Artifact):
     def signature(self) -> str:
         return file_signature(self.path)
 
+
 @dataclass(frozen=True)
 class ValueArtifact(Artifact):
     value: Any
@@ -66,7 +91,8 @@ class ValueArtifact(Artifact):
 
     def signature(self) -> str:
         return stable_hash(self.value)
-    
+
+
 @dataclass(frozen=True)
 class DynamicArtifact(Artifact):
     value: DynamicValue
@@ -77,6 +103,7 @@ class DynamicArtifact(Artifact):
     def signature(self) -> str:
         return self.value.signature
 
+
 @dataclass(frozen=True)
 class TransientArtifact(Artifact):
     value: Any
@@ -85,7 +112,8 @@ class TransientArtifact(Artifact):
         return self.value
 
     def signature(self) -> str:
-        return "transient" # transient artifacts are not considered for signature
+        return "transient"  # transient artifacts are not considered for signature
+
 
 # @dataclass(frozen=True)
 # class Artifact:
@@ -113,27 +141,27 @@ class TransientArtifact(Artifact):
 #         else:
 #             return stable_hash(self.value)
 
-    # def stable_repr(self) -> str:  # for signature hashing
-    #     if self.kind == "file":
-    #         if isinstance(self.value, Path):
-    #             return file_signature(self.value)
-    #         else:
-    #             return file_signature(Path(self.value))
-    #     # elif self.kind == "dynamic":
-    #     #     if isinstance(self.value, DynamicValue):
-    #     #         return self.__dynamic_sig()
-    #     #     else:
-    #     #         raise TypeError(f"Expected DynamicValue for dynamic artifact, got {type(self.value)}")
-    #     else:
-            
-    #         return str(self.value)
+# def stable_repr(self) -> str:  # for signature hashing
+#     if self.kind == "file":
+#         if isinstance(self.value, Path):
+#             return file_signature(self.value)
+#         else:
+#             return file_signature(Path(self.value))
+#     # elif self.kind == "dynamic":
+#     #     if isinstance(self.value, DynamicValue):
+#     #         return self.__dynamic_sig()
+#     #     else:
+#     #         raise TypeError(f"Expected DynamicValue for dynamic artifact, got {type(self.value)}")
+#     else:
 
-    # def __file_hash(self, path: Path) -> str:
-    #     h = hashlib.sha256()
-    #     with path.open("rb") as f:
-    #         for chunk in iter(lambda: f.read(1024 * 1024), b""):
-    #             h.update(chunk)
-    #     return h.hexdigest()
+#         return str(self.value)
+
+# def __file_hash(self, path: Path) -> str:
+#     h = hashlib.sha256()
+#     with path.open("rb") as f:
+#         for chunk in iter(lambda: f.read(1024 * 1024), b""):
+#             h.update(chunk)
+#     return h.hexdigest()
 
 # @dataclass(frozen=True)
 # class Artifact:
@@ -155,7 +183,7 @@ class TransientArtifact(Artifact):
 class Runnable:
     def __init__(
         self,
-        fn: Callable[[], CompletedProcess | None],
+        fn: Callable[[], Any],
         cmd: list[str] | None = None,
         display: str | None = None,
     ):
@@ -169,7 +197,7 @@ class Runnable:
     def fingerprint(self) -> str:
         return self._fingerprint
 
-    def __call__(self) -> CompletedProcess | None:
+    def __call__(self) -> Any:
         result = self._fn()
         self.last_result = result
         return result
@@ -184,9 +212,7 @@ class Runnable:
 
         hashes = [function_hash(fn) for fn in safe_fns]
 
-        return hashlib.sha256(
-            "|".join(hashes).encode()
-        ).hexdigest()
+        return hashlib.sha256("|".join(hashes).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -197,14 +223,14 @@ class CallSpec:
 
     def render(self) -> str:
         callargs = ", ".join(repr(a) for a in self.args)
-        callargs += ", ".join(
-            f"{k}={repr(v)}" for k, v in self.kwargs.items()
-        )
+        callargs += ", ".join(f"{k}={repr(v)}" for k, v in self.kwargs.items())
         return f"{'.'.join(self.path)}({callargs})"
-    
+
+
 ###############################################################################
 # Elements
 ###############################################################################
+
 
 class ValidationPolicy(Enum):
     CHECK = "check"  # default behaviour
@@ -432,7 +458,11 @@ class Element:
         # hashes of individual keys matched but overall hash differs (ordering/encoding)
         return "Cached signature does not match (unknown diff)"
 
-    def skip(self, cached_signature: str | None = None, cached_sig_data: dict[str, Any] | None = None) -> tuple[bool, str]:
+    def skip(
+        self,
+        cached_signature: str | None = None,
+        cached_sig_data: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
         # TODO turn this into Validation Policy
         if self.validation_policy == ValidationPolicy.FORCE_RUN:
             return False, "Validation policy forces run"
@@ -647,7 +677,7 @@ class FilesElement(Element):
         pres: tuple[Element, ...] | None = None,
     ):
 
-        if is_prefix:
+        if isinstance(path, (str, Path)) and is_prefix:
             paths = {}
             p = Path(path)
             file_dir = p.parent
@@ -665,6 +695,7 @@ class FilesElement(Element):
         first = artifacts.values().__iter__().__next__()
         root = root or first.stem
         ext = ext or first.suffix.lstrip(".")
+        self.ext = ext
         tag = ElementTag(
             root=root,
             level=0,
@@ -674,10 +705,8 @@ class FilesElement(Element):
             state=State.RAW,
             ext=ext,
         ).merge(tag)
-        runner = runner or self.exist        
-        key = (
-            f"{tag.default_name}::{'::'.join([str(p) for p in artifacts.values()])}"
-        )
+        runner = runner or self.exist()
+        key = f"{tag.default_name}::{'::'.join([str(p) for p in artifacts.values()])}"
         super().__init__(
             key=key,
             run=runner,
@@ -722,14 +751,14 @@ class FilesElement(Element):
 
     def exist(self):
         return Runnable(
-            paths_exists(
-                *self.artifacts.values()
-            ),
-            display=CallSpec(path=("io", "paths_exists"),args=tuple(self.artifacts.values())).render(),
+            paths_exists(*self.artifacts.values()),
+            display=CallSpec(
+                path=("io", "paths_exists"), args=tuple(self.artifacts.values())
+            ).render(),
         )  # no-op runner, validation is done by skip logic
 
-class FileElement(FilesElement):
 
+class FileElement(FilesElement):
 
     def __init__(
         self,
@@ -740,13 +769,14 @@ class FileElement(FilesElement):
         root: str | None = None,
     ):
         path = Path(filepath).absolute()
-        ext = path.suffix.lstrip(".")
-        by_suffix = {ext: path}
+        self.ext = path.suffix.lstrip(".")
+        by_suffix = {self.ext: path}
         super().__init__(by_suffix, runner=runner, tag=tag, root=root, ext=self.ext)
 
     @property
     def file(self) -> Path:
         return self.artifacts[self.ext]
+
 
 class Sample(FilesElement):
 
@@ -758,11 +788,10 @@ class Sample(FilesElement):
         tag: PartialElementTag | ElementTag | None = None,
         is_prefix: bool = False,
         pres: tuple[Element, ...] | None = None,
-
     ):
         super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
 
-    
+
 class NextGenSampleElement(Sample):
 
     def __init__(
@@ -782,7 +811,7 @@ class NextGenSampleElement(Sample):
             root = root or Path(path).stem
         else:
             first = next(iter(path.values()))
-            root = root or Path(first).stem       
+            root = root or Path(first).stem
         tag = ElementTag(
             root=root,
             level=0,
@@ -806,7 +835,9 @@ class NextGenSampleElement(Sample):
         return sorted(self.artifacts.values(), key=str)
 
 
-def samples_from_df(path: Path | str, samples_df: DataFrame) -> dict[str, NextGenSampleElement]:
+def samples_from_df(
+    path: Path | str, samples_df: DataFrame
+) -> dict[str, NextGenSampleElement]:
     sammples_dict = {}
     for _, row in samples_df.iterrows():
         sample_name = str(row["name"])
@@ -827,6 +858,7 @@ def samples_from_df(path: Path | str, samples_df: DataFrame) -> dict[str, NextGe
         )
         sammples_dict[sample_name] = register(sample_element)
     return sammples_dict
+
 
 def sample_fastqs(
     sample: Sample | Element,
@@ -854,6 +886,171 @@ def sample_fastqs(
 def register(element: Element):
     return element
 
+
+class FilterSpec(ABC):
+
+    @abstractmethod
+    def fingerprint(self) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mask(self, df: DataFrame) -> Series:
+        """Evaluate the filter and return a boolean mask."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def __str__(self) -> str:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class NumericFilter(FilterSpec):
+    column: str
+    op: Literal["==", "!=", ">", ">=", "<", "<="]
+    value: Any
+
+    def fingerprint(self) -> str:
+        return stable_hash((self.column, self.op, self.value))
+
+    def mask(self, df: DataFrame) -> Series:
+        if self.op == "==":
+            return df[self.column] == self.value
+        elif self.op == "!=":
+            return df[self.column] != self.value
+        elif self.op == ">":
+            return df[self.column] > self.value
+        elif self.op == ">=":
+            return df[self.column] >= self.value
+        elif self.op == "<":
+            return df[self.column] < self.value
+        elif self.op == "<=":
+            return df[self.column] <= self.value
+        else:
+            raise ValueError(f"Unsupported operator: {self.op}")
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}({self.column} {self.op} {self.value})"
+
+
+@dataclass(frozen=True)
+class IsFilter(FilterSpec):
+    column: str
+    values: tuple[Any, ...]
+
+    def fingerprint(self) -> str:
+        return stable_hash((self.column, self.values))
+
+    def mask(self, df: DataFrame) -> Series:
+        return df[self.column].isin(self.values)
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}({self.column} in {self.values})"
+
+
+@dataclass(frozen=True)
+class NullFilter(FilterSpec):
+    column: str
+    is_null: bool = True
+
+    def fingerprint(self) -> str:
+        return stable_hash((self.column, self.is_null))
+
+    def mask(self, df: DataFrame) -> Series:
+        return df[self.column].isna() if self.is_null else ~df[self.column].isna()
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}({self.column} is {'null' if self.is_null else 'not null'})"
+
+
+@dataclass(frozen=True)
+class CallableFilter(FilterSpec):
+    fn: Callable
+
+    def fingerprint(self) -> str:
+        return function_hash(self.fn)
+
+    def mask(self, df: DataFrame) -> Series:
+        res = self.fn(df)
+        if not isinstance(res, Series):
+            raise TypeError("Callable must return boolean Series")
+        return res
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}({self.fn.__name__})"
+
+
+@dataclass(frozen=True)
+class OrFilter(FilterSpec):
+    filters: tuple[FilterSpec, ...]
+
+    def fingerprint(self) -> str:
+        return stable_hash(tuple(f.fingerprint() for f in self.filters))
+
+    def mask(self, df: DataFrame) -> Series:
+        masks = [f.mask(df) for f in self.filters]
+        out = masks[0].astype(bool)
+        for m in masks[1:]:
+            out |= m
+        return out
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}({', '.join(str(f) for f in self.filters)})"
+
+
+@dataclass(frozen=True)
+class AndFilter(FilterSpec):
+    filters: tuple[FilterSpec, ...]
+
+    def fingerprint(self) -> str:
+        return stable_hash(tuple(f.fingerprint() for f in self.filters))
+
+    def mask(self, df: DataFrame) -> Series:
+        masks = [f.mask(df) for f in self.filters]
+        out = masks[0].astype(bool)
+        for m in masks[1:]:
+            out &= m
+        return out
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}({', '.join(str(f) for f in self.filters)})"
+
+
+def parse_expression(column: str, expr: Any) -> FilterSpec:
+    ACCEPTED_OPS: list[str] = ["==", "!=", ">", ">=", "<", "<="]
+    if expr is None:
+        return NullFilter(column=column, is_null=True)
+    if isinstance(expr, str):
+        for op in ACCEPTED_OPS:
+            if expr.startswith(op):
+                value = try_cast(expr[len(op) :].strip())
+                return NumericFilter(column=column, op=op, value=value)
+    return IsFilter(column=column, values=(expr,))
+
+
+def parse_filter_specs(
+    filter_func: Callable[[DataFrame], DataFrame] | None = None, **kwargs
+) -> FilterSpec | None:
+    and_filters = []
+    if filter_func is not None:
+        and_filters.append(CallableFilter(fn=filter_func))
+    for column, condition in kwargs.items():
+        if isinstance(condition, list):
+            or_filters = []
+            for expr in condition:
+                or_filters.append(parse_expression(column, expr))
+            and_filters.append(OrFilter(filters=tuple(or_filters)))
+        elif isinstance(condition, str):
+            and_filters.append(parse_expression(column, condition))
+    if len(and_filters) > 1:
+        return AndFilter(filters=tuple(and_filters))
+    return and_filters[0] if and_filters else None
+
+
+def evaluate_filter(spec: FilterSpec, df: DataFrame) -> Series:
+    return spec.mask(df)
+
+
+@element
 class TableElement(Element):
     """An Element that produces a TSV (for humans) and a Parquet file (for the pipeline).
 
@@ -924,90 +1121,298 @@ class TableElement(Element):
 
     def __init__(
         self,
-        key: str,
-        run: Runnable | Callable[[], CompletedProcess] | Path | str | None = None,
+        source: Element | Runnable | Callable[[], DataFrame] | Path | str,
+        morphs: (
+            tuple[Callable[[DataFrame], DataFrame], ...]
+            | Callable[[DataFrame], DataFrame]
+            | None
+        ) = None,
         *,
         tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
         root: str | None = None,
-        tsv: Path | None = None,
-        parquet: Path | None = None,
+        mode: Literal["tsv", "parquet", "both"] = "both",
         column_roles: Mapping[str, str] | None = None,
         determinants: tuple | None = None,
         inputs: tuple[Path, ...] | None = None,
         pres: tuple[Element, ...] | None = None,
-        artifacts: Mapping[str, Any] | None = None,
-        name: str | None = None,
+        # artifacts: Mapping[str, Any] | None = None,
         index: str | None = None,
+        # name: str | None = None,
     ) -> None:
-        # --- resolve file-based construction ---
-        if isinstance(run, (Path, str)):
-            # run is actually a file path
-            p = Path(run).absolute()
-            if p.suffix in (".parquet",):
-                parquet = parquet or p
-            elif p.suffix in (".tsv", ".csv", ".txt"):
-                tsv = tsv or p
-            else:
-                raise ValueError(
-                    f"Cannot infer file type from suffix {p.suffix!r}. "
-                    "Pass tsv= or parquet= explicitly."
-                )
-            actual_run = paths_exists(p)
-            actual_run.threads = 1
-            actual_run.command = [f"check_exists({p})"]  # type: ignore[attr-defined]
-            inputs = inputs or (p,)
-            default_root = p.stem
-
-        elif run is None:
-            # tsv or parquet must be supplied explicitly
-            if parquet is None and tsv is None:
-                raise ValueError("Provide at least one of tsv= or parquet= when run=None.")
-            paths_to_check = [p for p in (tsv, parquet) if p is not None]
-            actual_run = paths_exists(*paths_to_check)
-            actual_run.threads = 1
-            actual_run.command = [f"check_exists(...)"]  # type: ignore[attr-defined]
-            inputs = inputs or tuple(paths_to_check)
-            default_root = paths_to_check[0].stem
-
+        source_file = None
+        ext = "tsv" if mode in ("tsv", "both") else "parquet"
+        source_fnc = None
+        if isinstance(morphs, tuple):
+            self._morphs = morphs
+        elif callable(morphs):
+            self._morphs = (morphs,)
         else:
-            actual_run = run
-            default_root = root or (name or key)
+            self._morphs = ()
+        state = State.PROCESSED if self._morphs else State.RAW
+        if isinstance(source, Element):
+            # run is actually a FileElement, extract paths and runner
+            source_file = source.file
+            tag = from_prior(
+                source.tag,
+                tag,
+                stage=Stage.INPUT,
+                method=Method.TABLE,
+                state=state,
+                ext=ext,
+            )
+            pres = (source,)
+            inputs = (source_file,)
+        elif isinstance(source, (Path, str)):
+            # run is actually a file path
+            source_file = Path(source).absolute()
+            root = root or source_file.stem
+            tag = ElementTag(
+                root=root,
+                level=0,
+                omics=Omics.DNA,
+                stage=Stage.INPUT,
+                method=Method.TABLE,
+                state=state,
+                ext=ext,
+            ).merge(tag)
+            inputs = (source_file,)
+        else:
+            state = State.GENERATED
+            tag = ElementTag(
+                root=root or (tag.root if (tag and tag.root) else "generated_table"),
+                level=0,
+                omics=Omics.DNA,
+                stage=Stage.INPUT,
+                method=Method.TABLE,
+                state=state,
+                ext=ext,
+            ).merge(tag)
+        if source_file and not self._morphs:
+            output_file = source_file
+        else:
+            output_dir = Path(outdir or "cache")
+            out_filename = filename or tag.default_output
+            output_file = output_dir / out_filename
+            artifacts = {ext: output_file}
+        self._tsv = None
+        self._parquet = None
+        if mode == "tsv":
+            self._tsv = output_file
+        elif mode == "parquet":
+            self._parquet = output_file
+        else:  # mode == "both":
+            self._tsv = output_file
+            output_parquet = output_file.with_suffix(".parquet")
+            artifacts["parquet"] = output_parquet
+            self._parquet = output_parquet
 
-        if tsv is None and parquet is None:
-            raise ValueError("At least one of tsv= or parquet= must be provided.")
-
-        # sentinel so we can tell callers "no TSV / no parquet"
-        self._tsv     = Path(tsv)     if tsv     is not None else None
-        self._parquet = Path(parquet) if parquet is not None else None
         self.index_column = index
         self.column_roles: dict[str, str] = dict(column_roles or {})
-
-        artifacts: dict[str, Any] = artifacts or {}
-        if self._tsv:
-            artifacts["tsv"] = self._tsv
-        if self._parquet:
-            artifacts["parquet"] = self._parquet
-        root = root or default_root
-        tag = ElementTag(
-            root=root,
-            level=0,
-            omics=None,
-            stage=Stage.INPUT,
-            method=Method.CHECK,
-            state=State.RAW,
-            ext=".tsv",
-        ).merge(tag)
-
+        source_fnc = source if callable(source) else None
+        runner = self._get_runnable(source_file, source_fnc)
+        key, name = generate_element_key_name(tag, "TableElement", None)
         super().__init__(
             key=key,
-            run=actual_run,
+            run=runner,
             tag=tag,
-            determinants=determinants,
             inputs=inputs,
             artifacts=artifacts,
+            determinants=determinants,
             pres=pres,
             name=name,
         )
+
+    def _get_runnable(
+        self,
+        source_file: Path | None,
+        source: Runnable | Callable[[], DataFrame] | None,
+    ) -> Runnable:
+
+        def read_and_morph():
+            if source_file:
+                df = read_frame(source_file)
+            elif source:
+                df = source()  # Runnable/callable, must have a DF return value
+            else:
+                raise ValueError("Either source_file or source must be provided")
+            if self._morphs:
+                for morph in self._morphs:
+                    df = morph(df)
+            for path in self.output_files:
+                write_frame(df, path)
+
+        if not self._morphs and source_file:
+            spec = CallSpec(path=("io", "check_exists"), args=(source_file,)).render()
+            runner = Runnable(
+                paths_exists_raise(source_file),
+                display=spec,
+            )
+        else:
+            spec = CallSpec(("_get_runnable", "read_and_morph")).render()
+            runner = Runnable(read_and_morph, display=spec)
+        return runner
+
+    def filter(
+        self,
+        fnc: Callable[[DataFrame], DataFrame] | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        **kwargs,
+    ) -> TableSeed:
+        ptag = PartialElementTag(state=State.FILTER)
+        tag = tag.merge(ptag) if tag else ptag
+        seed = TableSeed(source=self, morphs=())
+        return seed.filter(fnc, tag=tag, **kwargs)
+
+    def add(
+        self,
+        fnc: Callable[[], dict[str, Series]],
+        tag: PartialElementTag | ElementTag | None = None,
+    ) -> TableSeed:
+        ptag = PartialElementTag(state=State.FILTER)
+        tag = tag.merge(ptag) if tag else ptag
+        seed = TableSeed(source=self, morphs=())
+        return seed.add(fnc, tag=tag)
+
+    # def filter_table(
+    #     self,
+    #     outfile_tsv: Path,
+    #     filter_spec: FilterSpec | None = None,
+    # ) -> Runnable:
+    #     """Apply a filter function to the full DataFrame and return the result.
+
+    #     This is a convenience wrapper around :attr:`df` for quick ad-hoc
+    #     filtering without having to load the full table into memory first.
+
+    #     Parameters
+    #     ----------
+    #     filter_func : Callable[[DataFrame], DataFrame]
+    #         Function that takes a DataFrame and returns a filtered DataFrame.
+
+    #     Returns
+    #     -------
+    #     DataFrame
+    #         Filtered DataFrame.
+    #     """
+
+    #     def __filter():
+    #         if filter_spec is None:
+    #             return self.df
+    #         mask = filter_spec.mask(self.df)
+    #         df_out = self.df[mask]
+    #         write_frame(df_out, outfile_tsv, mode="both")
+
+    #     callspec = CallSpec(
+    #         ("filter_table",),
+    #         kwargs={"filter_spec": filter_spec},
+    #     ).render()
+    #     return Runnable(__filter, display=callspec)
+
+    # def filter(
+    #     self,
+    #     fnc: Callable[[DataFrame], DataFrame] | None = None,
+    #     **kwargs,
+    # ) -> TableView:
+
+    #     def __filter(data: DataFrame) -> DataFrame:
+    #         filter_spec = parse_filter_specs(fnc, **kwargs)
+    #         if filter_spec is None:
+    #             return data
+    #         mask = filter_spec.mask(data)
+    #         return data[mask]
+
+    #     return TableView(
+    #         source=self,
+    #         morphs=(__filter,),
+    #     )
+
+    #         run = (self.filter_table(filter_spec),)
+
+    #     key, name = generate_element_key_name(tag, "custom", None)
+    #     determinants = (filter_spec.fingerprint(),) if filter_spec else None
+    #     infile = self.tsv or self.parquet
+    #     inputs = tuple(p for p in (self._tsv, self._parquet) if p is not None)
+    #     tsv = (
+    #         (infile.parent / tag.default_name).with_suffix(".tsv")
+    #         if self._tsv
+    #         else None
+    #     )
+    #     parquet = (
+    #         (infile.parent / tag.default_name).with_suffix(".parquet")
+    #         if self._parquet
+    #         else None
+    #     )
+    #     artifacts = {
+    #         "tsv": tsv,
+    #         "parquet": parquet,
+    #     }
+    #     element = TableElement(
+    #         key=key,
+    #         tag=tag,
+    #         tsv=tsv,
+    #         parquet=parquet,
+    #         column_roles=self.column_roles,
+    #         determinants=determinants,
+    #         inputs=inputs,
+    #         pres=(self,),
+    #         artifacts=artifacts,
+    #         name=name,
+    #     )
+    #     return element
+
+    # @element
+    # def modify(
+    #     self,
+    #     fnc: Callable[[DataFrame], DataFrame],
+    #     **kwargs,
+    # ) -> TableElement:
+
+    #     tag = from_prior(
+    #         self.tag,
+    #         state=State.ANNOTATE,
+    #         method=Method.CUSTOM,
+    #         ext="tsv",
+    #     )
+    #     key, name = generate_element_key_name(tag, "custom", None)
+
+    #     def __run():
+    #         df_out = fnc(self.df)
+    #         infile = self.tsv or self.parquet
+    #         write_frame(df_out, infile, mode="both")
+
+    #     run = Runnable(__run, display=CallSpec(f"modify({fnc.__name__})").render())
+    #     determinants = (function_hash(fnc),)
+    #     infile = self.tsv or self.parquet
+    #     inputs = tuple(p for p in (self._tsv, self._parquet) if p is not None)
+    #     tsv = (
+    #         (infile.parent / tag.default_name).with_suffix(".tsv")
+    #         if self._tsv
+    #         else None
+    #     )
+    #     parquet = (
+    #         (infile.parent / tag.default_name).with_suffix(".parquet")
+    #         if self._parquet
+    #         else None
+    #     )
+    #     artifacts = {
+    #         "tsv": tsv,
+    #         "parquet": parquet,
+    #     }
+    #     element = TableElement(
+    #         key=key,
+    #         run=run,
+    #         tag=tag,
+    #         tsv=tsv,
+    #         parquet=parquet,
+    #         column_roles=self.column_roles,
+    #         determinants=determinants,
+    #         inputs=inputs,
+    #         pres=(self,),
+    #         artifacts=artifacts,
+    #         name=name,
+    #     )
+    #     return element
 
     @property
     def tsv(self) -> Path:
@@ -1034,7 +1439,7 @@ class TableElement(Element):
     @property
     def file(self) -> Path:
         return self.parquet if self._parquet is not None else self.tsv
-    
+
     # ------------------------------------------------------------------
     # column_roles helpers
     # ------------------------------------------------------------------
@@ -1051,7 +1456,7 @@ class TableElement(Element):
     # Views
     # ------------------------------------------------------------------
 
-    def view(self, role: str) -> pd.DataFrame:
+    def view(self, role: str) -> DataFrame:
         """Return a :class:`~pandas.DataFrame` with only the columns that
         have the given *role*.
 
@@ -1064,7 +1469,7 @@ class TableElement(Element):
 
         Returns
         -------
-        pd.DataFrame
+        DataFrame
             Subset of :attr:`df` with only the matching columns.
 
         Raises
@@ -1084,7 +1489,7 @@ class TableElement(Element):
         self,
         *roles: str,
         extra_columns: Iterable[str] | None = None,
-    ) -> pd.DataFrame:
+    ) -> DataFrame:
         """Return a DataFrame with columns matching any of the given *roles*.
 
         Parameters
@@ -1096,7 +1501,7 @@ class TableElement(Element):
 
         Returns
         -------
-        pd.DataFrame
+        DataFrame
             Combined subset; column order follows the original table.
         """
         wanted: set[str] = set()
@@ -1137,11 +1542,7 @@ class TableElement(Element):
         >>> vst_element = TableElement(..., column_roles=derived_roles)
         """
         keep = frozenset(roles) if roles is not None else self.ANNOTATION_ROLES
-        return {
-            col: role
-            for col, role in self.column_roles.items()
-            if role in keep
-        }
+        return {col: role for col, role in self.column_roles.items() if role in keep}
 
     # ------------------------------------------------------------------
     # Convenience: expression-matrix view
@@ -1177,7 +1578,7 @@ class TableElement(Element):
         if self._parquet is not None and self._parquet.exists():
             df = pd.read_parquet(self._parquet)
         elif self._tsv is not None and self._tsv.exists():
-            df = pd.read_csv(self._tsv, sep="\t") # , index_col=self.index_column)
+            df = pd.read_csv(self._tsv, sep="\t")  # , index_col=self.index_column)
         else:
             raise FileNotFoundError(
                 f"Neither Parquet nor TSV output found for {self.name!r}.\n"
@@ -1188,6 +1589,64 @@ class TableElement(Element):
             df["index"] = df[self.index_column].copy()
             df.set_index("index", inplace=True)
         return df
+
+
+@dataclass
+class TableSeed:
+    source: TableElement
+    morphs: tuple[Callable[[DataFrame], DataFrame], ...]
+    tag: PartialElementTag | ElementTag | None = None
+
+    def filter(
+        self,
+        fnc: Callable[[DataFrame], DataFrame] | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        **kwargs,
+    ) -> TableSeed:
+
+        def __filter(data: DataFrame) -> DataFrame:
+            filter_spec = parse_filter_specs(fnc, **kwargs)
+            if filter_spec is None:
+                return data
+            mask = filter_spec.mask(data)
+            return data[mask]
+
+        return TableSeed(
+            source=self.source,
+            morphs=(__filter,),
+            tag=self.source.tag.merge(tag),
+        )
+
+    def add(
+        self,
+        fnc: Callable[[], dict[str, Series]],
+        tag: PartialElementTag | ElementTag | None = None,
+    ) -> TableSeed:
+
+        def __add_columns(data: DataFrame) -> DataFrame:
+            new_columns = fnc()
+            for col, series in new_columns.items():
+                data[col] = series
+            return data
+
+        return TableSeed(
+            source=self.source,
+            morphs=(__add_columns,),
+            tag=self.source.tag.merge(tag),
+        )
+
+    def materialize(self) -> TableElement:
+        return TableElement(
+            source=self.source,
+            morphs=self.morphs,
+            tag=from_prior(
+                self.source.tag,
+                self.tag,
+            ),
+        )
+
+    def __call__(self) -> TableElement:
+        return self.materialize()
 
 
 class AdataElement(Element):
@@ -1347,8 +1806,12 @@ class AdataElement(Element):
             )
         return ad.read_h5ad(self._h5ad)
 
-
-    def view(self, layer: str | None = None, obs_roles: dict[str, list[str]] = None, var_roles: dict[str, list[str]] = None) -> DataFrame:
+    def view(
+        self,
+        layer: str | None = None,
+        obs_roles: dict[str, list[str]] = None,
+        var_roles: dict[str, list[str]] = None,
+    ) -> DataFrame:
         """Return a DataFrame of a given layer filtered by obs columns and/or var columns.
 
         Parameters
@@ -1370,17 +1833,16 @@ class AdataElement(Element):
         KeyError
             If no ``obs`` or ``var`` columns are registered.
         """
-        var_mask = pd.Series(True, index=self.adata.var_names)
+        var_mask = Series(True, index=self.adata.var_names)
         if var_roles:
             for col, wanted in var_roles.items():
                 var_mask &= self.adata.var[col].isin(wanted)
-        obs_mask = pd.Series(True, index=self.adata.obs_names)
+        obs_mask = Series(True, index=self.adata.obs_names)
         if obs_roles:
             for col, wanted in obs_roles.items():
                 obs_mask &= self.adata.obs[col].isin(wanted)
         df_view = self.adata[layer][obs_mask, var_mask]
         return df_view
-        
 
     # # ------------------------------------------------------------------
     # # obs helpers
@@ -1394,7 +1856,7 @@ class AdataElement(Element):
     #     """Return the set of distinct roles registered for ``obs``."""
     #     return set(self.obs_roles.values())
 
-    # def obs_view(self, role: str) -> pd.DataFrame:
+    # def obs_view(self, role: str) -> DataFrame:
     #     """Return a DataFrame of ``obs`` columns that have the given *role*.
 
     #     Parameters
@@ -1404,7 +1866,7 @@ class AdataElement(Element):
 
     #     Returns
     #     -------
-    #     pd.DataFrame
+    #     DataFrame
 
     #     Raises
     #     ------
@@ -1432,7 +1894,7 @@ class AdataElement(Element):
     #     """Return the set of distinct roles registered for ``var``."""
     #     return set(self.var_roles.values())
 
-    # def var_view(self, role: str) -> pd.DataFrame:
+    # def var_view(self, role: str) -> DataFrame:
     #     """Return a DataFrame of ``var`` columns that have the given *role*.
 
     #     Parameters
@@ -1442,7 +1904,7 @@ class AdataElement(Element):
 
     #     Returns
     #     -------
-    #     pd.DataFrame
+    #     DataFrame
 
     #     Raises
     #     ------
@@ -1554,7 +2016,7 @@ class AdataElement(Element):
 def generate_element_key_name(
     tag: ElementTag,
     tool_name: str,
-    tool_version: str | None,
+    tool_version: str | None = None,
     subcommand: str | None = None,
     suffix: str | None = None,
     **params_str: Any,
