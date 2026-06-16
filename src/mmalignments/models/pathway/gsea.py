@@ -36,13 +36,14 @@ from __future__ import annotations
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 import gseapy as gp  # type: ignore[import]
 import pandas as pd  # type: ignore[import]
 from pandas import DataFrame
 
 from mmalignments.models.elements import (
+    CallSpec,
     Element,
     FileElement,
     Runnable,
@@ -60,7 +61,7 @@ from mmalignments.models.tags import (
 )
 from mmalignments.models.tags import PartialElementTag as PTag
 from mmalignments.services.dependencies import depends
-from mmalignments.services.io import exists, parents, read_frame
+from mmalignments.services.io import concat_files, exists, parents, read_frame
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +195,7 @@ class GseaPy:
             method=Method.GSEA,
             state=State.ENRICHMENT,
             ext="tsv",
+            param="gsea",
         )
 
         outdir_path = Path(outdir or self.default_outdir("gsea", expression.root))
@@ -301,6 +303,7 @@ class GseaPy:
             state=State.ENRICHMENT,
             ext="tsv",
             root=ranking.tag.root,
+            param="prerank",
         )
 
         output_dir = Path(outdir or self.default_outdir("prerank", ranking.root))
@@ -405,6 +408,7 @@ class GseaPy:
             method=Method.GSEA,
             state=State.ENRICHMENT,
             ext="tsv",
+            param="enrichr",
         )
 
         outdir_path = Path(outdir or self.default_outdir("enrichr", gene_list.root))
@@ -557,6 +561,7 @@ class MSigDB:
         collection: str,
         *,
         tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
     ) -> FileElement:
         """Download a MSigDB gene-set collection as a GMT file.
 
@@ -583,12 +588,13 @@ class MSigDB:
                 f"Unknown MSigDB collection: {collection!r}.  "
                 f"Known collections: {sorted(self.collections_files)}"
             )
+        output_dir = Path(outdir or self.cache_dir)
         filename = self.collections_files[collection_key]
-        gmt_path = self.cache_dir / filename
+        gmt_path = output_dir / filename
 
         tag = (
             PTag(
-                root=f"msigdb_{collection_key.lower()}",
+                root=f"{collection_key.lower()}",
                 level=0,
                 stage=Stage.INPUT,
                 method=Method.MSIGDB,
@@ -617,79 +623,244 @@ class MSigDB:
             root=collection_key,
         )
 
-    # @element
-    # def download_as_element(
-    #     self,
-    #     collection: str,
-    #     *,
-    #     organism: str = "Human",
-    #     tag: PartialElementTag | ElementTag | None = None,
-    # ) -> Element:
-    #     """Download a MSigDB gene-set collection; return a plain Element.
+    @element
+    def merge(
+        self,
+        gmts: Iterable[FileElement],
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+    ) -> FileElement:
+        """Merge multiple MSigDB GMT files into a single GMT file.
 
-    #     Identical to :meth:`download` but returns a plain :class:`Element`
-    #     (not a :class:`FileElement`) so the output file does not need to
-    #     exist yet at element-construction time.
+        If the file already exists (signature matches) the merge is
+        skipped like any other pipeline element.
 
-    #     The ``gmt`` artifact holds the path to the downloaded GMT file.
+        Parameters
+        ----------
+        gmts : List[FileElement]
+            List of GMT files to merge.
+        tag : PartialElementTag | ElementTag | None
+            Optional tag override.
+        outdir : Path | str | None
+            Output directory for the merged GMT file.
+        filename : Path | str | None
+            Filename for the merged GMT file.
 
-    #     Parameters
-    #     ----------
-    #     collection : str
-    #         MSigDB collection identifier, e.g. ``"H"``, ``"C2"``.
-    #     organism : str
-    #         ``"Human"`` or ``"Mouse"``.
-    #     tag : PartialElementTag | ElementTag | None
-    #         Optional tag override.
+        Returns
+        -------
+        FileElement
+            Points to the local GMT file.
+        """
+        first_element = next(iter(gmts), None)
+        if first_element is None:
+            raise ValueError("No GMT files provided for merging.")
+        root = f"msigdb_{['_'.join(element.root for element in gmts)]}"
+        tag = from_prior(
+            first_element.tag,
+            tag,
+            stage=Stage.INPUT,
+            state=State.MERGED,
+            root=root,
+            ext="gmt",
+        )
+        output_dir = Path(outdir or self.cache_dir)
+        filename = filename or tag.default_output
+        gmt_path = output_dir / filename
 
-    #     Returns
-    #     -------
-    #     Element
-    #         ``gmt`` artifact → path to local GMT file.
-    #     """
-    #     from mmalignments.models.tags import PartialElementTag as PTag
+        @depends(_download_gmt, concat_files)
+        def _run():
+            concat_files(gmt_path, *(element.file for element in gmts))
 
-    #     collection_key = collection.upper()
-    #     if collection_key not in self._COLLECTION_FILES:
-    #         raise ValueError(
-    #             f"Unknown MSigDB collection: {collection!r}.  "
-    #             f"Known: {sorted(self._COLLECTION_FILES)}"
-    #         )
-    #     filename = self._COLLECTION_FILES[collection_key]
-    #     gmt_path = self.cache_dir / filename
+        spec = CallSpec(
+            path=("MsigDB", "merge"),
+            args=(gmts,),
+        ).render()
+        runner = Runnable(_run, display=spec)
 
-    #     base_tag = PTag(
-    #         root=f"msigdb_{collection_key.lower()}",
-    #         level=0,
-    #         stage=Stage.INPUT,
-    #         method=Method.MSIGDB,
-    #         state=State.DOWNLOAD,
-    #         ext="gmt",
-    #     ).merge(tag).resolve()
+        return FileElement(
+            filepath=gmt_path,
+            runner=runner,
+            tag=tag,
+            root=root,
+            pres=tuple(gmts),
+        )
 
-    #     @depends(_download_gmt)
-    #     def _run():
-    #         _download_gmt(
-    #             collection_key=collection_key,
-    #             filename=filename,
-    #             gmt_path=gmt_path,
-    #             base_url=self._MSIGDB_GMT_URL,
-    #         )
+    @element
+    def collections(
+        self,
+        collections: Iterable[str],
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+    ) -> FileElement:
+        """
+        Download and merge multiple MSigDB collections into a single GMT file.
 
-    #     runner = Runnable(_run, display=f"msigdb.download({collection_key})")
-    #     key = base_tag.default_name
-    #     name = base_tag.default_name
+        Parameters
+        ----------
+        collections : Iterable[str]
+            List of MSigDB collections to download and merge.
+        tag : PartialElementTag | ElementTag | None, optional
+            Optional tag override, by default None
+        outdir : Path | str | None, optional
+            Output directory for the merged GMT file, by default None
+        filename : Path | str | None, optional
+            Filename for the merged GMT file, by default None
 
-    #     return Element(
-    #         key,
-    #         runner,
-    #         tag=base_tag,
-    #         artifacts={"gmt": gmt_path},
-    #         inputs=(),
-    #         pres=(),
-    #         name=name,
-    #         empty_ok=False,
-    #     )
+        Returns
+        -------
+        FileElement
+            Points to the local GMT file.
+        """
+        gmts = [self.download(collection, outdir=outdir) for collection in collections]
+
+        return self.merge(gmts, tag=tag, outdir=outdir, filename=filename)
+
+    @element
+    def select(
+        self,
+        gmt: FileElement,
+        genesets: Iterable[str],
+        *,
+        root: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+    ) -> FileElement:
+        """
+        Select and merge single MSigDB gene sets from a GMT file into a new GMT file.
+
+        Gene set ids from MSigSB must be prefixed with the MSigSB collection
+        name e.g. "H.HALLMARK_ADIPOGENESIS, C2.KEGG_P53_SIGNALLING". The input
+        GMT file can be obtained from the download method or any custom GMT file.
+
+        Parameters
+        ----------
+        gmt : FileElement
+            Input GMT file containing the gene sets to select from.
+        genesets : Iterable[str]
+            List of MSigDB gene sets to select and merge.
+        tag : PartialElementTag | ElementTag | None, optional
+            Optional tag override, by default None
+        outdir : Path | str | None, optional
+            Output directory for the merged GMT file, by default None
+        filename : Path | str | None, optional
+            Filename for the merged GMT file, by default None
+
+        Returns
+        -------
+        FileElement
+            Points to the local GMT file.
+        """
+        if not genesets:
+            raise ValueError("No gene sets provided for selection.")
+
+        tag = from_prior(
+            gmt.tag,
+            tag,
+            stage=Stage.INPUT,
+            state=State.DOWNLOAD,
+            root=root,
+            ext="gmt",
+        )
+        output_dir = Path(outdir or self.cache_dir)
+        filename = filename or tag.default_output
+        gmt_path = output_dir / filename
+
+        @depends(_select_gene_sets)
+        def _run():
+            _select_gene_sets(
+                input_gmt=Path(gmt.file),
+                selected_genesets=genesets,
+                output_gmt=gmt_path,
+            )
+
+        spec = CallSpec(
+            path=_("MsigDB", "select"),
+            args=(gmt, genesets),
+        ).render()
+        runner = Runnable(_run, display=spec)
+
+        return FileElement(
+            filepath=gmt_path,
+            runner=runner,
+            determinants=tuple(genesets),
+            tag=tag,
+            root=root,
+            pres=(gmt,),
+        )
+
+    @element
+    def custom(
+        self,
+        genesets_msig: Iterable[str] | None,
+        genesets_custom: FileElement | Iterable[FileElement] | None,
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+    ) -> FileElement:
+        """
+        Download and merge single MSigDB gene sets and self-compiled custom gene sets
+        into a single GMT file.
+
+        Gene set ids from MSigSB must be prefixed with the MSigSB collection
+        name e.g. "H.HALLMARK_ADIPOGENESIS, C2.KEGG_P53_SIGNALLING". If self-defined
+        custom gene sets are to be used, we assume that instead of ids to be retrieved,
+        ready FileElements representing the input files are supplied.
+
+        Parameters
+        ----------
+        genesets_msig : Iterable[str]
+            List of MSigDB gene sets to download and merge.
+        genesets_custom : Iterable[FileElement]
+            List of custom gene sets to merge.
+        tag : PartialElementTag | ElementTag | None, optional
+            Optional tag override, by default None
+        outdir : Path | str | None, optional
+            Output directory for the merged GMT file, by default None
+        filename : Path | str | None, optional
+            Filename for the merged GMT file, by default None
+
+        Returns
+        -------
+        FileElement
+            Points to the local GMT file.
+        """
+        if genesets_msig is None and genesets_custom is None:
+            raise ValueError(
+                "At least one of genesets_msig or genesets_custom must be provided."
+            )
+
+        genesets_from_msig = {}
+        if genesets_msig is not None:
+            for geneset_id in genesets_msig:
+                if "." not in geneset_id:
+                    raise ValueError(
+                        f"Invalid MSigDB gene set id: {geneset_id!r}.  Must be prefixed with collection name, e.g. 'H.HALLMARK_ADIPOGENESIS'."
+                    )
+                splits = geneset_id.split(".")
+                collection, gene_set = splits[0], splits[1]
+                genesets_from_msig.setdefault(collection, []).append(gene_set)
+        # download the collections needed
+        gmts = []
+        for collection, gene_sets in genesets_from_msig.items():
+            gmt = self.download(collection, outdir=outdir)
+            selected = self.select(gmt, gene_sets, outdir=outdir)
+            gmts.append(selected)
+
+        # if we have custom sets as well, add them to the merge stack
+        if genesets_custom:
+            gmts.extend(
+                [genesets_custom]
+                if isinstance(genesets_custom, FileElement)
+                else genesets_custom
+            )
+        # retrieve the relevant sets for each collection and merge them
+        return self.merge(gmts, tag=tag, outdir=outdir, filename=filename)
 
     # ------------------------------------------------------------------
     # to_ensembl
@@ -1025,3 +1196,21 @@ def _build_key_name(tag: ElementTag, subcommand: str) -> tuple[str, str]:
     name = tag.default_name
     key = f"{name}_{subcommand}"
     return key, name
+
+
+def _select_gene_sets(
+    input_gmt: Path,
+    selected_genesets: Iterable[str],
+    output_gmt: Path,
+) -> None:
+    selected_set_names = set(selected_genesets)
+    with input_gmt.open() as infile, output_gmt.open("w") as outfile:
+        for line in infile:
+            if not line.strip():
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) < 3:
+                continue
+            set_name = parts[0]
+            if set_name in selected_set_names:
+                outfile.write(line)

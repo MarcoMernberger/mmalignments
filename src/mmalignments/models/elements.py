@@ -767,11 +767,12 @@ class FileElement(FilesElement):
         runner: Runnable | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
+        pres: tuple[Element, ...] | None = None,
     ):
         path = Path(filepath).absolute()
         self.ext = path.suffix.lstrip(".")
         by_suffix = {self.ext: path}
-        super().__init__(by_suffix, runner=runner, tag=tag, root=root, ext=self.ext)
+        super().__init__(by_suffix, runner=runner, tag=tag, root=root, ext=self.ext, pres=pres)
 
     @property
     def file(self) -> Path:

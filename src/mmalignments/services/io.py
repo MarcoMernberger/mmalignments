@@ -221,3 +221,11 @@ def read_frame(path: Path, **kwargs) -> DataFrame:
         return pd.read_excel(path, **kwargs)
     else:
         raise ValueError(f"Unsupported file format: {path.suffix}")
+
+
+def concat_files(output_file: Path, *input_files: Path) -> None:
+    with open(output_file, "w") as out_f:
+        for input_file in input_files:
+            with open(input_file, "r") as in_f:
+                for line in in_f:
+                    out_f.write(line)
