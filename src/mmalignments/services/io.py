@@ -3,7 +3,7 @@
 import gzip
 import json
 from pathlib import Path
-from typing import IO, Any, Callable
+from typing import IO, Any, Callable, Literal, Mapping
 
 import pandas as pd  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
@@ -107,6 +107,26 @@ def write_fastq_check_results(
 
 
 def from_json(infile: Path, encoding="utf-8") -> dict[str, str | int | float]:
+    """
+    Load a JSON file and return its contents as a dictionary.
+
+    Parameters
+    ----------
+    infile : Path
+        The path to the JSON file to load.
+    encoding : str, optional
+        The encoding to use when reading the file, by default "utf-8"
+
+    Returns
+    -------
+    dict[str, str | int | float]
+        The contents of the JSON file as a dictionary.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the JSON file does not exist.
+    """
     if not infile.exists():
         raise FileNotFoundError(f"JSON file not found: {infile}")
 
@@ -116,6 +136,26 @@ def from_json(infile: Path, encoding="utf-8") -> dict[str, str | int | float]:
 
 
 def load_param_json(path: Path) -> dict[str, Any]:
+    """
+    Load a parameter JSON file and return its contents as a dictionary.
+
+    Parameters
+    ----------
+    path : Path
+        The path to the parameter JSON file.
+
+    Returns
+    -------
+    dict[str, Any]
+        The contents of the parameter JSON file as a dictionary.
+
+    Raises
+    ------
+    ValueError
+        If the top-level JSON is not an object.
+    FileNotFoundError
+        If the parameter JSON file does not exist.
+    """
     try:
         obj = from_json(path)
         if not isinstance(obj, dict):
@@ -130,6 +170,18 @@ def load_param_json(path: Path) -> dict[str, Any]:
 def open_target(
     target: Path | None | IO = None, *, append: bool, encoding: str = "utf-8"
 ):
+    """
+    Open a target file or return an existing file-like object.
+
+    Parameters
+    ----------
+    append : bool
+        Whether to append to the file if it exists.
+    target : Path | None | IO, optional
+        The target file path or file-like object, by default None
+    encoding : str, optional
+        The encoding to use when opening the file, by default "utf-8"
+    """
     if target is None:
         return None
     if isinstance(target, Path):
@@ -186,13 +238,72 @@ def exists(path: Path | str) -> Callable[[], bool]:
 
 
 def write_fasta(path: Path, sequences: dict[str, str]) -> None:
+    """
+    Write sequences to a FASTA file.
+
+    Parameters
+    ----------
+    path : Path
+        The path to the output FASTA file.
+    sequences : dict[str, str]
+        A dictionary mapping sequence names to sequences.
+    """
     parents(path)
     with open(path, "w") as f:
         for name, seq in sequences.items():
             f.write(f">{name}\n{seq}\n")
 
 
+def write_frames(
+    df: DataFrame,
+    path: Path,
+    mode: Literal["tsv", "parquet", "both"] = "both",
+    **kwargs,
+) -> None:
+    """
+    Write a DataFrame to a file.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The DataFrame to write.
+    path : Path
+        The path to the file to write.
+    mode : Literal["tsv", "parquet", "both"], optional
+        The mode to write the file, by default "both".
+
+    Raises
+    ------
+    ValueError
+        If the file format is unsupported.
+    """
+    if mode == "both":
+        write_frames(df, path.with_suffix(".tsv"), mode="tsv", **kwargs)
+        write_frames(df, path.with_suffix(".parquet"), mode="parquet", **kwargs)
+    elif mode == "tsv":
+        write_frame(df, path.with_suffix(".tsv"), **kwargs)
+    elif mode == "parquet":
+        write_frame(df, path.with_suffix(".parquet"), **kwargs)
+    else:
+        raise ValueError(f"Unsupported file format: {mode}")
+
+
 def write_frame(df: DataFrame, path: Path, **kwargs) -> None:
+    """
+    Write a DataFrame to a file.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The DataFrame to write.
+    path : Path
+        The path to the file to write.
+
+    Raises
+    ------
+    ValueError
+        If the file format is unsupported.
+    """
     ext = path.suffix.lower()
     parents(path)
     params = {"sep": "\t", "index": False}
@@ -210,7 +321,24 @@ def write_frame(df: DataFrame, path: Path, **kwargs) -> None:
 
 
 def read_frame(path: Path, **kwargs) -> DataFrame:
+    """
+    Read a DataFrame from a file.
 
+    Parameters
+    ----------
+    path : Path
+        The path to the file to read.
+
+    Returns
+    -------
+    DataFrame
+        The DataFrame read from the file.
+
+    Raises
+    ------
+    ValueError
+        If the file format is unsupported.
+    """
     if path.suffix == ".tsv":
         return pd.read_csv(path, sep="\t", **kwargs)
     elif path.suffix == ".parquet":
@@ -224,8 +352,42 @@ def read_frame(path: Path, **kwargs) -> DataFrame:
 
 
 def concat_files(output_file: Path, *input_files: Path) -> None:
+    """
+    Concatenate multiple input files into a single output file.
+
+    Parameters
+    ----------
+    output_file : Path
+        The path to the output file.
+    input_files : Path
+        One or more paths to the input files to concatenate.
+    """
     with open(output_file, "w") as out_f:
         for input_file in input_files:
             with open(input_file, "r") as in_f:
                 for line in in_f:
                     out_f.write(line)
+
+
+def get_paths_from_prefix_path(path: str | Path) -> Mapping[str, Path]:
+    """
+    Get all paths in the same directory as the given path that start with the same prefix.
+
+    Parameters
+    ----------
+    path : str | Path
+        The path to use as the prefix.
+
+    Returns
+    -------
+    Mapping[str, Path]
+        A mapping of file stem to absolute Path for all matching files.
+    """
+    paths = {}
+    p = Path(path)
+    file_dir = p.parent
+    prefix = p.stem
+    for p in file_dir.iterdir():
+        if p.stem.startswith(prefix):
+            paths[p.stem] = p.absolute()
+    return paths

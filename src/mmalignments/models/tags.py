@@ -87,6 +87,8 @@ class Method(str, Enum):
     GSEA = "gsea"
     MSIGDB = "msigdb"
     TABLE = "table"
+    NGMERGE = "ngmerge"
+    TABLES = "tables"
 
 
 def level(level: int) -> str:

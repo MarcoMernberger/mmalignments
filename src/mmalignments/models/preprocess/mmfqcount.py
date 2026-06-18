@@ -58,7 +58,13 @@ from mmalignments.models.tags import (
 from mmalignments.services.dependencies import function_hash
 from mmalignments.services.io import parents
 
-from ..externals import External, ExternalRunConfig, Runnable, SubroutineIn, subroutine
+from ..externals import (
+    External,
+    ExternalRunConfig,
+    Runnable,
+    SubroutineIn,
+    subroutine,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +301,7 @@ class MmFqCount(External):
             Element whose artifact ``"tsv"`` is the path to the counts TSV.
         """
         fastq_r1 = sample.fastq_r1
-        fastq_r2 = sample.fastq_r2 if sample.fastq_r2 else None
+        fastq_r2 = sample.fastq_r2 if hasattr(sample, "fastq_r2") else None
 
         tag = from_prior(
             sample.tag,
@@ -322,14 +328,13 @@ class MmFqCount(External):
         determinants = self.signature_determinants(params, subroutine="count")
         inputs = (fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,)
 
-        return TableElement(
+        return Element(
             key,
             runner,
             tag=tag,
-            tsv=output_tsv,
-            artifacts={"tsv": output_tsv},
             determinants=determinants,
             inputs=inputs,
+            artifacts={"tsv": output_tsv},
             pres=(sample,),
             name=name,
         )
@@ -400,7 +405,7 @@ class MmFqCount(External):
     def match(
         self,
         counts: Element,
-        predefined: "Element | Path | str",
+        predefined: Element | Path | str,
         *,
         seq_col: str = "Sequence",
         r2_col: str | None = None,

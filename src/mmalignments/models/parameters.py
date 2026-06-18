@@ -11,7 +11,7 @@ from mmalignments.services.io import load_param_json
 
 
 @dataclass(frozen=True)
-class Params:
+class Params(Mapping[str, Any]):
     _override_params: Mapping[str, Any] = field(default_factory=dict)
 
     def __init__(self, **kwargs: Any) -> None:

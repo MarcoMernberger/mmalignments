@@ -17,6 +17,7 @@ from typing import (
     Literal,
     Mapping,
     ParamSpec,
+    TypeAlias,
     TypeVar,
     cast,
     overload,
@@ -37,6 +38,7 @@ from mmalignments.services.dependencies import (
     try_cast,
 )
 from mmalignments.services.io import (
+    get_paths_from_prefix_path,
     parents,
     paths_exists,
     paths_exists_raise,
@@ -227,6 +229,13 @@ class CallSpec:
         return f"{'.'.join(self.path)}({callargs})"
 
 
+########################################################################################
+# Aliases
+########################################################################################
+
+RunType: TypeAlias = Callable[[], CompletedProcess | None | bool | Any] | Runnable
+FilesSourceType: TypeAlias = Path | str | Mapping[str, Path | str] | RunType
+
 ###############################################################################
 # Elements
 ###############################################################################
@@ -242,7 +251,7 @@ class Element:
     def __init__(
         self,
         key: str,
-        run: Callable[[], CompletedProcess | None | bool | Any],
+        run: RunType,
         tag: ElementTag,
         *,
         determinants: tuple[str, ...] | None = None,
@@ -615,13 +624,13 @@ def element(
     auto_outputs: bool = True,
 ) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """
-    Usable as:
-      @element
-      def builder(...): ...
-
-    or:
-      @element(outputs="bam")
-      def builder(...): ...
+        Usable as:
+          @element
+          def builder(...): ...
+    Callable[[], CompletedProcess | None | bool | Any] | Runnable
+        or:
+          @element(outputs="bam")
+          def builder(...): ...
     """
 
     def deco(func: Callable[P, R]) -> Callable[P, R]:
@@ -667,59 +676,170 @@ class FilesElement(Element):
 
     def __init__(
         self,
-        path: str | Path | Mapping[str, Path | str],
+        source: FilesSourceType,
         *,
-        runner: Runnable | None = None,
+        artifacts: Mapping[str, Path | str] | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
-        ext: str | None = None,
         is_prefix: bool = False,
+        check_md5: bool = False,
+        empty_ok: bool = False,
         pres: tuple[Element, ...] | None = None,
+        ext: str | None = None,
+        key: str | None = None,
+        name: str | None = None,
+        determinants: tuple[str, ...] | None = None,
+        inputs: tuple[Path, ...] | None = None,
     ):
 
-        if isinstance(path, (str, Path)) and is_prefix:
-            paths = {}
-            p = Path(path)
-            file_dir = p.parent
-            prefix = p.stem
-            for p in file_dir.iterdir():
-                if p.stem.startswith(prefix):
-                    paths[p.stem] = p.absolute()
-        else:
-            paths = (
-                path
-                if isinstance(path, Mapping)
-                else {Path(path).stem: Path(path).absolute()}
-            )
-        artifacts = {k: Path(v).absolute() for k, v in paths.items()}
-        first = artifacts.values().__iter__().__next__()
-        root = root or first.stem
-        ext = ext or first.suffix.lstrip(".")
-        self.ext = ext
+        norm_artifacts, out, inp = self.__normalize_artifacts(
+            source, artifacts, is_prefix
+        )
+        inputs = inp + inputs if inputs else inp
+        runner = self.__normalize_source(source)
+        self._outputs = out
+        first_file = norm_artifacts.values().__iter__().__next__()
+        self.ext = ext or first_file.suffix.lstrip(".")
         tag = ElementTag(
-            root=root,
+            root=root or first_file.stem,
             level=0,
             omics=None,
             stage=Stage.INPUT,
             method=Method.CHECK,
             state=State.RAW,
-            ext=ext,
+            ext=self.ext,
         ).merge(tag)
-        runner = runner or self.exist()
-        key = f"{tag.default_name}::{'::'.join([str(p) for p in artifacts.values()])}"
+        key = (
+            key
+            or f"{tag.default_name}::{'::'.join([str(p) for p in norm_artifacts.values()])}"
+        )
+        determinants = determinants
         super().__init__(
             key=key,
             run=runner,
             tag=tag,
-            validator=self.validate,
-            inputs=tuple(artifacts.values()),
-            artifacts=artifacts,
+            determinants=determinants,
+            inputs=inp,
+            validator=self.validate if check_md5 else None,
+            artifacts=norm_artifacts,
             pres=pres,
+            empty_ok=empty_ok,
+            name=tag.default_name,
         )
         self.ext = tag.ext
 
+    def __normalize_artifacts(
+        self,
+        source: FilesSourceType,
+        artifacts: Mapping[str, Any] | None,
+        is_prefix: bool,
+    ) -> tuple[Mapping[str, Path], tuple[Path], tuple[Path]]:
+        """
+        Normalize the artifacts mapping based on the type of source. If the source is a
+        callable or Runnable, the artifacts must be provided explicitly, as the callable
+        cannot infer them and we need deterministic outputs. If the source is a string
+        or Path, it can be treated as a single file or a prefix depending on the
+        is_prefix flag. If the source is already a mapping, it will be normalized to
+        ensure all values are absolute Paths.
+
+        Also, depending on wether source is a Callable that creates the files or paths
+        to existing files, the outputs and inputs are set accordingly for better registry
+        tracking and validation.
+
+        Parameters
+        ----------
+        source : FilesSourceType
+            The source from which to derive the artifacts. Can be a Path, str, Mapping,
+            Runnable, or Callable, that creates the artifacts.
+        artifacts : Mapping[str, Any] | None
+            The artifacts mapping, if provided explicitly.
+        is_prefix : bool
+            Whether the source should be treated as a prefix.
+        Returns
+        -------
+        Mapping[str, Any]
+            A normalized mapping of artifact names to their corresponding Paths or
+            values.
+        """
+
+        def __normalized_from_mapping(mapping: Mapping[str, Any]) -> Mapping[str, Path]:
+            norm = {}
+            for k, v in mapping.items():
+                if isinstance(v, Path):
+                    norm[k] = v.absolute()
+                elif isinstance(v, str):
+                    norm[k] = Path(v).absolute()
+                else:
+                    raise TypeError(
+                        f"Unsupported artifact type for key '{k}': {type(v)}"
+                    )
+            return norm
+
+        if isinstance(source, (Callable, Runnable)):
+            if artifacts is None:
+                raise ValueError(
+                    "When source is a callable or Runnable, artifacts must be provided."
+                )
+            normalized = __normalized_from_mapping(artifacts)
+            outputs = tuple(normalized.values())
+            inputs = None
+        elif isinstance(source, (str, Path)):
+            if is_prefix:
+                normalized = get_paths_from_prefix_path(source)
+            else:
+                normalized = {Path(source).suffix.lstrip("."): Path(source).absolute()}
+            outputs = None
+            inputs = tuple(normalized.values())
+        elif isinstance(source, Mapping):
+            normalized = __normalized_from_mapping(source)
+            outputs = None
+            inputs = tuple(normalized.values())
+        else:
+            raise TypeError(f"Unsupported source type: {type(source)}")
+
+        return normalized, outputs, inputs
+
+    def __normalize_source(self, source: FilesSourceType) -> RunType:
+        """
+        Normalize the source to a runnable type.
+
+        If the source is already a Runnable or Callable, it is returned as is.
+        If the source is a string or Path, it is treated as a file or prefix and the
+        existence of the corresponding paths is checked.
+        If the source is a mapping, it is normalized to ensure all values are absolute
+        Paths and the existence of those paths is checked.
+        If the source type is unsupported, a TypeError is raised.
+
+        Parameters
+        ----------
+        source : FilesSourceType
+            The source to normalize, which can be a Path, str, Mapping, Runnable, or
+            Callable.
+
+        Returns
+        -------
+        RunType
+            The normalized runnable type of this element..
+
+        Raises
+        ------
+        TypeError
+            If the source type is unsupported.
+        """
+        if isinstance(source, Runnable):
+            return source
+        if isinstance(source, (str, Path)):
+            return self.exist()
+        elif isinstance(source, Mapping):
+            return self.exist()
+        elif callable(source):
+            return source
+        else:
+            raise TypeError(f"Unsupported source type: {type(source)}")
+
     @cached_property
     def files(self) -> tuple[Path, ...]:
+        """Convenience property to access all Path artifacts directly as a tuple."""
         return tuple(
             sorted([v for v in self.artifacts.values() if isinstance(v, Path)], key=str)
         )
@@ -730,10 +850,10 @@ class FilesElement(Element):
         overrides the Element output_files, the artifacts are not the output
         but the input files, so we return an empty tuple to avoid confusion
         """
-        return None
+        return self._outputs
 
     def validate(self) -> tuple[bool, str]:
-        return True, "bypassed validation"
+        return True, "bypassed validation"  # too expensive to sdo this vor every file
         md5sum = self.calc_md5sum()
         check = md5sum == self.md5sum
         return check, f"MD5 check {'passed' if check else 'failed'}"
@@ -750,11 +870,12 @@ class FilesElement(Element):
         return md5
 
     def exist(self):
+        def __check():
+            return (paths_exists(*self.artifacts.values())(),)
+
         return Runnable(
-            paths_exists(*self.artifacts.values()),
-            display=CallSpec(
-                path=("io", "paths_exists"), args=tuple(self.artifacts.values())
-            ).render(),
+            __check,
+            display=CallSpec(path=("io", "paths_exists")).render(),
         )  # no-op runner, validation is done by skip logic
 
 
@@ -762,17 +883,29 @@ class FileElement(FilesElement):
 
     def __init__(
         self,
-        filepath: Path | str,
+        source: Path | str | RunType | None = None,
         *,
-        runner: Runnable | None = None,
+        artifact: Path | str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
         pres: tuple[Element, ...] | None = None,
+        check_md5: bool = False,
+        empty_ok: bool = True,
     ):
-        path = Path(filepath).absolute()
-        self.ext = path.suffix.lstrip(".")
-        by_suffix = {self.ext: path}
-        super().__init__(by_suffix, runner=runner, tag=tag, root=root, ext=self.ext, pres=pres)
+        artifacts = None
+        if artifact:
+            artifact = Path(artifact)
+            artifacts = {artifact.suffix.lstrip("."): artifact}
+        super().__init__(
+            source,
+            artifacts=artifacts,
+            tag=tag,
+            root=root,
+            is_prefix=False,
+            check_md5=check_md5,
+            empty_ok=empty_ok,
+            pres=pres,
+        )
 
     @property
     def file(self) -> Path:
@@ -783,49 +916,86 @@ class Sample(FilesElement):
 
     def __init__(
         self,
-        path: Path | str | Mapping[str, Path | str],
+        source: FilesSourceType,
         *,
-        root: str | None = None,
+        artifacts: Mapping[str, Path | str] | None = None,
         tag: PartialElementTag | ElementTag | None = None,
+        root: str | None = None,
         is_prefix: bool = False,
+        check_md5: bool = False,
+        empty_ok: bool = False,
         pres: tuple[Element, ...] | None = None,
+        key: str | None = None,
+        name: str | None = None,
+        determinants: tuple[str, ...] | None = None,
+        inputs: tuple[Path, ...] | None = None,
     ):
-        super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
+
+        super().__init__(
+            source,
+            artifacts=artifacts,
+            tag=tag,
+            root=root,
+            is_prefix=is_prefix,
+            check_md5=check_md5,
+            empty_ok=empty_ok,
+            pres=pres,
+            key=key,
+            name=name,
+            determinants=determinants,
+        )
+        # source, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
 
 
 class NextGenSampleElement(Sample):
 
     def __init__(
         self,
-        path: Path | str | Mapping[str, Path | str],
+        source: FilesSourceType,
         *,
-        root: str | None = None,
+        artifacts: Mapping[str, Path | str] | None = None,
         tag: PartialElementTag | ElementTag | None = None,
+        root: str | None = None,
         read_group: str | None = None,
         reverse_reads: bool = False,
         cache_dir: Path | None = None,
         result_dir: Path | None = None,
         is_prefix: bool = False,
+        check_md5: bool = False,
+        empty_ok: bool = False,
         pres: tuple[Element, ...] | None = None,
+        key: str | None = None,
+        name: str | None = None,
+        determinants: tuple[str, ...] | None = None,
+        inputs: tuple[Path, ...] | None = None,
     ):
-        if isinstance(path, (str, Path)):
-            root = root or Path(path).stem
-        else:
-            first = next(iter(path.values()))
-            root = root or Path(first).stem
         tag = ElementTag(
-            root=root,
+            root=root or "replaced_by_sample_name",
             level=0,
             omics=Omics.DNA,
             stage=Stage.INPUT,
             method=Method.CHECK,
             state=State.RAW,
         ).merge(tag)
-        super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
+        super().__init__(
+            source,
+            artifacts=artifacts,
+            tag=tag,
+            root=root,
+            is_prefix=is_prefix,
+            pres=pres,
+            check_md5=check_md5,
+            empty_ok=empty_ok,
+            key=key,
+            name=name,
+            determinants=determinants,
+            inputs=inputs,
+        )
+
         self.reverse_reads = reverse_reads
         self.read_group = read_group
-        self.cache_dir = cache_dir or Path("cache") / "samples" / self.name
-        self.result_dir = result_dir or Path("results") / "samples" / self.name
+        self.cache_dir = cache_dir or Path("cache/samples") / self.tag.root
+        self.result_dir = result_dir or Path("results") / "samples" / self.tag.root
         self.pairing: Pairing = (
             Pairing.PAIRED if len(self.artifacts) > 1 else Pairing.SINGLE
         )
@@ -845,7 +1015,7 @@ def samples_from_df(
         prefix = row.get("prefix", sample_name)
         file_prefix = path / prefix
         sample_element = NextGenSampleElement(
-            path=file_prefix,
+            source=file_prefix,
             root=sample_name,
             tag=ElementTag(
                 root=sample_name,
@@ -1051,7 +1221,6 @@ def evaluate_filter(spec: FilterSpec, df: DataFrame) -> Series:
     return spec.mask(df)
 
 
-@element
 class TableElement(Element):
     """An Element that produces a TSV (for humans) and a Parquet file (for the pipeline).
 

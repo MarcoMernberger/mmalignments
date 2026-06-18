@@ -3,9 +3,18 @@
 from .aligners import BCFtools, Bedtools, BWAMem2, Samtools  # noqa: F401
 from .callers import GATK  # noqa: F401
 from .data import Genome, Sample  # noqa: F401
-from .genome import EnsemblGenome, GenomeBase, LocalGenome  # noqa: F401
-from .elements import Element, FileElement, FilesElement, NextGenSampleElement, samples_from_df
+from .datastructure.tables import Tables  # noqa: F401
+from .elements import (
+    Element,
+    FileElement,
+    FilesElement,
+    NextGenSampleElement,
+    samples_from_df,
+)
 from .executor import Executor  # noqa: F401
+from .externals import ExternalRunConfig  # noqa: F401
+from .genome import EnsemblGenome, GenomeBase, LocalGenome  # noqa: F401
+from .parameters import Params  # noqa: F401
 from .qc import (  # noqa: F401
     FastQC,
     MultiQC,
@@ -13,6 +22,7 @@ from .qc import (  # noqa: F401
     pre_alignment_qc,
 )
 from .reports.report import MutationalLoadReport  # noqa
+from .resources import ResourceConfig  # type: ignore[import]
 from .tags import (  # noqa: F401
     ElementTag,
     Method,
@@ -21,9 +31,6 @@ from .tags import (  # noqa: F401
     Stage,
     State,
 )
-from .parameters import Params  # noqa: F401
-from .externals import ExternalRunConfig  # noqa: F401
-from .resources import ResourceConfig  # type: ignore[import]
 
 __all__ = [
     "BCFtools",
@@ -55,7 +62,8 @@ __all__ = [
     "State",
     "Sample",
     "Samtools",
-    "samples_from_df"
+    "samples_from_df",
+    "Tables",
 ]
 # from .qc_metrics import (
 #     AlignmentMetrics,
