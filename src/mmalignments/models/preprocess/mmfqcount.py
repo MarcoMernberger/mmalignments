@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 # Parameter definitions (inlined — no JSON file needed for own Rust tools)
 # ---------------------------------------------------------------------------
 
+
 def _build_param_registry() -> ParamRegistry:
     """Parameter registry for mmfqcount.
 
@@ -95,22 +96,59 @@ def _build_param_registry() -> ParamRegistry:
     --id-col       str   Column holding the sequence identifier.  default: "Name"
     """
     count_specs: dict[str, ParamSpec] = {
-        "trim_start":  ParamSpec("trim_start",  "--trim-start",  str, render=render_value,
-                                 description="Trim from first occurrence of k-mer (inclusive)."),
-        "trim_stop":   ParamSpec("trim_stop",   "--trim-stop",   str, render=render_value,
-                                 description="Trim up to (exclusive) last occurrence of k-mer."),
-        "trim_length": ParamSpec("trim_length", "--trim-length", int, render=render_value,
-                                 description="Keep at most this many bases after trimming."),
-        "split_by":    ParamSpec("split_by",    "--split-by",    str, render=render_value,
-                                 description="Split counts by this read-name tag (e.g. 'sgRNAid')."),
+        "trim_start": ParamSpec(
+            "trim_start",
+            "--trim-start",
+            str,
+            render=render_value,
+            description="Trim from first occurrence of k-mer (inclusive).",
+        ),
+        "trim_stop": ParamSpec(
+            "trim_stop",
+            "--trim-stop",
+            str,
+            render=render_value,
+            description="Trim up to (exclusive) last occurrence of k-mer.",
+        ),
+        "trim_length": ParamSpec(
+            "trim_length",
+            "--trim-length",
+            int,
+            render=render_value,
+            description="Keep at most this many bases after trimming.",
+        ),
+        "split_by": ParamSpec(
+            "split_by",
+            "--split-by",
+            str,
+            render=render_value,
+            description="Split counts by this read-name tag (e.g. 'sgRNAid').",
+        ),
     }
     match_specs: dict[str, ParamSpec] = {
-        "seq_col": ParamSpec("seq_col", "--seq-col", str, default="Sequence", render=render_value,
-                             description="Column holding the R1 sequence."),
-        "r2_col":  ParamSpec("r2_col",  "--r2-col",  str, render=render_value,
-                             description="Column holding the R2 sequence (paired mode)."),
-        "id_col":  ParamSpec("id_col",  "--id-col",  str, default="Name", render=render_value,
-                             description="Column holding the sequence identifier."),
+        "seq_col": ParamSpec(
+            "seq_col",
+            "--seq-col",
+            str,
+            default="Sequence",
+            render=render_value,
+            description="Column holding the R1 sequence.",
+        ),
+        "r2_col": ParamSpec(
+            "r2_col",
+            "--r2-col",
+            str,
+            render=render_value,
+            description="Column holding the R2 sequence (paired mode).",
+        ),
+        "id_col": ParamSpec(
+            "id_col",
+            "--id-col",
+            str,
+            default="Name",
+            render=render_value,
+            description="Column holding the sequence identifier.",
+        ),
     }
     return ParamRegistry(
         default=ParamSet({}, "mmfqcount", "default"),
@@ -124,6 +162,7 @@ def _build_param_registry() -> ParamRegistry:
 # ---------------------------------------------------------------------------
 # MmFqCount class
 # ---------------------------------------------------------------------------
+
 
 class MmFqCount(External):
     """Wrapper for the ``mmfqcount`` Rust CLI tool.
@@ -302,7 +341,7 @@ class MmFqCount(External):
             Element whose artifact ``"tsv"`` is the path to the counts TSV.
         """
         fastq_r1 = sample.fastq_r1
-        fastq_r2 = sample.fastq_r2 if sample.fastq_r2 else None
+        fastq_r2 = sample.fastq_r2 if hasattr(sample, "fastq_r2") else None
 
         tag = from_prior(
             sample.tag,
@@ -329,14 +368,13 @@ class MmFqCount(External):
         determinants = self.signature_determinants(params, subroutine="count")
         inputs = (fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,)
 
-        return TableElement(
+        return Element(
             key,
             runner,
             tag=tag,
-            tsv=output_tsv,
-            artifacts={"tsv": output_tsv},
             determinants=determinants,
             inputs=inputs,
+            artifacts={"tsv": output_tsv},
             pres=(sample,),
             name=name,
         )
@@ -381,8 +419,10 @@ class MmFqCount(External):
 
         arguments = [
             "count",
-            "--r1", str(fastq_r1),
-            "--output", str(output_tsv),
+            "--r1",
+            str(fastq_r1),
+            "--output",
+            str(output_tsv),
         ]
         if fastq_r2 is not None:
             arguments += ["--r2", str(Path(fastq_r2).absolute())]
@@ -394,9 +434,9 @@ class MmFqCount(External):
             "count",
             in_paths,
             out_paths,
-            None,   # no piped output
-            None,   # no pre-hook
-            None,   # no post-hook
+            None,  # no piped output
+            None,  # no pre-hook
+            None,  # no post-hook
         )
 
     # -----------------------------------------------------------------------
@@ -407,7 +447,7 @@ class MmFqCount(External):
     def match(
         self,
         counts: Element,
-        predefined: "Element | Path | str",
+        predefined: Element | Path | str,
         *,
         seq_col: str = "Sequence",
         r2_col: str | None = None,
@@ -495,7 +535,7 @@ class MmFqCount(External):
             tag,
             stage=Stage.QUANT,
             method=Method.MMFQCOUNT,
-            state=State.ANNOTATE,
+            state=State.ANNOTATED,
             ext="tsv",
         )
 
@@ -573,10 +613,14 @@ class MmFqCount(External):
 
         arguments = [
             "match",
-            "--counts",     str(counts_tsv),
-            "--predefined", str(predefined_tsv),
-            "--output",     str(matched_tsv),
-            "--unmatched",  str(unmatched_tsv),
+            "--counts",
+            str(counts_tsv),
+            "--predefined",
+            str(predefined_tsv),
+            "--output",
+            str(matched_tsv),
+            "--unmatched",
+            str(unmatched_tsv),
         ]
 
         # Append column flags from params
@@ -625,7 +669,7 @@ class MmFqCount(External):
         from the "compare" table, with the counts from both inputs and the
         score; and a filtered score TSV with only sequences that meet the score
         threshold (if exclude_score is set).
-        
+
         Parameters
         ----------
         compare : NextGenSampleElement
@@ -673,16 +717,19 @@ class MmFqCount(External):
             c2 = np.asarray(count2, dtype=np.float64)
             c1 = c1 + offset
             c2 = c2 + offset
-            np.divide(c1, c1.sum(), out=c1) # normalize to lib size
+            np.divide(c1, c1.sum(), out=c1)  # normalize to lib size
             np.divide(c2, c2.sum(), out=c2)
-            np.divide(c1, c2, out=c1)   # ratio
-            np.log2(c1, out=c1) # log fold change
+            np.divide(c1, c2, out=c1)  # ratio
+            np.log2(c1, out=c1)  # log fold change
             return pd.Series(c1, index=count1.index)
 
-        def get_filter(filter_column: str, filter: Callable[[pd.DataFrame], pd.DataFrame] | bool) -> Callable[[DataFrame], DataFrame] | None:
+        def get_filter(
+            filter_column: str, filter: Callable[[pd.DataFrame], pd.DataFrame] | bool
+        ) -> Callable[[DataFrame], DataFrame] | None:
             def filter_func(df: DataFrame) -> DataFrame:
                 df = df[df[filter_column] > 0]
                 return df
+
             if callable(filter):
                 return filter
             elif filter is True:
@@ -699,11 +746,11 @@ class MmFqCount(External):
             ext="tsv",
         )
         params = Params(
-            count_column = "Count",
-            freq_column = "Frequency",
-            annotation_column = "Annotation",
-            seq_column = "R2",
-            score_name = "Score" if score else "Log2 Relative Enrichment Score",
+            count_column="Count",
+            freq_column="Frequency",
+            annotation_column="Annotation",
+            seq_column="R2",
+            score_name="Score" if score else "Log2 Relative Enrichment Score",
         ).update(params)
 
         keys = keys or ["R2", "Annotation"]
@@ -715,7 +762,11 @@ class MmFqCount(External):
         pres = (compare, against)
         inputs = (compare.file, against.file)
         determinants = [function_hash(score), str(params)] + keys
-        determinants += [function_hash(filter_func)] if callable(filter_func) else [str(f"filter={filter}")]
+        determinants += (
+            [function_hash(filter_func)]
+            if callable(filter_func)
+            else [str(f"filter={filter}")]
+        )
         runner = self.compare_counts(
             compare=compare.tag.root,
             against=against.tag.root,
@@ -731,9 +782,11 @@ class MmFqCount(External):
         )
 
         key, name = self.build_element_name(
-            tag, "compare", param_str="_against=" + against.tag.root,
+            tag,
+            "compare",
+            param_str="_against=" + against.tag.root,
         )
-        artifacts={"tsv": score_tsv}
+        artifacts = {"tsv": score_tsv}
         if filter:
             artifacts["filtered"] = score_tsv.with_suffix(".filtered.tsv")
 
@@ -769,46 +822,58 @@ class MmFqCount(External):
     ) -> Runnable:
         """Compare two count TSVs and assign a score to each sequence."""
         params = Params(
-            count_column = "Count",
-            freq_column = "Frequency",
-            annotation_column = "Annotation",
-            seq_column = "R2",
-            score_name = "Score" if score else "Log2 Relative Enrichment Score",
-            how = "left"
+            count_column="Count",
+            freq_column="Frequency",
+            annotation_column="Annotation",
+            seq_column="R2",
+            score_name="Score" if score else "Log2 Relative Enrichment Score",
+            how="left",
         ).update(params)
         count_column = params.count_column
         freq_column = params.freq_column
 
-        def reduce_to_keys(key_columms: list[str]) -> Callable[[pd.DataFrame], pd.DataFrame]:
+        def reduce_to_keys(
+            key_columms: list[str],
+        ) -> Callable[[pd.DataFrame], pd.DataFrame]:
             def __reduce(df: pd.DataFrame) -> DataFrame:
-                drop_cols = [c for c in df.columns if c not in key_columms + [count_column, freq_column, "R1 Name", "R2 Name"]]
+                drop_cols = [
+                    c
+                    for c in df.columns
+                    if c
+                    not in key_columms
+                    + [count_column, freq_column, "R1 Name", "R2 Name"]
+                ]
                 df = df.drop(columns=drop_cols)
-                df = (
-                    df.groupby(
-                        key_columms,
-                        as_index=False,
-                    )
-                    .agg(
-                        {
-                            count_column: "sum",
-                            freq_column: "sum",
-                            "R1 Name": "first",
-                            "R2 Name": "first",
-                        }
-                    )
+                df = df.groupby(
+                    key_columms,
+                    as_index=False,
+                ).agg(
+                    {
+                        count_column: "sum",
+                        freq_column: "sum",
+                        "R1 Name": "first",
+                        "R2 Name": "first",
+                    }
                 )
                 return df
+
             return __reduce
 
-        def merge_frames(compare_df: pd.DataFrame, against_df: pd.DataFrame) -> pd.DataFrame:
+        def merge_frames(
+            compare_df: pd.DataFrame, against_df: pd.DataFrame
+        ) -> pd.DataFrame:
             print(params.how)
             merged = compare_df.merge(
                 against_df,
                 on=keys,
                 how=params.how,
-                suffixes=(f" ({compare})", f" ({against})")
+                suffixes=(f" ({compare})", f" ({against})"),
             )
-            merged = merged.fillna(dict.fromkeys([f"{count_column} ({against})", f"{freq_column} ({against})"], 0))
+            merged = merged.fillna(
+                dict.fromkeys(
+                    [f"{count_column} ({against})", f"{freq_column} ({against})"], 0
+                )
+            )
             return merged
 
         compare_path = Path(compare_file)
@@ -832,37 +897,35 @@ class MmFqCount(External):
                     compare_df[col] = compare_df.fillna(0)[col].astype("float64")
             for col in [comp_count_column, against_count_column]:
                 compare_df[col] = compare_df[col].fillna(0).astype("int64")
-            compare_df[score_name] = score(compare_df[comp_count_column], compare_df[against_count_column])
+            compare_df[score_name] = score(
+                compare_df[comp_count_column], compare_df[against_count_column]
+            )
             compare_df = compare_df.sort_values(by=score_name, ascending=False)
-            write_frames(
-                    compare_df,
-                    score_path,
-                    mode
-                )
+            write_frames(compare_df, score_path, mode)
             # filter out zero counts
             if filter:
                 filtered_path = Path(score_path.with_suffix(".filtered.tsv"))
                 filtered = filter(compare_df)
-                write_frames(
-                    filtered,
-                    filtered_path,
-                    mode
-                )
+                write_frames(filtered, filtered_path, mode)
 
         callspec = CallSpec(
             path=("compare_counts",),
             kwargs={
-                "compare": compare_file, "against": against_file,
-                "compare_file": compare_file, "against_file": against_file,
-                "out_tsv": score_path, "score": score, "keys": keys,
-                "filter": filter, "params": params,
-            }
+                "compare": compare_file,
+                "against": against_file,
+                "compare_file": compare_file,
+                "against_file": against_file,
+                "out_tsv": score_path,
+                "score": score,
+                "keys": keys,
+                "filter": filter,
+                "params": params,
+            },
         ).render()
         return Runnable(
             _runner,
             display=callspec,
         )
-
 
     def a_better_compare_counts(
         self,
@@ -877,50 +940,62 @@ class MmFqCount(External):
         cfg: ExternalRunConfig | None = None,
     ) -> Runnable:
         """Compare two count TSVs and assign a score to each sequence."""
-        keys: list[str] | None = ["R2", "Annotation"],
-        filter: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
-        mode: str = "both",
+        keys: list[str] | None = (["R2", "Annotation"],)
+        filter: Callable[[pd.DataFrame], pd.DataFrame] | None = (None,)
+        mode: str = ("both",)
         params = Params(
-            count_column = "Count",
-            freq_column = "Frequency",
-            annotation_column = "Annotation",
-            seq_column = "R2",
-            score_name = "Score" if score else "Log2 Relative Enrichment Score",
-            how = "left"
+            count_column="Count",
+            freq_column="Frequency",
+            annotation_column="Annotation",
+            seq_column="R2",
+            score_name="Score" if score else "Log2 Relative Enrichment Score",
+            how="left",
         ).update(params)
         count_column = params.count_column
         freq_column = params.freq_column
 
-        def reduce_to_keys(key_columms: list[str]) -> Callable[[pd.DataFrame], pd.DataFrame]:
+        def reduce_to_keys(
+            key_columms: list[str],
+        ) -> Callable[[pd.DataFrame], pd.DataFrame]:
             def __reduce(df: pd.DataFrame) -> DataFrame:
-                drop_cols = [c for c in df.columns if c not in key_columms + [count_column, freq_column, "R1 Name", "R2 Name"]]
+                drop_cols = [
+                    c
+                    for c in df.columns
+                    if c
+                    not in key_columms
+                    + [count_column, freq_column, "R1 Name", "R2 Name"]
+                ]
                 df = df.drop(columns=drop_cols)
-                df = (
-                    df.groupby(
-                        key_columms,
-                        as_index=False,
-                    )
-                    .agg(
-                        {
-                            count_column: "sum",
-                            freq_column: "sum",
-                            "R1 Name": "first",
-                            "R2 Name": "first",
-                        }
-                    )
+                df = df.groupby(
+                    key_columms,
+                    as_index=False,
+                ).agg(
+                    {
+                        count_column: "sum",
+                        freq_column: "sum",
+                        "R1 Name": "first",
+                        "R2 Name": "first",
+                    }
                 )
                 return df
+
             return __reduce
 
-        def merge_frames(compare_df: pd.DataFrame, against_df: pd.DataFrame) -> pd.DataFrame:
+        def merge_frames(
+            compare_df: pd.DataFrame, against_df: pd.DataFrame
+        ) -> pd.DataFrame:
             print(params.how)
             merged = compare_df.merge(
                 against_df,
                 on=keys,
                 how=params.how,
-                suffixes=(f" ({compare})", f" ({against})")
+                suffixes=(f" ({compare})", f" ({against})"),
             )
-            merged = merged.fillna(dict.fromkeys([f"{count_column} ({against})", f"{freq_column} ({against})"], 0))
+            merged = merged.fillna(
+                dict.fromkeys(
+                    [f"{count_column} ({against})", f"{freq_column} ({against})"], 0
+                )
+            )
             return merged
 
         compare_path = Path(compare_file)
@@ -938,7 +1013,7 @@ class MmFqCount(External):
 
             df = (
                 merge_frames(compare_df, against_df)
-                .pipe(add(), score)    #  score_name = params.get("score_name", "score")
+                .pipe(add(), score)  #  score_name = params.get("score_name", "score")
                 .pipe(fill(), columns)
                 .pipe(types())
                 .pipe(sort())
@@ -951,31 +1026,30 @@ class MmFqCount(External):
                     compare_df[col] = compare_df.fillna(0)[col].astype("float64")
             for col in [comp_count_column, against_count_column]:
                 compare_df[col] = compare_df[col].fillna(0).astype("int64")
-            compare_df[score_name] = score(compare_df[comp_count_column], compare_df[against_count_column])
+            compare_df[score_name] = score(
+                compare_df[comp_count_column], compare_df[against_count_column]
+            )
             compare_df = compare_df.sort_values(by=score_name, ascending=False)
-            write_frames(
-                    compare_df,
-                    score_path,
-                    mode
-                )
+            write_frames(compare_df, score_path, mode)
             # filter out zero counts
             if filter:
                 filtered_path = Path(score_path.with_suffix(".filtered.tsv"))
                 filtered = filter(compare_df)
-                write_frames(
-                    filtered,
-                    filtered_path,
-                    mode
-                )
+                write_frames(filtered, filtered_path, mode)
 
         callspec = CallSpec(
             path=("compare_counts",),
             kwargs={
-                "compare": compare_file, "against": against_file,
-                "compare_file": compare_file, "against_file": against_file,
-                "out_tsv": score_path, "score": score, "keys": keys,
-                "filter": filter, "params": params,
-            }
+                "compare": compare_file,
+                "against": against_file,
+                "compare_file": compare_file,
+                "against_file": against_file,
+                "out_tsv": score_path,
+                "score": score,
+                "keys": keys,
+                "filter": filter,
+                "params": params,
+            },
         ).render()
         return Runnable(
             _runner,
@@ -1053,19 +1127,19 @@ class MmFqCount(External):
         return match_el, count_el
 
     def samplecount(
-            self,
-            samples: Mapping[str, NextGenSampleElement],
-            *,
-            tag: PartialElementTag | ElementTag | None = None,
-            outdir: Path | str | None = None,
-            params: Params | None = None,
-            cfg: ExternalRunConfig | None = None,
-        ) -> dict[str, Element]:
+        self,
+        samples: Mapping[str, NextGenSampleElement],
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        params: Params | None = None,
+        cfg: ExternalRunConfig | None = None,
+    ) -> dict[str, Element]:
         """
         samplecount is a convenience method that takes a mapping of sample names
-        to NextGenSampleElements and runs the count method on each sample, 
-        returning a mapping of sample names to their corresponding count 
-        Elements. This allows for easy batch processing of multiple samples 
+        to NextGenSampleElements and runs the count method on each sample,
+        returning a mapping of sample names to their corresponding count
+        Elements. This allows for easy batch processing of multiple samples
         without having to manually call count for each one.
 
         Parameters
@@ -1075,7 +1149,7 @@ class MmFqCount(External):
         tag : PartialElementTag | ElementTag | None, optional
             Optional tag override applied to all count elements, by default None.
         outdir : Path | str | None, optional
-            Output directory for all count elements, by default None. If None, 
+            Output directory for all count elements, by default None. If None,
             defaults to results/counts/<version>/<sample_name> for each sample.
         params : Params | None, optional
             Parameters for the count method, by default None.
@@ -1089,7 +1163,11 @@ class MmFqCount(External):
         """
         count_elements = {}
         for sample_name, sample in samples.items():
-            output_dir = Path(outdir) / sample_name if outdir else self.default_output_dir(sample.root)
+            output_dir = (
+                Path(outdir) / sample_name
+                if outdir
+                else self.default_output_dir(sample.root)
+            )
             counted = self.count(
                 sample,
                 tag=tag,
@@ -1104,6 +1182,7 @@ class MmFqCount(External):
 # ---------------------------------------------------------------------------
 # Internal helper
 # ---------------------------------------------------------------------------
+
 
 def _build_param_registry_as_mapping() -> dict:
     """Return a plain dict so External.__init__ can accept it.

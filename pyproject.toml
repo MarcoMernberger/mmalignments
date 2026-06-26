@@ -20,6 +20,9 @@ dependencies = [
     "h5py>=3.8.0",
     "plotly>=5.0.0",
     "numpy>=2.0.0",
+    "gseapy>=1.0.0",
+    "kaleido>=0.3.0",
+    "panel>=0.14.0",
 ]
 [project.optional-dependencies]
 dev = [

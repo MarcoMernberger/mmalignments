@@ -11,7 +11,7 @@ from mmalignments.services.io import load_param_json
 
 
 @dataclass(frozen=True)
-class Params:
+class Params(Mapping[str, Any]):
     _override_params: Mapping[str, Any] = field(default_factory=dict)
 
     def __init__(self, **kwargs: Any) -> None:
@@ -59,8 +59,22 @@ class Params:
         except KeyError:
             raise AttributeError(f"Params has no attribute '{key}'")
 
-    def update(self, other: "Params | None") -> "Params":
-        return self.override(**other.to_dict()) if other else self
+    def update(self, partial_params: "Params") -> "Params":
+        if partial_params is None:
+            return self
+        return self.override(**partial_params.to_dict())
+
+    def determinants(self) -> tuple[str, ...]:
+        if len(self._override_params) == 0:
+            return ()
+        dets = tuple(
+            [
+                f"{k}={v}" if v is not None else f"{k}=None"
+                for k, v in sorted(self._override_params.items())
+            ]
+        )
+        return dets
+
 
 ###############################################################################
 # Rendering

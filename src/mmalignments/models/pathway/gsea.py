@@ -33,38 +33,43 @@ Design notes
 
 from __future__ import annotations
 
-import json
 import logging
-import re
-from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
 from enum import Enum
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+import gseapy as gp  # type: ignore[import]
+import pandas as pd  # type: ignore[import]
+from pandas import DataFrame
 
 from mmalignments.models.elements import (
+    CallSpec,
     Element,
     FileElement,
     Runnable,
     TableElement,
     element,
 )
+from mmalignments.models.parameters import Params
 from mmalignments.models.tags import (
     ElementTag,
     Method,
-    Omics,
     PartialElementTag,
     Stage,
     State,
     from_prior,
 )
 from mmalignments.models.tags import PartialElementTag as PTag
-from mmalignments.services.dependencies import depends, function_hash, stable_hash
-from mmalignments.services.io import parents
+from mmalignments.services.dependencies import depends
+from mmalignments.services.io import concat_files, exists, parents, read_frame
 
 logger = logging.getLogger(__name__)
+
 
 class Species(str, Enum):
     Homo_sapiens = "Homo_sapiens"
     Mus_musculus = "Mus_musculus"
+
 
 ###############################################################################
 # GseaPy wrapper
@@ -114,6 +119,18 @@ class GseaPy:
     def default_outdir(self, method: str, root: str) -> Path:
         return Path("results") / "gsea" / method / root
 
+    def default_params(self) -> Params:
+        return Params(
+            permutation_type="phenotype",
+            permutation_num=self.DEFAULT_PERMUTATIONS,
+            min_size=self.DEFAULT_MIN_SIZE,
+            max_size=self.DEFAULT_MAX_SIZE,
+            weight=1.0,
+            gene_col="gene",
+            stat_col="stat",
+            seed=self.DEFAULT_SEED,
+        )
+
     # ------------------------------------------------------------------
     # gsea — classical phenotype-permutation GSEA
     # ------------------------------------------------------------------
@@ -122,18 +139,13 @@ class GseaPy:
     def gsea(
         self,
         expression: TableElement,
-        cls: Sequence[str] | FileElement,
+        classes: Sequence[str] | FileElement,
         gene_sets: FileElement | str | Sequence[str],
         *,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
-        permutation_type: str = "phenotype",
-        permutation_num: int = DEFAULT_PERMUTATIONS,
-        min_size: int = DEFAULT_MIN_SIZE,
-        max_size: int = DEFAULT_MAX_SIZE,
-        weight: float = 1.0,
-        gene_col: str = "gene",
-        seed: int = DEFAULT_SEED,
+        filename: Path | str | None = None,
+        params: Params | None = None,
     ) -> TableElement:
         """Classical GSEA with phenotype permutations.
 
@@ -142,7 +154,7 @@ class GseaPy:
         expression : TableElement
             Expression matrix (genes × samples).  Must have one gene-name
             column (``gene_col``) and one sample column per sample.
-        cls : Sequence[str] | FileElement
+        classes : Sequence[str] | FileElement
             Class labels — either a Python list of strings matching the
             sample columns, or a :class:`FileElement` pointing to a
             ``.cls`` file.
@@ -173,9 +185,9 @@ class GseaPy:
             ``tsv`` → summary results TSV; ``parquet`` → Parquet version.
         """
         pres: list[Element] = [expression]
-        gene_sets_arg, gene_sets_inputs = _resolve_gene_sets(gene_sets, pres)
-        cls_arg, cls_inputs, cls_pres = _resolve_cls(cls, pres)
-
+        gene_sets_arg, pres = _resolve_gene_sets(gene_sets, pres)
+        classes_arg, pres = _resolve_cls(classes, pres)
+        params = self.default_params().update(params)
         tag = from_prior(
             expression.tag,
             tag,
@@ -183,54 +195,47 @@ class GseaPy:
             method=Method.GSEA,
             state=State.ENRICHMENT,
             ext="tsv",
+            param="gsea",
         )
 
         outdir_path = Path(outdir or self.default_outdir("gsea", expression.root))
-        out_tsv = outdir_path / tag.default_output
-        out_parquet = out_tsv.with_suffix(".parquet")
 
-        determinants = (
-            str(permutation_type),
-            str(permutation_num),
-            str(min_size),
-            str(max_size),
-            str(weight),
-            str(gene_col),
-            str(seed),
-        )
+        # determinants = (
+        #     str(permutation_type),
+        #     str(permutation_num),
+        #     str(min_size),
+        #     str(max_size),
+        #     str(weight),
+        #     str(gene_col),
+        #     str(seed),
+        # )
 
-        key, name = _build_key_name(tag, "gsea")
+        determinants = (str(classes_arg), str(gene_sets_arg))
+        determinants = determinants + params.determinants()
 
         @depends(_run_gsea)
         def _run():
-            _run_gsea(
-                expression_parquet=expression.parquet,
+            return _run_gsea(
+                expression_file=expression.file,
                 gene_sets_arg=gene_sets_arg,
-                cls_arg=cls_arg,
-                out_tsv=out_tsv,
-                out_parquet=out_parquet,
+                cls_arg=classes_arg,
                 outdir=outdir_path,
-                permutation_type=permutation_type,
-                permutation_num=permutation_num,
-                min_size=min_size,
-                max_size=max_size,
-                weight=weight,
-                gene_col=gene_col,
-                seed=seed,
+                permutation_type=params.permutation_type,
+                permutation_num=params.permutation_num,
+                min_size=params.min_size,
+                max_size=params.max_size,
+                weight=params.weight,
+                gene_col=params.gene_col,
+                seed=params.seed,
             )
 
-        runner = Runnable(_run, display=f"gsea({expression.name})")
+        source = Runnable(_run, display=f"gsea({expression.name})")
 
         return TableElement(
-            key,
-            runner,
+            source,
             tag=tag,
-            tsv=out_tsv,
-            parquet=out_parquet,
             determinants=determinants,
-            inputs=tuple(gene_sets_inputs + cls_inputs),
-            pres=tuple(pres + gene_sets_inputs + cls_pres),
-            name=name,
+            pres=tuple(pres),
         )
 
     # ------------------------------------------------------------------
@@ -245,7 +250,8 @@ class GseaPy:
         *,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
-        gene_col: str = "gene",
+        filename: Path | str | None = None,
+        gene_col: str = "id",
         stat_col: str = "stat",
         permutation_num: int = DEFAULT_PERMUTATIONS,
         min_size: int = DEFAULT_MIN_SIZE,
@@ -287,7 +293,7 @@ class GseaPy:
             fdr, …).
         """
         pres: list[Element] = [ranking]
-        gene_sets_arg, gene_sets_inputs = _resolve_gene_sets(gene_sets, pres)
+        gene_sets_arg, pres = _resolve_gene_sets(gene_sets, pres)
 
         tag = from_prior(
             ranking.tag,
@@ -296,11 +302,11 @@ class GseaPy:
             method=Method.GSEA,
             state=State.ENRICHMENT,
             ext="tsv",
+            root=ranking.tag.root,
+            param="prerank",
         )
 
-        outdir_path = Path(outdir or self.default_outdir("prerank", ranking.root))
-        out_tsv = outdir_path / tag.default_output
-        out_parquet = out_tsv.with_suffix(".parquet")
+        output_dir = Path(outdir or self.default_outdir("prerank", ranking.root))
 
         determinants = (
             str(gene_col),
@@ -312,37 +318,32 @@ class GseaPy:
             str(seed),
         )
 
-        key, name = _build_key_name(tag, "prerank")
-
         @depends(_run_prerank)
         def _run():
-            _run_prerank(
+            return _run_prerank(
                 ranking_tsv=Path(ranking.tsv),
                 gene_sets_arg=gene_sets_arg,
-                out_tsv=out_tsv,
-                out_parquet=out_parquet,
-                outdir=outdir_path,
                 gene_col=gene_col,
                 stat_col=stat_col,
                 permutation_num=permutation_num,
                 min_size=min_size,
                 max_size=max_size,
                 weight=weight,
+                outdir=output_dir,
                 seed=seed,
             )
 
         runner = Runnable(_run, display=f"prerank({ranking.name})")
 
         return TableElement(
-            key,
-            runner,
+            source=runner,
             tag=tag,
-            tsv=out_tsv,
-            parquet=out_parquet,
+            outdir=output_dir,
+            filename=filename,
+            mode="tsv",
             determinants=determinants,
-            inputs=tuple([Path(ranking.tsv)] + gene_sets_inputs),
-            pres=tuple(pres + [e for e in gene_sets_inputs if isinstance(e, Element)]),
-            name=name,
+            inputs=(ranking.tsv,),
+            pres=tuple(pres),
         )
 
     # ------------------------------------------------------------------
@@ -357,7 +358,8 @@ class GseaPy:
         *,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
-        gene_col: str | None = None,
+        filename: Path | str | None = None,
+        gene_col: str | None = "id",
         organism: str = "Human",
         cutoff: float = 0.05,
     ) -> TableElement:
@@ -397,7 +399,7 @@ class GseaPy:
             P-value, Adjusted P-value, Genes, …).
         """
         pres: list[Element] = [gene_list]
-        gene_sets_arg, gene_sets_inputs = _resolve_gene_sets(gene_sets, pres)
+        gene_sets_arg, pres = _resolve_gene_sets(gene_sets, pres)
 
         tag = from_prior(
             gene_list.tag,
@@ -406,11 +408,10 @@ class GseaPy:
             method=Method.GSEA,
             state=State.ENRICHMENT,
             ext="tsv",
+            param="enrichr",
         )
 
         outdir_path = Path(outdir or self.default_outdir("enrichr", gene_list.root))
-        out_tsv = outdir_path / tag.default_output
-        out_parquet = out_tsv.with_suffix(".parquet")
 
         determinants = (
             str(organism),
@@ -418,34 +419,29 @@ class GseaPy:
             str(gene_col or ""),
         )
 
-        key, name = _build_key_name(tag, "enrichr")
-
         @depends(_run_enrichr)
         def _run():
-            _run_enrichr(
+            return _run_enrichr(
                 gene_list_element=gene_list,
                 gene_sets_arg=gene_sets_arg,
-                out_tsv=out_tsv,
-                out_parquet=out_parquet,
                 outdir=outdir_path,
                 gene_col=gene_col,
                 organism=organism,
                 cutoff=cutoff,
             )
 
-        runner = Runnable(_run, display=f"enrichr({gene_list.name})")
+        source = Runnable(_run, display=f"enrichr({gene_list.name})")
 
-        gene_list_inputs = [Path(gene_list.tsv)] if hasattr(gene_list, "tsv") else []
+        inputs = (Path(gene_list.tsv),) if hasattr(gene_list, "tsv") else ()
         return TableElement(
-            key,
-            runner,
+            source,
             tag=tag,
-            tsv=out_tsv,
-            parquet=out_parquet,
+            outdir=outdir_path,
+            filename=filename,
+            mode="tsv",
+            inputs=inputs,
             determinants=determinants,
-            inputs=tuple(gene_list_inputs + gene_sets_inputs),
-            pres=tuple(pres + [e for e in gene_sets_inputs if isinstance(e, Element)]),
-            name=name,
+            pres=tuple(pres),
         )
 
 
@@ -490,14 +486,18 @@ class MSigDB:
     a BioMart table.
     """
 
-    # gseapy has a built-in GMT URL registry; we also support the msigdb.org
-    # REST API for full control.
-    _MSIGDB_GMT_URL = (
-        "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2026.1.Hs"
-    )
+    # # gseapy has a built-in GMT URL registry; we also support the msigdb.org
+    # # REST API for full control.
+    # _MSIGDB_GMT_URL = (
+    #     "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2026.1.Hs"
+    # )
 
-
-    def __init__(self, cache_dir: Path | str | None = None, version: str = "2026.1", species: Species = "Homo_sapiens") -> None:
+    def __init__(
+        self,
+        cache_dir: Path | str | None = None,
+        species: Species = Species.Mus_musculus,
+        version: str = "2026.1",
+    ) -> None:
         """
         Parameters
         ----------
@@ -512,14 +512,13 @@ class MSigDB:
 
     @property
     def url(self) -> str:
-        return f"https://data.broadinstitute.org/gsea-msigdb/msigdb/release/{self._version}.{self._species_short}.Hs"
-
+        return f"https://data.broadinstitute.org/gsea-msigdb/msigdb/release/{self._version}.{self._species_short}"
 
     @property
     def collections_files(self) -> dict[str, str]:
         if self._species == "Homo_sapiens":
             return {
-                "H":  f"h.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "H": f"h.all.v{self._version}.{self._species_short}.symbols.gmt",
                 "C1": f"c1.all.v{self._version}.{self._species_short}.symbols.gmt",
                 "C2": f"c2.all.v{self._version}.{self._species_short}.symbols.gmt",
                 "C3": f"c3.all.v{self._version}.{self._species_short}.symbols.gmt",
@@ -542,6 +541,7 @@ class MSigDB:
                 "M6": f"m6.all.v{self._version}.Mm.symbols.gmt",
                 "M7": f"m7.all.v{self._version}.Mm.symbols.gmt",
             }
+
     def get_version(self) -> str:
         """
         Returns
@@ -550,7 +550,6 @@ class MSigDB:
             Version string (e.g. ``"2026.1"``).
         """
         return self._version
-
 
     # ------------------------------------------------------------------
     # download
@@ -562,6 +561,7 @@ class MSigDB:
         collection: str,
         *,
         tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
     ) -> FileElement:
         """Download a MSigDB gene-set collection as a GMT file.
 
@@ -583,22 +583,27 @@ class MSigDB:
         """
 
         collection_key = collection.upper()
-        if collection_key not in self.collections_files():
+        if collection_key not in self.collections_files:
             raise ValueError(
                 f"Unknown MSigDB collection: {collection!r}.  "
-                f"Known collections: {sorted(self._COLLECTION_FILES)}"
+                f"Known collections: {sorted(self.collections_files)}"
             )
-        filename = self._COLLECTION_FILES[collection_key]
-        gmt_path = self.cache_dir / filename
+        output_dir = Path(outdir or self.cache_dir)
+        filename = self.collections_files[collection_key]
+        gmt_path = output_dir / filename
 
-        tag = PTag(
-            root=f"msigdb_{collection_key.lower()}",
-            level=0,
-            stage=Stage.INPUT,
-            method=Method.MSIGDB,
-            state=State.DOWNLOAD,
-            ext="gmt",
-        ).merge(tag).resolve()
+        tag = (
+            PTag(
+                root=f"{collection_key.lower()}",
+                level=0,
+                stage=Stage.INPUT,
+                method=Method.MSIGDB,
+                state=State.DOWNLOAD,
+                ext="gmt",
+            )
+            .merge(tag)
+            .resolve()
+        )
 
         @depends(_download_gmt)
         def _run():
@@ -606,95 +611,256 @@ class MSigDB:
                 collection_key=collection_key,
                 filename=filename,
                 gmt_path=gmt_path,
-                base_url=self._MSIGDB_GMT_URL,
+                base_url=self.url,
             )
 
         runner = Runnable(_run, display=f"msigdb.download({collection_key})")
 
-
         return FileElement(
-            path=gmt_path,
+            filepath=gmt_path,
             runner=runner,
             tag=tag,
             root=collection_key,
-            ext="gmt",
-            is_prefix=False,
-            pres=(),
         )
 
-    # @element
-    # def download_as_element(
-    #     self,
-    #     collection: str,
-    #     *,
-    #     organism: str = "Human",
-    #     tag: PartialElementTag | ElementTag | None = None,
-    # ) -> Element:
-    #     """Download a MSigDB gene-set collection; return a plain Element.
+    @element
+    def merge(
+        self,
+        gmts: Iterable[FileElement],
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+    ) -> FileElement:
+        """Merge multiple MSigDB GMT files into a single GMT file.
 
-    #     Identical to :meth:`download` but returns a plain :class:`Element`
-    #     (not a :class:`FileElement`) so the output file does not need to
-    #     exist yet at element-construction time.
+        If the file already exists (signature matches) the merge is
+        skipped like any other pipeline element.
 
-    #     The ``gmt`` artifact holds the path to the downloaded GMT file.
+        Parameters
+        ----------
+        gmts : List[FileElement]
+            List of GMT files to merge.
+        tag : PartialElementTag | ElementTag | None
+            Optional tag override.
+        outdir : Path | str | None
+            Output directory for the merged GMT file.
+        filename : Path | str | None
+            Filename for the merged GMT file.
 
-    #     Parameters
-    #     ----------
-    #     collection : str
-    #         MSigDB collection identifier, e.g. ``"H"``, ``"C2"``.
-    #     organism : str
-    #         ``"Human"`` or ``"Mouse"``.
-    #     tag : PartialElementTag | ElementTag | None
-    #         Optional tag override.
+        Returns
+        -------
+        FileElement
+            Points to the local GMT file.
+        """
+        first_element = next(iter(gmts), None)
+        if first_element is None:
+            raise ValueError("No GMT files provided for merging.")
+        root = f"msigdb_{['_'.join(element.root for element in gmts)]}"
+        tag = from_prior(
+            first_element.tag,
+            tag,
+            stage=Stage.INPUT,
+            state=State.MERGED,
+            root=root,
+            ext="gmt",
+        )
+        output_dir = Path(outdir or self.cache_dir)
+        filename = filename or tag.default_output
+        gmt_path = output_dir / filename
 
-    #     Returns
-    #     -------
-    #     Element
-    #         ``gmt`` artifact → path to local GMT file.
-    #     """
-    #     from mmalignments.models.tags import PartialElementTag as PTag
+        @depends(_download_gmt, concat_files)
+        def _run():
+            concat_files(gmt_path, *(element.file for element in gmts))
 
-    #     collection_key = collection.upper()
-    #     if collection_key not in self._COLLECTION_FILES:
-    #         raise ValueError(
-    #             f"Unknown MSigDB collection: {collection!r}.  "
-    #             f"Known: {sorted(self._COLLECTION_FILES)}"
-    #         )
-    #     filename = self._COLLECTION_FILES[collection_key]
-    #     gmt_path = self.cache_dir / filename
+        spec = CallSpec(
+            path=("MsigDB", "merge"),
+            args=(gmts,),
+        ).render()
+        runner = Runnable(_run, display=spec)
 
-    #     base_tag = PTag(
-    #         root=f"msigdb_{collection_key.lower()}",
-    #         level=0,
-    #         stage=Stage.INPUT,
-    #         method=Method.MSIGDB,
-    #         state=State.DOWNLOAD,
-    #         ext="gmt",
-    #     ).merge(tag).resolve()
+        return FileElement(
+            filepath=gmt_path,
+            runner=runner,
+            tag=tag,
+            root=root,
+            pres=tuple(gmts),
+        )
 
-    #     @depends(_download_gmt)
-    #     def _run():
-    #         _download_gmt(
-    #             collection_key=collection_key,
-    #             filename=filename,
-    #             gmt_path=gmt_path,
-    #             base_url=self._MSIGDB_GMT_URL,
-    #         )
+    @element
+    def collections(
+        self,
+        collections: Iterable[str],
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+    ) -> FileElement:
+        """
+        Download and merge multiple MSigDB collections into a single GMT file.
 
-    #     runner = Runnable(_run, display=f"msigdb.download({collection_key})")
-    #     key = base_tag.default_name
-    #     name = base_tag.default_name
+        Parameters
+        ----------
+        collections : Iterable[str]
+            List of MSigDB collections to download and merge.
+        tag : PartialElementTag | ElementTag | None, optional
+            Optional tag override, by default None
+        outdir : Path | str | None, optional
+            Output directory for the merged GMT file, by default None
+        filename : Path | str | None, optional
+            Filename for the merged GMT file, by default None
 
-    #     return Element(
-    #         key,
-    #         runner,
-    #         tag=base_tag,
-    #         artifacts={"gmt": gmt_path},
-    #         inputs=(),
-    #         pres=(),
-    #         name=name,
-    #         empty_ok=False,
-    #     )
+        Returns
+        -------
+        FileElement
+            Points to the local GMT file.
+        """
+        gmts = [self.download(collection, outdir=outdir) for collection in collections]
+
+        return self.merge(gmts, tag=tag, outdir=outdir, filename=filename)
+
+    @element
+    def select(
+        self,
+        gmt: FileElement,
+        genesets: Iterable[str],
+        *,
+        root: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+    ) -> FileElement:
+        """
+        Select and merge single MSigDB gene sets from a GMT file into a new GMT file.
+
+        Gene set ids from MSigSB must be prefixed with the MSigSB collection
+        name e.g. "H.HALLMARK_ADIPOGENESIS, C2.KEGG_P53_SIGNALLING". The input
+        GMT file can be obtained from the download method or any custom GMT file.
+
+        Parameters
+        ----------
+        gmt : FileElement
+            Input GMT file containing the gene sets to select from.
+        genesets : Iterable[str]
+            List of MSigDB gene sets to select and merge.
+        tag : PartialElementTag | ElementTag | None, optional
+            Optional tag override, by default None
+        outdir : Path | str | None, optional
+            Output directory for the merged GMT file, by default None
+        filename : Path | str | None, optional
+            Filename for the merged GMT file, by default None
+
+        Returns
+        -------
+        FileElement
+            Points to the local GMT file.
+        """
+        if not genesets:
+            raise ValueError("No gene sets provided for selection.")
+
+        tag = from_prior(
+            gmt.tag,
+            tag,
+            stage=Stage.INPUT,
+            state=State.DOWNLOAD,
+            root=root,
+            ext="gmt",
+        )
+        output_dir = Path(outdir or self.cache_dir)
+        filename = filename or tag.default_output
+        gmt_path = output_dir / filename
+
+        @depends(_select_gene_sets)
+        def _run():
+            _select_gene_sets(
+                input_gmt=Path(gmt.file),
+                selected_genesets=genesets,
+                output_gmt=gmt_path,
+            )
+
+        spec = CallSpec(
+            path=_("MsigDB", "select"),
+            args=(gmt, genesets),
+        ).render()
+        runner = Runnable(_run, display=spec)
+
+        return FileElement(
+            filepath=gmt_path,
+            runner=runner,
+            determinants=tuple(genesets),
+            tag=tag,
+            root=root,
+            pres=(gmt,),
+        )
+
+    @element
+    def custom(
+        self,
+        genesets_msig: Iterable[str] | None,
+        genesets_custom: FileElement | Iterable[FileElement] | None,
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outdir: Path | str | None = None,
+        filename: Path | str | None = None,
+    ) -> FileElement:
+        """
+        Download and merge single MSigDB gene sets and self-compiled custom gene sets
+        into a single GMT file.
+
+        Gene set ids from MSigSB must be prefixed with the MSigSB collection
+        name e.g. "H.HALLMARK_ADIPOGENESIS, C2.KEGG_P53_SIGNALLING". If self-defined
+        custom gene sets are to be used, we assume that instead of ids to be retrieved,
+        ready FileElements representing the input files are supplied.
+
+        Parameters
+        ----------
+        genesets_msig : Iterable[str]
+            List of MSigDB gene sets to download and merge.
+        genesets_custom : Iterable[FileElement]
+            List of custom gene sets to merge.
+        tag : PartialElementTag | ElementTag | None, optional
+            Optional tag override, by default None
+        outdir : Path | str | None, optional
+            Output directory for the merged GMT file, by default None
+        filename : Path | str | None, optional
+            Filename for the merged GMT file, by default None
+
+        Returns
+        -------
+        FileElement
+            Points to the local GMT file.
+        """
+        if genesets_msig is None and genesets_custom is None:
+            raise ValueError(
+                "At least one of genesets_msig or genesets_custom must be provided."
+            )
+
+        genesets_from_msig = {}
+        if genesets_msig is not None:
+            for geneset_id in genesets_msig:
+                if "." not in geneset_id:
+                    raise ValueError(
+                        f"Invalid MSigDB gene set id: {geneset_id!r}.  Must be prefixed with collection name, e.g. 'H.HALLMARK_ADIPOGENESIS'."
+                    )
+                splits = geneset_id.split(".")
+                collection, gene_set = splits[0], splits[1]
+                genesets_from_msig.setdefault(collection, []).append(gene_set)
+        # download the collections needed
+        gmts = []
+        for collection, gene_sets in genesets_from_msig.items():
+            gmt = self.download(collection, outdir=outdir)
+            selected = self.select(gmt, gene_sets, outdir=outdir)
+            gmts.append(selected)
+
+        # if we have custom sets as well, add them to the merge stack
+        if genesets_custom:
+            gmts.extend(
+                [genesets_custom]
+                if isinstance(genesets_custom, FileElement)
+                else genesets_custom
+            )
+        # retrieve the relevant sets for each collection and merge them
+        return self.merge(gmts, tag=tag, outdir=outdir, filename=filename)
 
     # ------------------------------------------------------------------
     # to_ensembl
@@ -787,11 +953,9 @@ class MSigDB:
 
 def _run_gsea(
     *,
-    expression_parquet: Path,
+    expression_file: Path,
     gene_sets_arg,
     cls_arg,
-    out_tsv: Path,
-    out_parquet: Path,
     outdir: Path,
     permutation_type: str,
     permutation_num: int,
@@ -801,16 +965,13 @@ def _run_gsea(
     gene_col: str,
     seed: int,
 ) -> None:
-    import gseapy as gp
-    import pandas as pd
 
-    parents(out_tsv)
-    expr_df = pd.read_parquet(expression_parquet)
-
+    expr_df = read_frame(expression_file)
     # gseapy expects genes as the index
     if gene_col in expr_df.columns:
         expr_df = expr_df.set_index(gene_col)
 
+    print(gene_sets_arg)
     res = gp.gsea(
         data=expr_df,
         gene_sets=gene_sets_arg,
@@ -826,30 +987,24 @@ def _run_gsea(
     )
 
     df = res.res2d
-    df.to_csv(out_tsv, sep="\t", index=True)
-    df.to_parquet(out_parquet, index=True)
     logger.info("GSEA done — %d terms in %s", len(df), out_tsv)
+    return df
 
 
 def _run_prerank(
     *,
     ranking_tsv: Path,
     gene_sets_arg,
-    out_tsv: Path,
-    out_parquet: Path,
-    outdir: Path,
     gene_col: str,
     stat_col: str,
     permutation_num: int,
     min_size: int,
     max_size: int,
     weight: float,
+    outdir: Path,
     seed: int,
 ) -> None:
-    import gseapy as gp
-    import pandas as pd
 
-    parents(out_tsv)
     rnk = pd.read_csv(ranking_tsv, sep="\t")[[gene_col, stat_col]]
     rnk = rnk.sort_values(stat_col, ascending=False)
 
@@ -864,28 +1019,23 @@ def _run_prerank(
         seed=seed,
         verbose=True,
     )
-
+    print(outdir)
     df = res.res2d
-    df.to_csv(out_tsv, sep="\t", index=True)
-    df.to_parquet(out_parquet, index=True)
-    logger.info("prerank done — %d terms in %s", len(df), out_tsv)
+    logger.info("prerank done — %d terms in %s", df.shape[0], outdir)
+    return df
 
 
 def _run_enrichr(
     *,
     gene_list_element: Element,
     gene_sets_arg,
-    out_tsv: Path,
-    out_parquet: Path,
     outdir: Path,
     gene_col: str | None,
     organism: str,
     cutoff: float,
-) -> None:
-    import gseapy as gp
-    import pandas as pd
+) -> DataFrame:
 
-    parents(out_tsv)
+    exists(outdir)
 
     # Resolve gene list
     if gene_col is not None and hasattr(gene_list_element, "tsv"):
@@ -911,9 +1061,10 @@ def _run_enrichr(
     )
 
     df = res.results
-    df.to_csv(out_tsv, sep="\t", index=False)
-    df.to_parquet(out_parquet, index=False)
-    logger.info("enrichr done — %d terms in %s", len(df), out_tsv)
+    logger.info("enrichr done — %d terms in %s", len(df), outdir)
+    return df
+    # df.to_csv(out_tsv, sep="\t", index=False)
+    # df.to_parquet(out_parquet, index=False)
 
 
 def _download_gmt(
@@ -932,6 +1083,7 @@ def _download_gmt(
         return
 
     url = f"{base_url}/{filename}"
+
     logger.info("Downloading %s → %s", url, gmt_path)
     urllib.request.urlretrieve(url, gmt_path)
     logger.info("Downloaded %s (%d bytes)", gmt_path, gmt_path.stat().st_size)
@@ -950,8 +1102,6 @@ def _translate_gmt_to_ensembl(
     Lines whose genes cannot be mapped are kept as-is (with a warning).
     The translation table is read from *id_map_tsv*.
     """
-    import pandas as pd
-
     parents(out_gmt)
 
     id_map = (
@@ -977,7 +1127,7 @@ def _translate_gmt_to_ensembl(
             if eid:
                 translated.append(eid)
             else:
-                translated.append(g)   # keep original if not found
+                translated.append(g)  # keep original if not found
                 unmapped += 1
             total_genes += 1
         out_lines.append("\t".join([name, url] + translated))
@@ -986,7 +1136,8 @@ def _translate_gmt_to_ensembl(
         logger.warning(
             "to_ensembl: %d/%d gene entries had no Ensembl mapping "
             "(kept as symbols)",
-            unmapped, total_genes,
+            unmapped,
+            total_genes,
         )
 
     out_gmt.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
@@ -1000,33 +1151,30 @@ def _translate_gmt_to_ensembl(
 
 def _resolve_gene_sets(
     gene_sets: "FileElement | str | Sequence[str]",
-    pres: list,
-) -> tuple[Any, list[Path]]:
+    pres: list[Element],
+) -> tuple[Any, list[Element]]:
     """Normalise the *gene_sets* argument for gseapy.
 
     Returns
     -------
     gene_sets_arg
         Value to pass to gseapy (path string, library name, or list).
-    inputs
-        List of :class:`Path` objects to declare as element inputs (empty
-        when *gene_sets* is a string / list of strings).
     """
     if isinstance(gene_sets, Element):
         gmt_path = Path(gene_sets.gmt)
         pres.append(gene_sets)
-        return str(gmt_path), [gmt_path]
-    if isinstance(gene_sets, (list, tuple)):
-        return list(gene_sets), []
+        return str(gmt_path), pres
+    elif isinstance(gene_sets, (list, tuple)):
+        return list(gene_sets), pres
     # plain string — Enrichr library name
-    return gene_sets, []
+    return gene_sets, pres
 
 
 def _resolve_cls(
-    cls: "Sequence[str] | FileElement",
+    classes: Sequence[str] | FileElement,
     pres: list,
-) -> tuple[Any, list[Path], list]:
-    """Normalise the *cls* argument for gseapy.gsea.
+) -> tuple[Any, list[Element]]:
+    """Normalise the *classes* argument for gseapy.gsea.
 
     Returns
     -------
@@ -1037,14 +1185,32 @@ def _resolve_cls(
     cls_pres
         Additional Element prerequisites.
     """
-    if isinstance(cls, Element):
-        cls_path = Path(cls.path)
-        pres.append(cls)
-        return str(cls_path), [cls_path], [cls]
-    return list(cls), [], []
+    if isinstance(classes, Element):
+        cls_path = Path(classes.path)
+        pres.append(classes)
+        return str(cls_path), pres
+    return list(classes), pres
 
 
 def _build_key_name(tag: ElementTag, subcommand: str) -> tuple[str, str]:
     name = tag.default_name
     key = f"{name}_{subcommand}"
     return key, name
+
+
+def _select_gene_sets(
+    input_gmt: Path,
+    selected_genesets: Iterable[str],
+    output_gmt: Path,
+) -> None:
+    selected_set_names = set(selected_genesets)
+    with input_gmt.open() as infile, output_gmt.open("w") as outfile:
+        for line in infile:
+            if not line.strip():
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) < 3:
+                continue
+            set_name = parts[0]
+            if set_name in selected_set_names:
+                outfile.write(line)

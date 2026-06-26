@@ -42,8 +42,10 @@ from mmalignments.models.elements import (
     Element,
     ElementTag,
     Runnable,
+    element
 )
 from mmalignments.models.tags import Method, Omics, Stage, State
+from mmalignments.services.environment import get_variable, hostname, prebuilt_path
 from mmalignments.services.io import parents
 from mmalignments.services.logging import current_call_to_string
 
@@ -56,7 +58,7 @@ logger = logging.getLogger(__name__)
 # Shared prebuild root – identical to the path that mbf uses.
 # Override via ``EnsemblGenome(base_dir=…)``.
 # ---------------------------------------------------------------------------
-_DEFAULT_PREBUILD_ROOT = Path("/machine/ffs/prebuild/externals/ppg2/clara/ensembl")
+_DEFAULT_PREBUILD_ROOT = Path(prebuilt_path()) / "ppg2" / hostname() / "ensembl"
 
 # ---------------------------------------------------------------------------
 # Known Ensembl assembly names (avoids a REST call in the common case).
@@ -89,6 +91,7 @@ class GenomeBase(ABC):
     # Abstract interface
     # ------------------------------------------------------------------
 
+
     @property
     @abstractmethod
     def name(self) -> str:
@@ -113,6 +116,11 @@ class GenomeBase(ABC):
     def gff3(self) -> Path | None:
         """Path to the gene annotation GFF3 file, or *None* if not available."""
         return None
+
+    @property
+    def default_prebuild_path(self) -> Path:
+        """Default path for prebuilt genome files."""
+        return prebuilt_path / "ppg2" / hostname() / "ensembl"
 
     # ------------------------------------------------------------------
     # Derived properties (lazy, no network / subprocess required)
@@ -506,6 +514,7 @@ class EnsemblGenome(GenomeBase):
     # Download Elements
     # ------------------------------------------------------------------
 
+    @element
     def download_fasta(self) -> Element:
         """Return an Element that downloads and gunzips the genome FASTA.
 
@@ -517,6 +526,8 @@ class EnsemblGenome(GenomeBase):
         Element
         """
         dest = self.fasta
+        print(self.fasta)
+        raise ValueError(f"Debug: {self.fasta}")
         url = self._fasta_url()
         tag = ElementTag(
             root=self.name,
@@ -547,6 +558,7 @@ class EnsemblGenome(GenomeBase):
             name=f"{self.name} download genome FASTA",
         )
 
+    @element
     def download_gtf(self) -> Element:
         """Return an Element that downloads and gunzips the gene annotation GTF.
 
@@ -557,6 +569,8 @@ class EnsemblGenome(GenomeBase):
         Element
         """
         dest = self.gtf
+        print(self.fasta)
+        raise ValueError(f"Debug: {self.fasta}")
         url = self._gtf_url()
         tag = ElementTag(
             root=self.name,
@@ -587,6 +601,7 @@ class EnsemblGenome(GenomeBase):
             name=f"{self.name} download GTF",
         )
 
+    @element
     def download_gff3(self) -> Element:
         """Return an Element that downloads and gunzips the GFF3 annotation.
 
@@ -627,6 +642,7 @@ class EnsemblGenome(GenomeBase):
             name=f"{self.name} download GFF3",
         )
 
+    
     def prepare(
         self,
         *,

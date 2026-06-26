@@ -9,6 +9,7 @@ from .dataclasses import PrefixDict
 # from .callable_regions import CallableRegions
 # from .mutation_calling import Mutect2Caller
 # from .preprocessing import BamPreprocessor
+from .dataclasses import PrefixDict
 
 __all__ = [
     "PrefixDict",

@@ -1,4 +1,5 @@
+from .fastgrab import FastGrab, generate_sample_iterator
 from .mmfqcount import MmFqCount
-from .fastgrab import FastGrab
+from .ngmerge import NGmerge
 
-__all__ = ["MmFqCount", "FastGrab"]
+__all__ = ["MmFqCount", "FastGrab", "NGmerge", "generate_sample_iterator"]

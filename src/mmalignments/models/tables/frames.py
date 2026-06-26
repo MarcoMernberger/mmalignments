@@ -475,7 +475,6 @@ class Tables:
                     )
                 else:
                     suffixes = (first_key, key)
-                print(right_df.head(), "right_df", right_df.shape)
                 left_on = on_dict.get(first_key)
                 right_on = on_dict.get(key)
                 validate_merge_columns(left_df, right_df, left_on, right_on)
@@ -492,7 +491,6 @@ class Tables:
                     left_df = left_df.drop(
                         columns=[col for col in right_on if col not in left_on]
                     )
-            print("##############")
             # Save the combined DataFrame to a file
             columns_order = on_dict.get(first_key, []) + [
                 col for col in left_df.columns if col not in on_dict.get(first_key, [])

@@ -6,7 +6,10 @@ import pandas as pd
 from pathlib import Path
 from typing import IO, Any, Callable
 from pandas import DataFrame
-from typing import Literal, Mapping
+from typing import IO, Any, Callable, Mapping
+
+import pandas as pd  # type: ignore[import]
+from pandas import DataFrame  # type: ignore[import]
 
 
 def ensure(*files: Path | str) -> bool:
@@ -107,6 +110,26 @@ def write_fastq_check_results(
 
 
 def from_json(infile: Path, encoding="utf-8") -> dict[str, str | int | float]:
+    """
+    Load a JSON file and return its contents as a dictionary.
+
+    Parameters
+    ----------
+    infile : Path
+        The path to the JSON file to load.
+    encoding : str, optional
+        The encoding to use when reading the file, by default "utf-8"
+
+    Returns
+    -------
+    dict[str, str | int | float]
+        The contents of the JSON file as a dictionary.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the JSON file does not exist.
+    """
     if not infile.exists():
         raise FileNotFoundError(f"JSON file not found: {infile}")
 
@@ -116,6 +139,26 @@ def from_json(infile: Path, encoding="utf-8") -> dict[str, str | int | float]:
 
 
 def load_param_json(path: Path) -> dict[str, Any]:
+    """
+    Load a parameter JSON file and return its contents as a dictionary.
+
+    Parameters
+    ----------
+    path : Path
+        The path to the parameter JSON file.
+
+    Returns
+    -------
+    dict[str, Any]
+        The contents of the parameter JSON file as a dictionary.
+
+    Raises
+    ------
+    ValueError
+        If the top-level JSON is not an object.
+    FileNotFoundError
+        If the parameter JSON file does not exist.
+    """
     try:
         obj = from_json(path)
         if not isinstance(obj, dict):
@@ -130,6 +173,18 @@ def load_param_json(path: Path) -> dict[str, Any]:
 def open_target(
     target: Path | None | IO = None, *, append: bool, encoding: str = "utf-8"
 ):
+    """
+    Open a target file or return an existing file-like object.
+
+    Parameters
+    ----------
+    append : bool
+        Whether to append to the file if it exists.
+    target : Path | None | IO, optional
+        The target file path or file-like object, by default None
+    encoding : str, optional
+        The encoding to use when opening the file, by default "utf-8"
+    """
     if target is None:
         return None
     if isinstance(target, Path):
@@ -165,6 +220,17 @@ def paths_exists(*paths: Path | str) -> Callable[[], bool]:
     return check
 
 
+def paths_exists_raise(*paths: Path | str) -> Callable[[], None]:
+    """Check if all given paths exist."""
+
+    def check():
+        for p in paths:
+            if not Path(p).exists():
+                raise FileNotFoundError(f"Required path does not exist: {p}")
+
+    return check
+
+
 def exists(path: Path | str) -> Callable[[], bool]:
     """Check if a file or directory exists at the given path."""
 
@@ -175,6 +241,16 @@ def exists(path: Path | str) -> Callable[[], bool]:
 
 
 def write_fasta(path: Path, sequences: dict[str, str]) -> None:
+    """
+    Write sequences to a FASTA file.
+
+    Parameters
+    ----------
+    path : Path
+        The path to the output FASTA file.
+    sequences : dict[str, str]
+        A dictionary mapping sequence names to sequences.
+    """
     parents(path)
     with open(path, "w") as f:
         for name, seq in sequences.items():
