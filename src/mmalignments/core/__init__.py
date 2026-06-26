@@ -3,6 +3,7 @@ Core domain logic for mmalignments.
 Contains core processing algorithms and external tool wrappers.
 """
 
+from .dataclasses import PrefixDict
 # from .bed import ensemblmap
 #from .bwamem2 import BWAMem2
 # from .callable_regions import CallableRegions
@@ -10,6 +11,7 @@ Contains core processing algorithms and external tool wrappers.
 # from .preprocessing import BamPreprocessor
 
 __all__ = [
+    "PrefixDict",
     # "BWAMem2",
     # "BamPreprocessor",
     # "CallableRegions",

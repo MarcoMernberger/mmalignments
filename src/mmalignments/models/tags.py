@@ -37,11 +37,11 @@ class State(str, Enum):
     DEDUP = "dedup"
     RECAL = "recal"
     MODEL = "model"
-    HARMONIZED = "harmonic"
+    HARMONIZED = "harmonized"
     INDEX = "index"
-    PADDED = "pad"
+    PADDED = "padded"
     ANNOTATE = "annotate"
-    MERGED = "merge"
+    MERGED = "merged"
     PILE = "pile"
     STAT = "stat"
     LOCI = "loci"
@@ -58,7 +58,9 @@ class State(str, Enum):
     ENRICHMENT = "enrichment"
     RANK = "rank"
     TRANSLATE = "translate"
-
+    ANNOTATED = "annotated"
+    TRANSFORMED = "transformed"
+    
 class Method(str, Enum):
     FASTP = "fastp"
     BWAMEM2 = "bwamem2"
@@ -84,7 +86,7 @@ class Method(str, Enum):
     ENSEMBL = "ensembl"
     GSEA = "gsea"
     MSIGDB = "msigdb"
-    
+    TABLES = "tables"
 
 def level(level: int) -> str:
     return f"S{level:02d}"

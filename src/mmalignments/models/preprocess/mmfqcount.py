@@ -27,38 +27,45 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+from pathlib import Path
+from typing import Callable, Mapping
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Mapping, Callable
+from pandas import DataFrame, Series
 
 from mmalignments.models.elements import (
+    CallSpec,
     Element,
     NextGenSampleElement,
     TableElement,
     element,
-    CallSpec
 )
-from mmalignments.services.io import parents
 from mmalignments.models.parameters import (
+    ParamRegistry,
     Params,
     ParamSet,
     ParamSpec,
-    ParamRegistry,
     render_value,
-    render_flag,
 )
 from mmalignments.models.tags import (
     ElementTag,
     Method,
-    Omics,
     PartialElementTag,
     Stage,
     State,
     from_prior,
 )
 from mmalignments.services.dependencies import function_hash
-from ..externals import External, ExternalRunConfig, Runnable, SubroutineIn, subroutine
+from mmalignments.services.io import parents, read_frame, write_frames
+
+from ..externals import (
+    External,
+    ExternalRunConfig,
+    Runnable,
+    SubroutineIn,
+    subroutine,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +240,7 @@ class MmFqCount(External):
     # -----------------------------------------------------------------------
     # Default paths
     # -----------------------------------------------------------------------
-    
+
     def default_output_dir(self, sample_name: str) -> Path:
         """Return the default output directory for a given sample."""
         return Path("results") / "counts" / self.version_name / sample_name
@@ -495,11 +502,7 @@ class MmFqCount(External):
         output_dir = Path(outdir or counts_tsv.parent)
         out_filename = filename or tag.default_output
         matched_tsv = output_dir / out_filename
-        unmatched_tsv = output_dir / (
-            out_filename.replace(".tsv", "_unmatched.tsv")
-            if ".tsv" in str(out_filename)
-            else f"{out_filename}_unmatched.tsv"
-        )
+        unmatched_tsv = matched_tsv.with_suffix(".unmatched.tsv")
 
         runner = self.run_match(
             counts_tsv=counts_tsv,
@@ -601,26 +604,26 @@ class MmFqCount(External):
         compare: TableElement,
         against: TableElement,
         *,
-        score: Callable[[int, int], float] | None = None,
-        seq_col: str = "R2",
-        column_prefix: str = "Count",
-        exclude_score: float | None | Callable = 0.0,
+        score: Callable[[Series, Series], Series] | None = None,
+        keys: list[str] | None = ["R2", "Annotation"],
+        filter: Callable[[pd.DataFrame], pd.DataFrame] | bool = True,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> TableElement:
+        mode: str = "both",
+    ) -> Element:
         """
-        compare the counts of two count results and output a tsv with the counts of 
+        compare the counts of two count results and output a tsv with the counts of
         both samples and a predefined score between them.
-        Both input elements should be TableElements with a "tsv" artifact. The 
-        TSVs must have the same counts columns (e.g. "Count") and the same 
+        Both input elements should be TableElements with a "tsv" artifact. The
+        TSVs must have the same counts columns (e.g. "Count") and the same
         sequence identifier columns (e.g. "Sequence").
 
-        The result will produce 2 tsv files: a score TSV with all sequences 
-        from the "compare" table, with the counts from both inputs and the 
-        score; and a filtered score TSV with only sequences that meet the score 
+        The result will produce 2 tsv files: a score TSV with all sequences
+        from the "compare" table, with the counts from both inputs and the
+        score; and a filtered score TSV with only sequences that meet the score
         threshold (if exclude_score is set).
         
         Parameters
@@ -632,22 +635,24 @@ class MmFqCount(External):
         score : Callable[[int, int], float]] | None, optional
             Function that takes two counts (compare, against) and returns a score.
             Default is log2 fold change with inf if denominator is zero.
-        seq_col : str, optional
-            Column name in the input TSVs that contains the sequence 
-            identifiers. Default is "R2".
-        column_prefix : str, optional
-            Prefix for the count columns in the input TSV (e.g. "Count (sample)")
+        key_columns : list[str] | None, optional
+            Column names in the input TSVs that contain the sequence
+            identifiers. Default is ["R2", "Annotation"].
+        count_column : str, optional
+            Column name in the input TSVs that contains the counts. Default is "Count".
+        id_column : str, optional
+            Column name in the input TSVs that contains the identifiers. Default is "Annotation".
         exclude_score : float | None | Callable, optional
-            If set, sequences with a score equal to this will be excluded from 
-            the filtered score TSV. If a callable is provided, it will be called 
-            with the score and should return True if the sequence should be 
+            If set, sequences with a score equal to this will be excluded from
+            the filtered score TSV. If a callable is provided, it will be called
+            with the score and should return True if the sequence should be
             excluded.
         tag : PartialElementTag | ElementTag | None
             Optional tag override.
         outdir : Path | str | None, optional
             Optional output directory override.
         filename : Path | str | None, optional
-            Optional filename override. 
+            Optional filename override.
         params : Params | None, optional
             Additional parameters, by default None
         cfg : ExternalRunConfig | None, optional
@@ -661,12 +666,29 @@ class MmFqCount(External):
             "score" → TSV with all sequences and their scores
             "filtered_score" → TSV with sequences that meet the score threshold
         """
-        def default_score(count1: int, count2: int) -> float:
-            if count2 == 0:
-                return float('inf') if count1 > 0 else 0.0
-            return np.log2(count1 / count2)
-        if score is None:
-            score = default_score
+
+        def default_score(count1: Series, count2: Series) -> Series:
+            offset = 1
+            c1 = np.asarray(count1, dtype=np.float64)
+            c2 = np.asarray(count2, dtype=np.float64)
+            c1 = c1 + offset
+            c2 = c2 + offset
+            np.divide(c1, c1.sum(), out=c1) # normalize to lib size
+            np.divide(c2, c2.sum(), out=c2)
+            np.divide(c1, c2, out=c1)   # ratio
+            np.log2(c1, out=c1) # log fold change
+            return pd.Series(c1, index=count1.index)
+
+        def get_filter(filter_column: str, filter: Callable[[pd.DataFrame], pd.DataFrame] | bool) -> Callable[[DataFrame], DataFrame] | None:
+            def filter_func(df: DataFrame) -> DataFrame:
+                df = df[df[filter_column] > 0]
+                return df
+            if callable(filter):
+                return filter
+            elif filter is True:
+                return filter_func
+            else:
+                return None
 
         tag = from_prior(
             compare.tag,
@@ -676,26 +698,34 @@ class MmFqCount(External):
             state=State.SCORE,
             ext="tsv",
         )
+        params = Params(
+            count_column = "Count",
+            freq_column = "Frequency",
+            annotation_column = "Annotation",
+            seq_column = "R2",
+            score_name = "Score" if score else "Log2 Relative Enrichment Score",
+        ).update(params)
+
+        keys = keys or ["R2", "Annotation"]
+        filter_func = get_filter(f"{params.count_column} ({compare.tag.root})", filter)
+
         output_dir = Path(outdir or compare.file.parent).absolute()
         score_filename = filename or tag.default_output
         score_tsv = output_dir / score_filename
-        filtered_score_tsv = score_tsv.with_suffix(".filtered.tsv")
         pres = (compare, against)
         inputs = (compare.file, against.file)
-        determinants = [function_hash(score), seq_col, column_prefix, exclude_score]
-        # Resolve predefined path
-
+        determinants = [function_hash(score), str(params)] + keys
+        determinants += [function_hash(filter_func)] if callable(filter_func) else [str(f"filter={filter}")]
         runner = self.compare_counts(
             compare=compare.tag.root,
             against=against.tag.root,
-            compare_tsv=compare.file,
-            against_tsv=against.file,
-            score_tsv=score_tsv,
-            filtered_score_tsv=filtered_score_tsv,
-            seq_col=seq_col,
-            score_func=score,
-            column_prefix=column_prefix,
-            exclude_score=exclude_score,
+            compare_file=compare.file,
+            against_file=against.file,
+            out_tsv=score_tsv,
+            score=score or default_score,
+            keys=keys,
+            filter=filter_func,
+            mode=mode,
             params=params,
             cfg=cfg,
         )
@@ -703,15 +733,17 @@ class MmFqCount(External):
         key, name = self.build_element_name(
             tag, "compare", param_str="_against=" + against.tag.root,
         )
+        artifacts={"tsv": score_tsv}
+        if filter:
+            artifacts["filtered"] = score_tsv.with_suffix(".filtered.tsv")
 
-        return TableElement(
+        return Element(
             key,
             runner,
             tag=tag,
-            artifacts={"tsv": score_tsv, "filtered": filtered_score_tsv},
-            tsv=score_tsv,
-            determinants=determinants,
+            determinants=tuple(determinants),
             inputs=inputs,
+            artifacts=artifacts,
             pres=pres,
             name=name,
         )
@@ -724,104 +756,226 @@ class MmFqCount(External):
         self,
         compare: str,
         against: str,
-        compare_tsv: Path | str,
-        against_tsv: Path | str,
-        score_tsv: Path | str,
-        filtered_score_tsv: Path | str,
+        compare_file: Path | str,
+        against_file: Path | str,
+        out_tsv: Path | str,
+        score: Callable[[Series, Series], Series],
         *,
-        seq_col: str = "R2",
-        score_func: Callable[[int, int], float],
-        column_prefix: str = "Count",
-        exclude_score: float | None | Callable = None,
+        keys: list[str] | None = ["R2", "Annotation"],
+        filter: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
+        mode: str = "both",
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Runnable:
         """Compare two count TSVs and assign a score to each sequence."""
+        params = Params(
+            count_column = "Count",
+            freq_column = "Frequency",
+            annotation_column = "Annotation",
+            seq_column = "R2",
+            score_name = "Score" if score else "Log2 Relative Enrichment Score",
+            how = "left"
+        ).update(params)
+        count_column = params.count_column
+        freq_column = params.freq_column
 
-        compare_path = Path(compare_tsv)
-        against_path = Path(against_tsv)
-        score_path = Path(score_tsv)
-        filtered_path = Path(filtered_score_tsv)
-
-        def _find_count_column(df):
-            if column_prefix in df.columns:
-                return column_prefix
-            matches = [c for c in df.columns if c.lower().startswith(column_prefix.lower())]
-            if len(matches) > 0:
-                return matches
-            else:
-                raise ValueError(
-                    f"Prefix not in count columns for prefix {column_prefix!r}: {matches}"
+        def reduce_to_keys(key_columms: list[str]) -> Callable[[pd.DataFrame], pd.DataFrame]:
+            def __reduce(df: pd.DataFrame) -> DataFrame:
+                drop_cols = [c for c in df.columns if c not in key_columms + [count_column, freq_column, "R1 Name", "R2 Name"]]
+                df = df.drop(columns=drop_cols)
+                df = (
+                    df.groupby(
+                        key_columms,
+                        as_index=False,
+                    )
+                    .agg(
+                        {
+                            count_column: "sum",
+                            freq_column: "sum",
+                            "R1 Name": "first",
+                            "R2 Name": "first",
+                        }
+                    )
                 )
-            
-        def rename_column(name: str) -> Callable[[str], str]:
-            def _rename(column_name: str) -> str:
-                return f"{column_name} ({name})"
-            return _rename
+                return df
+            return __reduce
+
+        def merge_frames(compare_df: pd.DataFrame, against_df: pd.DataFrame) -> pd.DataFrame:
+            print(params.how)
+            merged = compare_df.merge(
+                against_df,
+                on=keys,
+                how=params.how,
+                suffixes=(f" ({compare})", f" ({against})")
+            )
+            merged = merged.fillna(dict.fromkeys([f"{count_column} ({against})", f"{freq_column} ({against})"], 0))
+            return merged
+
+        compare_path = Path(compare_file)
+        against_path = Path(against_file)
+        score_path = Path(out_tsv)
 
         def _runner() -> None:
 
-            parents(score_path, filtered_path)
-            compare_df = pd.read_csv(compare_path, sep="\t")
-            against_df = pd.read_csv(against_path, sep="\t")
-            read_cols_main = [c for c in compare_df.columns if c.startswith(column_prefix)]
-            read_cols_other = [c for c in against_df.columns if c.startswith(column_prefix)]
-            read_cols_common = set(read_cols_main) & set(read_cols_other)
-            # rename Read Count columns
-            rename_compare = rename_column(compare)
-            rename_against = rename_column(against)
-            compare_df = compare_df.rename(columns={c: rename_compare(c) for c in read_cols_main})
-            against_df = against_df.rename(columns={c: rename_against(c) for c in read_cols_other})
-            additional_columns = [rename_against(c) for c in read_cols_common]
-            against_df = against_df[[seq_col] + additional_columns]
-
-            # ḿerge on sequence
-            merged = compare_df.merge(
-                against_df,
-                on=f"{seq_col}",
-                how="left",
-            )
-            # sequences missing in against_df get NaN → treat as 0
-            merged[additional_columns] = merged[additional_columns].fillna(0)
-            # intersection of comparable count columns
-            score_columns = []
-            for col in read_cols_common:
-                col_compare = rename_compare(col)
-                col_against = rename_against(col)
-
-                score_col = f"Score {col.replace(column_prefix, '').strip()} ({compare} vs {against})"
-                score_columns.append(score_col)
-                merged[score_col] = merged.apply(
-                    lambda row: (
-                        score_func(row[col_compare], row[col_against])
-                        if pd.notna(row[col_compare]) and pd.notna(row[col_against])
-                        else pd.NA
-                    ),
-                    axis=1
+            parents(score_path)
+            compare_df = read_frame(compare_path)
+            against_df = read_frame(against_path)
+            if keys:
+                compare_df = reduce_to_keys(keys)(compare_df)
+                against_df = reduce_to_keys(keys)(against_df)
+            score_name = params.get("score_name", "score")
+            compare_df = merge_frames(compare_df, against_df)
+            comp_count_column = f"{count_column} ({compare})"
+            against_count_column = f"{count_column} ({against})"
+            for col in [f"{freq_column} ({compare})", f"{freq_column} ({against})"]:
+                if col not in compare_df.columns:
+                    compare_df[col] = compare_df.fillna(0)[col].astype("float64")
+            for col in [comp_count_column, against_count_column]:
+                compare_df[col] = compare_df[col].fillna(0).astype("int64")
+            compare_df[score_name] = score(compare_df[comp_count_column], compare_df[against_count_column])
+            compare_df = compare_df.sort_values(by=score_name, ascending=False)
+            write_frames(
+                    compare_df,
+                    score_path,
+                    mode
                 )
-            merged.to_csv(score_path, sep="\t", index=False)
-
-            # Keep only rows where at least one count column (compare or against) is > 0.
-            # Rows where every count is 0 (sequence invisible in both conditions) are discarded.
-            all_count_cols = (
-                [rename_compare(c) for c in read_cols_common]
-                + [rename_against(c) for c in read_cols_common]
-            )
-            if all_count_cols:
-                filtered = merged.loc[(merged[all_count_cols] > 0).any(axis=1)]
-            else:
-                filtered = merged
-
-            filtered.to_csv(filtered_path, sep="\t", index=False)
+            # filter out zero counts
+            if filter:
+                filtered_path = Path(score_path.with_suffix(".filtered.tsv"))
+                filtered = filter(compare_df)
+                write_frames(
+                    filtered,
+                    filtered_path,
+                    mode
+                )
 
         callspec = CallSpec(
-            "compare_counts",
+            path=("compare_counts",),
             kwargs={
-                "compare": compare_tsv, "against": against_tsv, 
-                "compare_tsv": compare_tsv, "against_tsv": against_tsv, 
-                "score_tsv": score_tsv, "filtered_score_tsv": filtered_score_tsv, 
-                "seq_col": seq_col, 
-                "column_prefix": column_prefix},
+                "compare": compare_file, "against": against_file,
+                "compare_file": compare_file, "against_file": against_file,
+                "out_tsv": score_path, "score": score, "keys": keys,
+                "filter": filter, "params": params,
+            }
+        ).render()
+        return Runnable(
+            _runner,
+            display=callspec,
+        )
+
+
+    def a_better_compare_counts(
+        self,
+        compare: str,
+        against: str,
+        compare_file: Path | str,
+        against_file: Path | str,
+        out_tsv: Path | str,
+        score: Callable[[Series, Series], Series],
+        *,
+        params: Params | None = None,
+        cfg: ExternalRunConfig | None = None,
+    ) -> Runnable:
+        """Compare two count TSVs and assign a score to each sequence."""
+        keys: list[str] | None = ["R2", "Annotation"],
+        filter: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
+        mode: str = "both",
+        params = Params(
+            count_column = "Count",
+            freq_column = "Frequency",
+            annotation_column = "Annotation",
+            seq_column = "R2",
+            score_name = "Score" if score else "Log2 Relative Enrichment Score",
+            how = "left"
+        ).update(params)
+        count_column = params.count_column
+        freq_column = params.freq_column
+
+        def reduce_to_keys(key_columms: list[str]) -> Callable[[pd.DataFrame], pd.DataFrame]:
+            def __reduce(df: pd.DataFrame) -> DataFrame:
+                drop_cols = [c for c in df.columns if c not in key_columms + [count_column, freq_column, "R1 Name", "R2 Name"]]
+                df = df.drop(columns=drop_cols)
+                df = (
+                    df.groupby(
+                        key_columms,
+                        as_index=False,
+                    )
+                    .agg(
+                        {
+                            count_column: "sum",
+                            freq_column: "sum",
+                            "R1 Name": "first",
+                            "R2 Name": "first",
+                        }
+                    )
+                )
+                return df
+            return __reduce
+
+        def merge_frames(compare_df: pd.DataFrame, against_df: pd.DataFrame) -> pd.DataFrame:
+            print(params.how)
+            merged = compare_df.merge(
+                against_df,
+                on=keys,
+                how=params.how,
+                suffixes=(f" ({compare})", f" ({against})")
+            )
+            merged = merged.fillna(dict.fromkeys([f"{count_column} ({against})", f"{freq_column} ({against})"], 0))
+            return merged
+
+        compare_path = Path(compare_file)
+        against_path = Path(against_file)
+        score_path = Path(out_tsv)
+
+        def _runner() -> None:
+
+            parents(score_path)
+            compare_df = read_frame(compare_path)
+            against_df = read_frame(against_path)
+            if keys:
+                compare_df = reduce_to_keys(keys)(compare_df)
+                against_df = reduce_to_keys(keys)(against_df)
+
+            df = (
+                merge_frames(compare_df, against_df)
+                .pipe(add(), score)    #  score_name = params.get("score_name", "score")
+                .pipe(fill(), columns)
+                .pipe(types())
+                .pipe(sort())
+            )
+            compare_df = merge_frames(compare_df, against_df)
+            comp_count_column = f"{count_column} ({compare})"
+            against_count_column = f"{count_column} ({against})"
+            for col in [f"{freq_column} ({compare})", f"{freq_column} ({against})"]:
+                if col not in compare_df.columns:
+                    compare_df[col] = compare_df.fillna(0)[col].astype("float64")
+            for col in [comp_count_column, against_count_column]:
+                compare_df[col] = compare_df[col].fillna(0).astype("int64")
+            compare_df[score_name] = score(compare_df[comp_count_column], compare_df[against_count_column])
+            compare_df = compare_df.sort_values(by=score_name, ascending=False)
+            write_frames(
+                    compare_df,
+                    score_path,
+                    mode
+                )
+            # filter out zero counts
+            if filter:
+                filtered_path = Path(score_path.with_suffix(".filtered.tsv"))
+                filtered = filter(compare_df)
+                write_frames(
+                    filtered,
+                    filtered_path,
+                    mode
+                )
+
+        callspec = CallSpec(
+            path=("compare_counts",),
+            kwargs={
+                "compare": compare_file, "against": against_file,
+                "compare_file": compare_file, "against_file": against_file,
+                "out_tsv": score_path, "score": score, "keys": keys,
+                "filter": filter, "params": params,
+            }
         ).render()
         return Runnable(
             _runner,
@@ -899,8 +1053,8 @@ class MmFqCount(External):
         return match_el, count_el
 
     def samplecount(
-            self, 
-            samples: Mapping[str, NextGenSampleElement], 
+            self,
+            samples: Mapping[str, NextGenSampleElement],
             *,
             tag: PartialElementTag | ElementTag | None = None,
             outdir: Path | str | None = None,
@@ -935,12 +1089,13 @@ class MmFqCount(External):
         """
         count_elements = {}
         for sample_name, sample in samples.items():
-            output_dir = Path(outdir) / sample_name if outdir else self.default_output_dir(sample)
+            output_dir = Path(outdir) / sample_name if outdir else self.default_output_dir(sample.root)
             counted = self.count(
-                sample, 
+                sample,
                 tag=tag,
                 outdir=output_dir,
-                params=params
+                params=params,
+                cfg=cfg,
             )
             count_elements[sample_name] = counted
         return count_elements

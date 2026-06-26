@@ -11,26 +11,34 @@ from functools import cached_property, wraps
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, ParamSpec, TypeVar, cast, overload, Literal
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Mapping,
+    ParamSpec,
+    TypeVar,
+    cast,
+    overload,
+    Literal,
+)
 from pandas import DataFrame
 from dataclasses import dataclass, field
 from mmalignments.services.logging import current_call_to_string
 from mmalignments.models.data import Pairing
 from mmalignments.services.io import parents, paths_exists
 from mmalignments.services.dependencies import (
-    function_hash, 
-    file_sig, 
-    stable_hash, 
-    collect_code_dependency, 
-    file_signature, 
-    DynamicValue
+    function_hash,
+    file_sig,
+    stable_hash,
+    collect_code_dependency,
+    file_signature,
+    DynamicValue,
 )
 from abc import ABC
 
 from .registry import current_element_registry
 from .tags import ElementTag, Method, PartialElementTag, Stage, State, Omics
-
-
 
 ###############################################################################
 # External Wrapper
@@ -38,6 +46,7 @@ from .tags import ElementTag, Method, PartialElementTag, Stage, State, Omics
 
 ArtifactType = Literal["file", "value"]
 ArtifactLifeTime = Literal["persistent", "transient", "ephemeral"]
+
 
 class Artifact(ABC):
     def resolve(self) -> Any:
@@ -57,6 +66,7 @@ class FileArtifact(Artifact):
     def signature(self) -> str:
         return file_signature(self.path)
 
+
 @dataclass(frozen=True)
 class ValueArtifact(Artifact):
     value: Any
@@ -66,7 +76,8 @@ class ValueArtifact(Artifact):
 
     def signature(self) -> str:
         return stable_hash(self.value)
-    
+
+
 @dataclass(frozen=True)
 class DynamicArtifact(Artifact):
     value: DynamicValue
@@ -77,6 +88,7 @@ class DynamicArtifact(Artifact):
     def signature(self) -> str:
         return self.value.signature
 
+
 @dataclass(frozen=True)
 class TransientArtifact(Artifact):
     value: Any
@@ -85,7 +97,8 @@ class TransientArtifact(Artifact):
         return self.value
 
     def signature(self) -> str:
-        return "transient" # transient artifacts are not considered for signature
+        return "transient"  # transient artifacts are not considered for signature
+
 
 # @dataclass(frozen=True)
 # class Artifact:
@@ -113,27 +126,27 @@ class TransientArtifact(Artifact):
 #         else:
 #             return stable_hash(self.value)
 
-    # def stable_repr(self) -> str:  # for signature hashing
-    #     if self.kind == "file":
-    #         if isinstance(self.value, Path):
-    #             return file_signature(self.value)
-    #         else:
-    #             return file_signature(Path(self.value))
-    #     # elif self.kind == "dynamic":
-    #     #     if isinstance(self.value, DynamicValue):
-    #     #         return self.__dynamic_sig()
-    #     #     else:
-    #     #         raise TypeError(f"Expected DynamicValue for dynamic artifact, got {type(self.value)}")
-    #     else:
-            
-    #         return str(self.value)
+# def stable_repr(self) -> str:  # for signature hashing
+#     if self.kind == "file":
+#         if isinstance(self.value, Path):
+#             return file_signature(self.value)
+#         else:
+#             return file_signature(Path(self.value))
+#     # elif self.kind == "dynamic":
+#     #     if isinstance(self.value, DynamicValue):
+#     #         return self.__dynamic_sig()
+#     #     else:
+#     #         raise TypeError(f"Expected DynamicValue for dynamic artifact, got {type(self.value)}")
+#     else:
 
-    # def __file_hash(self, path: Path) -> str:
-    #     h = hashlib.sha256()
-    #     with path.open("rb") as f:
-    #         for chunk in iter(lambda: f.read(1024 * 1024), b""):
-    #             h.update(chunk)
-    #     return h.hexdigest()
+#         return str(self.value)
+
+# def __file_hash(self, path: Path) -> str:
+#     h = hashlib.sha256()
+#     with path.open("rb") as f:
+#         for chunk in iter(lambda: f.read(1024 * 1024), b""):
+#             h.update(chunk)
+#     return h.hexdigest()
 
 # @dataclass(frozen=True)
 # class Artifact:
@@ -184,9 +197,7 @@ class Runnable:
 
         hashes = [function_hash(fn) for fn in safe_fns]
 
-        return hashlib.sha256(
-            "|".join(hashes).encode()
-        ).hexdigest()
+        return hashlib.sha256("|".join(hashes).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -197,14 +208,14 @@ class CallSpec:
 
     def render(self) -> str:
         callargs = ", ".join(repr(a) for a in self.args)
-        callargs += ", ".join(
-            f"{k}={repr(v)}" for k, v in self.kwargs.items()
-        )
+        callargs += ", ".join(f"{k}={repr(v)}" for k, v in self.kwargs.items())
         return f"{'.'.join(self.path)}({callargs})"
-    
+
+
 ###############################################################################
 # Elements
 ###############################################################################
+
 
 class ValidationPolicy(Enum):
     CHECK = "check"  # default behaviour
@@ -432,7 +443,11 @@ class Element:
         # hashes of individual keys matched but overall hash differs (ordering/encoding)
         return "Cached signature does not match (unknown diff)"
 
-    def skip(self, cached_signature: str | None = None, cached_sig_data: dict[str, Any] | None = None) -> tuple[bool, str]:
+    def skip(
+        self,
+        cached_signature: str | None = None,
+        cached_sig_data: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
         # TODO turn this into Validation Policy
         if self.validation_policy == ValidationPolicy.FORCE_RUN:
             return False, "Validation policy forces run"
@@ -487,6 +502,14 @@ class Element:
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Element) and self.key == other.key
+
+    @property
+    def file(self) -> Path:
+        if "parquet" in self.artifacts:
+            return self.artifacts["parquet"]
+        elif "tsv" in self.artifacts:
+            return self.artifacts["tsv"]
+        return self.output_files[0] if self.output_files else None
 
 
 class MappedElement(Element):
@@ -647,7 +670,7 @@ class FilesElement(Element):
         pres: tuple[Element, ...] | None = None,
     ):
 
-        if is_prefix:
+        if is_prefix and isinstance(path, (str, Path)):
             paths = {}
             p = Path(path)
             file_dir = p.parent
@@ -675,10 +698,8 @@ class FilesElement(Element):
             ext=ext,
         ).merge(tag)
 
-        runner = runner or self.exist        
-        key = (
-            f"{tag.default_name}::{'::'.join(str(p) for p in artifacts.values())}"
-        )
+        runner = runner or self.exist
+        key = f"{tag.default_name}::{'::'.join(str(p) for p in artifacts.values())}"
         super().__init__(
             key=key,
             run=runner,
@@ -723,14 +744,14 @@ class FilesElement(Element):
 
     def exist(self):
         return Runnable(
-            paths_exists(
-                *self.artifacts.values()
-            ),
-            display=CallSpec(path=("io", "paths_exists"),args=tuple(self.artifacts.values())).render(),
+            paths_exists(*self.artifacts.values()),
+            display=CallSpec(
+                path=("io", "paths_exists"), args=tuple(self.artifacts.values())
+            ).render(),
         )  # no-op runner, validation is done by skip logic
 
-class FileElement(FilesElement):
 
+class FileElement(FilesElement):
 
     def __init__(
         self,
@@ -748,6 +769,7 @@ class FileElement(FilesElement):
     def file(self) -> Path:
         return self.artifacts[self.ext]
 
+
 class Sample(FilesElement):
 
     def __init__(
@@ -758,11 +780,10 @@ class Sample(FilesElement):
         tag: PartialElementTag | ElementTag | None = None,
         is_prefix: bool = False,
         pres: tuple[Element, ...] | None = None,
-
     ):
         super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
 
-    
+
 class NextGenSampleElement(Sample):
 
     def __init__(
@@ -782,7 +803,7 @@ class NextGenSampleElement(Sample):
             root = root or Path(path).stem
         else:
             first = next(iter(path.values()))
-            root = root or Path(first).stem       
+            root = root or Path(first).stem
         tag = ElementTag(
             root=root,
             level=0,
@@ -831,6 +852,7 @@ def sample_fastqs(
 @element
 def register(element: Element):
     return element
+
 
 class TableElement(Element):
     """An Element that produces a TSV (for humans) and a Parquet file (for the pipeline).
@@ -939,7 +961,9 @@ class TableElement(Element):
         elif run is None:
             # tsv or parquet must be supplied explicitly
             if parquet is None and tsv is None:
-                raise ValueError("Provide at least one of tsv= or parquet= when run=None.")
+                raise ValueError(
+                    "Provide at least one of tsv= or parquet= when run=None."
+                )
             paths_to_check = [p for p in (tsv, parquet) if p is not None]
             actual_run = paths_exists(*paths_to_check)
             actual_run.threads = 1
@@ -955,7 +979,7 @@ class TableElement(Element):
             raise ValueError("At least one of tsv= or parquet= must be provided.")
 
         # sentinel so we can tell callers "no TSV / no parquet"
-        self._tsv     = Path(tsv)     if tsv     is not None else None
+        self._tsv = Path(tsv) if tsv is not None else None
         self._parquet = Path(parquet) if parquet is not None else None
         self.index_column = index
         self.column_roles: dict[str, str] = dict(column_roles or {})
@@ -1012,7 +1036,7 @@ class TableElement(Element):
     @property
     def file(self) -> Path:
         return self.parquet if self._parquet is not None else self.tsv
-    
+
     # ------------------------------------------------------------------
     # column_roles helpers
     # ------------------------------------------------------------------
@@ -1115,11 +1139,7 @@ class TableElement(Element):
         >>> vst_element = TableElement(..., column_roles=derived_roles)
         """
         keep = frozenset(roles) if roles is not None else self.ANNOTATION_ROLES
-        return {
-            col: role
-            for col, role in self.column_roles.items()
-            if role in keep
-        }
+        return {col: role for col, role in self.column_roles.items() if role in keep}
 
     # ------------------------------------------------------------------
     # Convenience: expression-matrix view
@@ -1155,7 +1175,7 @@ class TableElement(Element):
         if self._parquet is not None and self._parquet.exists():
             df = pd.read_parquet(self._parquet)
         elif self._tsv is not None and self._tsv.exists():
-            df = pd.read_csv(self._tsv, sep="\t") # , index_col=self.index_column)
+            df = pd.read_csv(self._tsv, sep="\t")  # , index_col=self.index_column)
         else:
             raise FileNotFoundError(
                 f"Neither Parquet nor TSV output found for {self.name!r}.\n"
@@ -1325,8 +1345,12 @@ class AdataElement(Element):
             )
         return ad.read_h5ad(self._h5ad)
 
-
-    def view(self, layer: str | None = None, obs_roles: dict[str, list[str]] = None, var_roles: dict[str, list[str]] = None) -> DataFrame:
+    def view(
+        self,
+        layer: str | None = None,
+        obs_roles: dict[str, list[str]] = None,
+        var_roles: dict[str, list[str]] = None,
+    ) -> DataFrame:
         """Return a DataFrame of a given layer filtered by obs columns and/or var columns.
 
         Parameters
@@ -1358,7 +1382,6 @@ class AdataElement(Element):
                 obs_mask &= self.adata.obs[col].isin(wanted)
         df_view = self.adata[layer][obs_mask, var_mask]
         return df_view
-        
 
     # # ------------------------------------------------------------------
     # # obs helpers
@@ -1532,7 +1555,7 @@ class AdataElement(Element):
 def generate_element_key_name(
     tag: ElementTag,
     tool_name: str,
-    tool_version: str | None,
+    tool_version: str | None = None,
     subcommand: str | None = None,
     suffix: str | None = None,
     **params_str: Any,

@@ -59,6 +59,8 @@ class Params:
         except KeyError:
             raise AttributeError(f"Params has no attribute '{key}'")
 
+    def update(self, other: "Params | None") -> "Params":
+        return self.override(**other.to_dict()) if other else self
 
 ###############################################################################
 # Rendering

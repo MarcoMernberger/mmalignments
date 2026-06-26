@@ -21,6 +21,8 @@ from .tags import (  # noqa: F401
     Stage,
     State,
 )
+from .tables.frames import Tables  # noqa: F401
+from .interactive.apps import Interactive  # noqa: F401
 from .parameters import Params  # noqa: F401
 from .externals import ExternalRunConfig  # noqa: F401
 from .resources import ResourceConfig  # type: ignore[import]
@@ -55,6 +57,7 @@ __all__ = [
     "State",
     "Sample",
     "Samtools",
+    "Tables",
 ]
 # from .qc_metrics import (
 #     AlignmentMetrics,

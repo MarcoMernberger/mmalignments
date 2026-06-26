@@ -2,8 +2,11 @@
 
 import gzip
 import json
+import pandas as pd
 from pathlib import Path
 from typing import IO, Any, Callable
+from pandas import DataFrame
+from typing import Literal, Mapping
 
 
 def ensure(*files: Path | str) -> bool:
@@ -176,3 +179,140 @@ def write_fasta(path: Path, sequences: dict[str, str]) -> None:
     with open(path, "w") as f:
         for name, seq in sequences.items():
             f.write(f">{name}\n{seq}\n")
+
+
+def write_frames(
+    df: DataFrame,
+    path: Path,
+    mode: str = "both",
+    **kwargs,
+) -> None:
+    """
+    Write a DataFrame to a file.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The DataFrame to write.
+    path : Path
+        The path to the file to write.
+    mode : Literal["tsv", "parquet", "both"], optional
+        The mode to write the file, by default "both".
+
+    Raises
+    ------
+    ValueError
+        If the file format is unsupported.
+    """
+    write_frame(df, path, **kwargs)
+    if mode == "both":
+        if path.suffix == ".tsv":
+            write_frames(df, path.with_suffix(".parquet"), mode="parquet", **kwargs)
+        elif path.suffix == ".parquet":
+            write_frames(df, path.with_suffix(".tsv"), mode="tsv", **kwargs)
+
+
+def write_frame(df: DataFrame, path: Path, **kwargs) -> None:
+    """
+    Write a DataFrame to a file.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The DataFrame to write.
+    path : Path
+        The path to the file to write.
+
+    Raises
+    ------
+    ValueError
+        If the file format is unsupported.
+    """
+    print(path)
+    ext = path.suffix.lower()
+    parents(path)
+    params = {"sep": "\t", "index": False}
+    params.update(kwargs)
+    if ext in (".tsv", ".csv", ".txt"):
+        df.to_csv(path, **params)
+    elif ext == ".parquet":
+        params.pop("sep", None)
+        df.to_parquet(path, **params)
+    elif ext in (".xlsx", ".xls"):
+        params.pop("sep", None)
+        df.to_excel(path, **params)
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+
+
+def read_frame(path: Path, **kwargs) -> DataFrame:
+    """
+    Read a DataFrame from a file.
+
+    Parameters
+    ----------
+    path : Path
+        The path to the file to read.
+
+    Returns
+    -------
+    DataFrame
+        The DataFrame read from the file.
+
+    Raises
+    ------
+    ValueError
+        If the file format is unsupported.
+    """
+    if path.suffix in (".tsv", ".txt"):
+        return pd.read_csv(path, sep="\t", **kwargs)
+    elif path.suffix == ".parquet":
+        return pd.read_parquet(path, **kwargs)
+    elif path.suffix in (".csv",):
+        return pd.read_csv(path, **kwargs)
+    elif path.suffix in (".xlsx", ".xls"):
+        return pd.read_excel(path, **kwargs)
+    else:
+        raise ValueError(f"Unsupported file format: {path.suffix}")
+
+
+def concat_files(output_file: Path, *input_files: Path) -> None:
+    """
+    Concatenate multiple input files into a single output file.
+
+    Parameters
+    ----------
+    output_file : Path
+        The path to the output file.
+    input_files : Path
+        One or more paths to the input files to concatenate.
+    """
+    with open(output_file, "w") as out_f:
+        for input_file in input_files:
+            with open(input_file, "r") as in_f:
+                for line in in_f:
+                    out_f.write(line)
+
+
+def get_paths_from_prefix_path(path: str | Path) -> Mapping[str, Path]:
+    """
+    Get all paths in the same directory as the given path that start with the same prefix.
+
+    Parameters
+    ----------
+    path : str | Path
+        The path to use as the prefix.
+
+    Returns
+    -------
+    Mapping[str, Path]
+        A mapping of file stem to absolute Path for all matching files.
+    """
+    paths = {}
+    p = Path(path)
+    file_dir = p.parent
+    prefix = p.stem
+    for p in file_dir.iterdir():
+        if p.stem.startswith(prefix):
+            paths[p.stem] = p.absolute()
+    return paths

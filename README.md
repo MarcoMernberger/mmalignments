@@ -17,3 +17,12 @@ A package for Exome mutation analysis.
 poetry install
 poetry run pre-commit install
 poetry run pytest
+
+
+
+
+# TODO: Add output file check
+# Clean Elements
+# finish frames
+# finish interactive
+# todo artifact_keys
