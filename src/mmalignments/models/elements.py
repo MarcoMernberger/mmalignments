@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from sys import path
 import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -20,6 +21,11 @@ from typing import (
     cast,
     overload,
     Literal,
+    ParamSpec,
+    TypeAlias,
+    TypeVar,
+    cast,
+    overload,
 )
 from pandas import DataFrame
 from dataclasses import dataclass, field
@@ -240,6 +246,13 @@ class CallSpec:
         callargs += ", ".join(f"{k}={repr(v)}" for k, v in self.kwargs.items())
         return f"{'.'.join(self.path)}({callargs})"
 
+
+########################################################################################
+# Aliases
+########################################################################################
+
+RunType: TypeAlias = Callable[[], CompletedProcess | None | bool | Any] | Runnable
+FilesSourceType: TypeAlias = Path | str | Mapping[str, Path | str] | RunType
 
 ###############################################################################
 # Elements
@@ -538,7 +551,7 @@ class Element:
             return self.artifacts["parquet"]
         elif "tsv" in self.artifacts:
             return self.artifacts["tsv"]
-        return self.output_files[0] if self.output_files else None
+        return next(iter(self.output_files), None) if self.output_files else None
 
 
 class MappedElement(Element):
@@ -689,20 +702,14 @@ class FilesElement(Element):
 
     def __init__(
         self,
-        source: FilesSourceType,
+        path: str | Path | Mapping[str, Path | str],
         *,
-        artifacts: Mapping[str, Path | str] | None = None,
+        runner: Runnable | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
-        is_prefix: bool = False,
-        check_md5: bool = False,
-        empty_ok: bool = False,
-        pres: tuple[Element, ...] | None = None,
         ext: str | None = None,
-        key: str | None = None,
-        name: str | None = None,
-        determinants: tuple[str, ...] | None = None,
-        inputs: tuple[Path, ...] | None = None,
+        is_prefix: bool = False,
+        pres: tuple[Element, ...] | None = None,
     ):
 
         if is_prefix and isinstance(path, (str, Path)):
@@ -724,13 +731,13 @@ class FilesElement(Element):
         root = root or first.stem
         ext = ext or first.suffix.lstrip(".")
         tag = ElementTag(
-            root=root or first_file.stem,
+            root=root,
             level=0,
             omics=None,
             stage=Stage.INPUT,
             method=Method.CHECK,
             state=State.RAW,
-            ext=self.ext,
+            ext=ext,
         ).merge(tag)
 
         runner = runner or self.exist
@@ -739,128 +746,15 @@ class FilesElement(Element):
             key=key,
             run=runner,
             tag=tag,
-            determinants=determinants,
-            inputs=inp,
-            validator=self.validate if check_md5 else None,
-            artifacts=norm_artifacts,
+            validator=self.validate,
+            inputs=tuple(artifacts.values()),
+            artifacts=artifacts,
             pres=pres,
-            empty_ok=empty_ok,
-            name=tag.default_name,
         )
         self.ext = tag.ext
 
-    def __normalize_artifacts(
-        self,
-        source: FilesSourceType,
-        artifacts: Mapping[str, Any] | None,
-        is_prefix: bool,
-    ) -> tuple[Mapping[str, Path], tuple[Path], tuple[Path]]:
-        """
-        Normalize the artifacts mapping based on the type of source. If the source is a
-        callable or Runnable, the artifacts must be provided explicitly, as the callable
-        cannot infer them and we need deterministic outputs. If the source is a string
-        or Path, it can be treated as a single file or a prefix depending on the
-        is_prefix flag. If the source is already a mapping, it will be normalized to
-        ensure all values are absolute Paths.
-
-        Also, depending on wether source is a Callable that creates the files or paths
-        to existing files, the outputs and inputs are set accordingly for better registry
-        tracking and validation.
-
-        Parameters
-        ----------
-        source : FilesSourceType
-            The source from which to derive the artifacts. Can be a Path, str, Mapping,
-            Runnable, or Callable, that creates the artifacts.
-        artifacts : Mapping[str, Any] | None
-            The artifacts mapping, if provided explicitly.
-        is_prefix : bool
-            Whether the source should be treated as a prefix.
-        Returns
-        -------
-        Mapping[str, Any]
-            A normalized mapping of artifact names to their corresponding Paths or
-            values.
-        """
-
-        def __normalized_from_mapping(mapping: Mapping[str, Any]) -> Mapping[str, Path]:
-            norm = {}
-            for k, v in mapping.items():
-                if isinstance(v, Path):
-                    norm[k] = v.absolute()
-                elif isinstance(v, str):
-                    norm[k] = Path(v).absolute()
-                else:
-                    raise TypeError(
-                        f"Unsupported artifact type for key '{k}': {type(v)}"
-                    )
-            return norm
-
-        if isinstance(source, (Callable, Runnable)):
-            if artifacts is None:
-                raise ValueError(
-                    "When source is a callable or Runnable, artifacts must be provided."
-                )
-            normalized = __normalized_from_mapping(artifacts)
-            outputs = tuple(normalized.values())
-            inputs = None
-        elif isinstance(source, (str, Path)):
-            if is_prefix:
-                normalized = get_paths_from_prefix_path(source)
-            else:
-                normalized = {Path(source).suffix.lstrip("."): Path(source).absolute()}
-            outputs = None
-            inputs = tuple(normalized.values())
-        elif isinstance(source, Mapping):
-            normalized = __normalized_from_mapping(source)
-            outputs = None
-            inputs = tuple(normalized.values())
-        else:
-            raise TypeError(f"Unsupported source type: {type(source)}")
-
-        return normalized, outputs, inputs
-
-    def __normalize_source(self, source: FilesSourceType) -> RunType:
-        """
-        Normalize the source to a runnable type.
-
-        If the source is already a Runnable or Callable, it is returned as is.
-        If the source is a string or Path, it is treated as a file or prefix and the
-        existence of the corresponding paths is checked.
-        If the source is a mapping, it is normalized to ensure all values are absolute
-        Paths and the existence of those paths is checked.
-        If the source type is unsupported, a TypeError is raised.
-
-        Parameters
-        ----------
-        source : FilesSourceType
-            The source to normalize, which can be a Path, str, Mapping, Runnable, or
-            Callable.
-
-        Returns
-        -------
-        RunType
-            The normalized runnable type of this element..
-
-        Raises
-        ------
-        TypeError
-            If the source type is unsupported.
-        """
-        if isinstance(source, Runnable):
-            return source
-        if isinstance(source, (str, Path)):
-            return self.exist()
-        elif isinstance(source, Mapping):
-            return self.exist()
-        elif callable(source):
-            return source
-        else:
-            raise TypeError(f"Unsupported source type: {type(source)}")
-
     @cached_property
     def files(self) -> tuple[Path, ...]:
-        """Convenience property to access all Path artifacts directly as a tuple."""
         return tuple(
             sorted([v for v in self.artifacts.values() if isinstance(v, Path)], key=str)
         )
@@ -871,10 +765,10 @@ class FilesElement(Element):
         overrides the Element output_files, the artifacts are not the output
         but the input files, so we return an empty tuple to avoid confusion
         """
-        return self._outputs
+        return None
 
     def validate(self) -> tuple[bool, str]:
-        return True, "bypassed validation"  # too expensive to sdo this vor every file
+        return True, "bypassed validation"
         md5sum = self.calc_md5sum()
         check = md5sum == self.md5sum
         return check, f"MD5 check {'passed' if check else 'failed'}"
@@ -891,9 +785,6 @@ class FilesElement(Element):
         return md5
 
     def exist(self):
-        def __check():
-            return (paths_exists(*self.artifacts.values())(),)
-
         return Runnable(
             paths_exists(*self.artifacts.values()),
             display=CallSpec(
@@ -906,29 +797,15 @@ class FileElement(FilesElement):
 
     def __init__(
         self,
-        source: Path | str | RunType | None = None,
+        filepath: Path | str,
         *,
-        artifact: Path | str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
-        pres: tuple[Element, ...] | None = None,
-        check_md5: bool = False,
-        empty_ok: bool = True,
     ):
-        artifacts = None
-        if artifact:
-            artifact = Path(artifact)
-            artifacts = {artifact.suffix.lstrip("."): artifact}
-        super().__init__(
-            source,
-            artifacts=artifacts,
-            tag=tag,
-            root=root,
-            is_prefix=False,
-            check_md5=check_md5,
-            empty_ok=empty_ok,
-            pres=pres,
-        )
+        path = Path(filepath).absolute()
+        self.ext = path.suffix.lstrip(".")
+        by_suffix = {self.ext: path}
+        super().__init__(by_suffix, root=root, tag=tag)
 
     @property
     def file(self) -> Path:
@@ -939,39 +816,30 @@ class Sample(FilesElement):
 
     def __init__(
         self,
-        source: FilesSourceType,
+        path: Path | str | Mapping[str, Path | str],
         *,
-        artifacts: Mapping[str, Path | str] | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         is_prefix: bool = False,
-        check_md5: bool = False,
-        empty_ok: bool = False,
         pres: tuple[Element, ...] | None = None,
     ):
+        super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
 
 
 class NextGenSampleElement(Sample):
 
     def __init__(
         self,
-        source: FilesSourceType,
+        path: Path | str | Mapping[str, Path | str],
         *,
-        artifacts: Mapping[str, Path | str] | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         read_group: str | None = None,
         reverse_reads: bool = False,
         cache_dir: Path | None = None,
         result_dir: Path | None = None,
         is_prefix: bool = False,
-        check_md5: bool = False,
-        empty_ok: bool = False,
         pres: tuple[Element, ...] | None = None,
-        key: str | None = None,
-        name: str | None = None,
-        determinants: tuple[str, ...] | None = None,
-        inputs: tuple[Path, ...] | None = None,
     ):
         if isinstance(path, (str, Path)):
             root = root or Path(path).stem
@@ -979,32 +847,18 @@ class NextGenSampleElement(Sample):
             first = next(iter(path.values()))
             root = root or Path(first).stem
         tag = ElementTag(
-            root=root or "replaced_by_sample_name",
+            root=root,
             level=0,
             omics=Omics.DNA,
             stage=Stage.INPUT,
             method=Method.CHECK,
             state=State.RAW,
         ).merge(tag)
-        super().__init__(
-            source,
-            artifacts=artifacts,
-            tag=tag,
-            root=root,
-            is_prefix=is_prefix,
-            pres=pres,
-            check_md5=check_md5,
-            empty_ok=empty_ok,
-            key=key,
-            name=name,
-            determinants=determinants,
-            inputs=inputs,
-        )
-
+        super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
         self.reverse_reads = reverse_reads
         self.read_group = read_group
-        self.cache_dir = cache_dir or Path("cache/samples") / self.tag.root
-        self.result_dir = result_dir or Path("results") / "samples" / self.tag.root
+        self.cache_dir = cache_dir or Path("cache") / "samples" / self.name
+        self.result_dir = result_dir or Path("results") / "samples" / self.name
         self.pairing: Pairing = (
             Pairing.PAIRED if len(self.artifacts) > 1 else Pairing.SINGLE
         )
@@ -1013,31 +867,6 @@ class NextGenSampleElement(Sample):
     @property
     def input_files(self) -> list[Path]:
         return sorted(self.artifacts.values(), key=str)
-
-
-def samples_from_df(
-    path: Path | str, samples_df: DataFrame
-) -> dict[str, NextGenSampleElement]:
-    sammples_dict = {}
-    for _, row in samples_df.iterrows():
-        sample_name = str(row["name"])
-        prefix = row.get("prefix", sample_name)
-        file_prefix = path / prefix
-        sample_element = NextGenSampleElement(
-            source=file_prefix,
-            root=sample_name,
-            tag=ElementTag(
-                root=sample_name,
-                level=0,
-                omics=Omics.DNA,
-                stage=Stage.INPUT,
-                method=Method.CHECK,
-                state=State.RAW,
-            ),
-            is_prefix=True,
-        )
-        sammples_dict[sample_name] = register(sample_element)
-    return sammples_dict
 
 
 def sample_fastqs(
@@ -1137,25 +966,20 @@ class TableElement(Element):
 
     def __init__(
         self,
-        source: Element | Runnable | Callable[[], DataFrame] | Path | str,
-        morphs: (
-            tuple[Callable[[DataFrame], DataFrame], ...]
-            | Callable[[DataFrame], DataFrame]
-            | None
-        ) = None,
+        key: str,
+        run: Runnable | Callable[[], CompletedProcess] | Path | str | None = None,
         *,
         tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
         root: str | None = None,
-        mode: Literal["tsv", "parquet", "both"] = "both",
+        tsv: Path | None = None,
+        parquet: Path | None = None,
         column_roles: Mapping[str, str] | None = None,
         determinants: tuple | None = None,
         inputs: tuple[Path, ...] | None = None,
         pres: tuple[Element, ...] | None = None,
-        # artifacts: Mapping[str, Any] | None = None,
+        artifacts: Mapping[str, Any] | None = None,
+        name: str | None = None,
         index: str | None = None,
-        # name: str | None = None,
     ) -> None:
         # --- resolve file-based construction ---
         if isinstance(run, (Path, str)):
@@ -1190,64 +1014,8 @@ class TableElement(Element):
             default_root = paths_to_check[0].stem
 
         else:
-            self._morphs = ()
-        state = State.PROCESSED if self._morphs else State.RAW
-        if isinstance(source, Element):
-            # run is actually a FileElement, extract paths and runner
-            source_file = source.file
-            tag = from_prior(
-                source.tag,
-                tag,
-                stage=Stage.INPUT,
-                method=Method.TABLE,
-                state=state,
-                ext=ext,
-            )
-            pres = (source,)
-            inputs = (source_file,)
-        elif isinstance(source, (Path, str)):
-            # run is actually a file path
-            source_file = Path(source).absolute()
-            root = root or source_file.stem
-            tag = ElementTag(
-                root=root,
-                level=0,
-                omics=Omics.DNA,
-                stage=Stage.INPUT,
-                method=Method.TABLE,
-                state=state,
-                ext=ext,
-            ).merge(tag)
-            inputs = (source_file,)
-        else:
-            state = State.GENERATED
-            tag = ElementTag(
-                root=root or (tag.root if (tag and tag.root) else "generated_table"),
-                level=0,
-                omics=Omics.DNA,
-                stage=Stage.INPUT,
-                method=Method.TABLE,
-                state=state,
-                ext=ext,
-            ).merge(tag)
-        if source_file and not self._morphs:
-            output_file = source_file
-        else:
-            output_dir = Path(outdir or "cache")
-            out_filename = filename or tag.default_output
-            output_file = output_dir / out_filename
-            artifacts = {ext: output_file}
-        self._tsv = None
-        self._parquet = None
-        if mode == "tsv":
-            self._tsv = output_file
-        elif mode == "parquet":
-            self._parquet = output_file
-        else:  # mode == "both":
-            self._tsv = output_file
-            output_parquet = output_file.with_suffix(".parquet")
-            artifacts["parquet"] = output_parquet
-            self._parquet = output_parquet
+            actual_run = run
+            default_root = root or (name or key)
 
         if tsv is None and parquet is None:
             raise ValueError("At least one of tsv= or parquet= must be provided.")
@@ -1257,209 +1025,33 @@ class TableElement(Element):
         self._parquet = Path(parquet) if parquet is not None else None
         self.index_column = index
         self.column_roles: dict[str, str] = dict(column_roles or {})
-        source_fnc = source if callable(source) else None
-        runner = self._get_runnable(source_file, source_fnc)
-        key, name = generate_element_key_name(tag, "TableElement", None)
+
+        artifacts: dict[str, Any] = artifacts or {}
+        if self._tsv:
+            artifacts["tsv"] = self._tsv
+        if self._parquet:
+            artifacts["parquet"] = self._parquet
+        root = root or default_root
+        tag = ElementTag(
+            root=root,
+            level=0,
+            omics=None,
+            stage=Stage.INPUT,
+            method=Method.CHECK,
+            state=State.RAW,
+            ext=".tsv",
+        ).merge(tag)
+
         super().__init__(
             key=key,
-            run=runner,
+            run=actual_run,
             tag=tag,
+            determinants=determinants,
             inputs=inputs,
             artifacts=artifacts,
-            determinants=determinants,
             pres=pres,
             name=name,
         )
-
-    def _get_runnable(
-        self,
-        source_file: Path | None,
-        source: Runnable | Callable[[], DataFrame] | None,
-    ) -> Runnable:
-
-        def read_and_morph():
-            if source_file:
-                df = read_frame(source_file)
-            elif source:
-                df = source()  # Runnable/callable, must have a DF return value
-            else:
-                raise ValueError("Either source_file or source must be provided")
-            if self._morphs:
-                for morph in self._morphs:
-                    df = morph(df)
-            for path in self.output_files:
-                write_frame(df, path)
-
-        if not self._morphs and source_file:
-            spec = CallSpec(path=("io", "check_exists"), args=(source_file,)).render()
-            runner = Runnable(
-                paths_exists_raise(source_file),
-                display=spec,
-            )
-        else:
-            spec = CallSpec(("_get_runnable", "read_and_morph")).render()
-            runner = Runnable(read_and_morph, display=spec)
-        return runner
-
-    def filter(
-        self,
-        fnc: Callable[[DataFrame], DataFrame] | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
-        **kwargs,
-    ) -> TableSeed:
-        ptag = PartialElementTag(state=State.FILTER)
-        tag = tag.merge(ptag) if tag else ptag
-        seed = TableSeed(source=self, morphs=())
-        return seed.filter(fnc, tag=tag, **kwargs)
-
-    def add(
-        self,
-        fnc: Callable[[], dict[str, Series]],
-        tag: PartialElementTag | ElementTag | None = None,
-    ) -> TableSeed:
-        ptag = PartialElementTag(state=State.FILTER)
-        tag = tag.merge(ptag) if tag else ptag
-        seed = TableSeed(source=self, morphs=())
-        return seed.add(fnc, tag=tag)
-
-    # def filter_table(
-    #     self,
-    #     outfile_tsv: Path,
-    #     filter_spec: FilterSpec | None = None,
-    # ) -> Runnable:
-    #     """Apply a filter function to the full DataFrame and return the result.
-
-    #     This is a convenience wrapper around :attr:`df` for quick ad-hoc
-    #     filtering without having to load the full table into memory first.
-
-    #     Parameters
-    #     ----------
-    #     filter_func : Callable[[DataFrame], DataFrame]
-    #         Function that takes a DataFrame and returns a filtered DataFrame.
-
-    #     Returns
-    #     -------
-    #     DataFrame
-    #         Filtered DataFrame.
-    #     """
-
-    #     def __filter():
-    #         if filter_spec is None:
-    #             return self.df
-    #         mask = filter_spec.mask(self.df)
-    #         df_out = self.df[mask]
-    #         write_frame(df_out, outfile_tsv, mode="both")
-
-    #     callspec = CallSpec(
-    #         ("filter_table",),
-    #         kwargs={"filter_spec": filter_spec},
-    #     ).render()
-    #     return Runnable(__filter, display=callspec)
-
-    # def filter(
-    #     self,
-    #     fnc: Callable[[DataFrame], DataFrame] | None = None,
-    #     **kwargs,
-    # ) -> TableView:
-
-    #     def __filter(data: DataFrame) -> DataFrame:
-    #         filter_spec = parse_filter_specs(fnc, **kwargs)
-    #         if filter_spec is None:
-    #             return data
-    #         mask = filter_spec.mask(data)
-    #         return data[mask]
-
-    #     return TableView(
-    #         source=self,
-    #         morphs=(__filter,),
-    #     )
-
-    #         run = (self.filter_table(filter_spec),)
-
-    #     key, name = generate_element_key_name(tag, "custom", None)
-    #     determinants = (filter_spec.fingerprint(),) if filter_spec else None
-    #     infile = self.tsv or self.parquet
-    #     inputs = tuple(p for p in (self._tsv, self._parquet) if p is not None)
-    #     tsv = (
-    #         (infile.parent / tag.default_name).with_suffix(".tsv")
-    #         if self._tsv
-    #         else None
-    #     )
-    #     parquet = (
-    #         (infile.parent / tag.default_name).with_suffix(".parquet")
-    #         if self._parquet
-    #         else None
-    #     )
-    #     artifacts = {
-    #         "tsv": tsv,
-    #         "parquet": parquet,
-    #     }
-    #     element = TableElement(
-    #         key=key,
-    #         tag=tag,
-    #         tsv=tsv,
-    #         parquet=parquet,
-    #         column_roles=self.column_roles,
-    #         determinants=determinants,
-    #         inputs=inputs,
-    #         pres=(self,),
-    #         artifacts=artifacts,
-    #         name=name,
-    #     )
-    #     return element
-
-    # @element
-    # def modify(
-    #     self,
-    #     fnc: Callable[[DataFrame], DataFrame],
-    #     **kwargs,
-    # ) -> TableElement:
-
-    #     tag = from_prior(
-    #         self.tag,
-    #         state=State.ANNOTATE,
-    #         method=Method.CUSTOM,
-    #         ext="tsv",
-    #     )
-    #     key, name = generate_element_key_name(tag, "custom", None)
-
-    #     def __run():
-    #         df_out = fnc(self.df)
-    #         infile = self.tsv or self.parquet
-    #         write_frame(df_out, infile, mode="both")
-
-    #     run = Runnable(__run, display=CallSpec(f"modify({fnc.__name__})").render())
-    #     determinants = (function_hash(fnc),)
-    #     infile = self.tsv or self.parquet
-    #     inputs = tuple(p for p in (self._tsv, self._parquet) if p is not None)
-    #     tsv = (
-    #         (infile.parent / tag.default_name).with_suffix(".tsv")
-    #         if self._tsv
-    #         else None
-    #     )
-    #     parquet = (
-    #         (infile.parent / tag.default_name).with_suffix(".parquet")
-    #         if self._parquet
-    #         else None
-    #     )
-    #     artifacts = {
-    #         "tsv": tsv,
-    #         "parquet": parquet,
-    #     }
-    #     element = TableElement(
-    #         key=key,
-    #         run=run,
-    #         tag=tag,
-    #         tsv=tsv,
-    #         parquet=parquet,
-    #         column_roles=self.column_roles,
-    #         determinants=determinants,
-    #         inputs=inputs,
-    #         pres=(self,),
-    #         artifacts=artifacts,
-    #         name=name,
-    #     )
-    #     return element
 
     @property
     def tsv(self) -> Path:
@@ -1503,7 +1095,7 @@ class TableElement(Element):
     # Views
     # ------------------------------------------------------------------
 
-    def view(self, role: str) -> DataFrame:
+    def view(self, role: str) -> pd.DataFrame:
         """Return a :class:`~pandas.DataFrame` with only the columns that
         have the given *role*.
 
@@ -1516,7 +1108,7 @@ class TableElement(Element):
 
         Returns
         -------
-        DataFrame
+        pd.DataFrame
             Subset of :attr:`df` with only the matching columns.
 
         Raises
@@ -1536,7 +1128,7 @@ class TableElement(Element):
         self,
         *roles: str,
         extra_columns: Iterable[str] | None = None,
-    ) -> DataFrame:
+    ) -> pd.DataFrame:
         """Return a DataFrame with columns matching any of the given *roles*.
 
         Parameters
@@ -1548,7 +1140,7 @@ class TableElement(Element):
 
         Returns
         -------
-        DataFrame
+        pd.DataFrame
             Combined subset; column order follows the original table.
         """
         wanted: set[str] = set()
@@ -1636,64 +1228,6 @@ class TableElement(Element):
             df["index"] = df[self.index_column].copy()
             df.set_index("index", inplace=True)
         return df
-
-
-@dataclass
-class TableSeed:
-    source: TableElement
-    morphs: tuple[Callable[[DataFrame], DataFrame], ...]
-    tag: PartialElementTag | ElementTag | None = None
-
-    def filter(
-        self,
-        fnc: Callable[[DataFrame], DataFrame] | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
-        **kwargs,
-    ) -> TableSeed:
-
-        def __filter(data: DataFrame) -> DataFrame:
-            filter_spec = parse_filter_specs(fnc, **kwargs)
-            if filter_spec is None:
-                return data
-            mask = filter_spec.mask(data)
-            return data[mask]
-
-        return TableSeed(
-            source=self.source,
-            morphs=(__filter,),
-            tag=self.source.tag.merge(tag),
-        )
-
-    def add(
-        self,
-        fnc: Callable[[], dict[str, Series]],
-        tag: PartialElementTag | ElementTag | None = None,
-    ) -> TableSeed:
-
-        def __add_columns(data: DataFrame) -> DataFrame:
-            new_columns = fnc()
-            for col, series in new_columns.items():
-                data[col] = series
-            return data
-
-        return TableSeed(
-            source=self.source,
-            morphs=(__add_columns,),
-            tag=self.source.tag.merge(tag),
-        )
-
-    def materialize(self) -> TableElement:
-        return TableElement(
-            source=self.source,
-            morphs=self.morphs,
-            tag=from_prior(
-                self.source.tag,
-                self.tag,
-            ),
-        )
-
-    def __call__(self) -> TableElement:
-        return self.materialize()
 
 
 class AdataElement(Element):
@@ -1861,24 +1395,32 @@ class AdataElement(Element):
     ) -> DataFrame:
         """Return a DataFrame of a given layer filtered by obs columns and/or var columns.
 
-        Parameters
-        ----------
-        layer : str | None
-            The layer to filter for, e.g. ``"raw"``, ``"cpm"``, ``"vst"``.
-        obs_roles : dict[str, list[str]] | None
-            Dictionary mapping obs roles to lists of column names.
-        var_roles : dict[str, list[str]] | None
-            Dictionary mapping var roles to lists of column names.
+            Parameters
+            ----------
+            layer : str | None
+                The layer to filter for, e.g. ``"raw"``, ``"cpm"``, ``"vst"``.
+            obs_roles : dict[str, list[str]] | None
+                Dictionary mapping obs roles to lists of column names.
+            var_roles : dict[str, list[str]] | None
+                Dictionary mapping var roles to lists of column names.
 
-        Returns
-        -------
-        DataFrame
-            A DataFrame containing the filtered data based on the specified layer and roles.
+            Returns
+            -------
+            DataFrame
+                A DataFrame containing the filtered data based on the specified layer and roles.
 
-        Raises
-        ------
-        KeyError
-            If no ``obs`` or ``var`` columns are registered.
+            Raises
+            ------
+        # --- Result ---
+        if not diffs:
+            result = True
+            msg = f"[✓] No differences in sig_data for {key!r}"
+        else:
+            result = False
+            msg = f"[✗] Sig_data differs for {key!r}:"
+            for diff in diffs:
+            KeyError
+                If no ``obs`` or ``var`` columns are registered.
         """
         var_mask = Series(True, index=self.adata.var_names)
         if var_roles:

@@ -9,7 +9,6 @@ from .elements import (
     FileElement,
     FilesElement,
     NextGenSampleElement,
-    samples_from_df,
 )
 from .executor import Executor  # noqa: F401
 from .externals import ExternalRunConfig  # noqa: F401

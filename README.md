@@ -26,3 +26,6 @@ poetry run pytest
 # finish frames
 # finish interactive
 # todo artifact_keys
+# FileElements are Source Nodes
+# TableElements are just Elements
+# Samples are Elements but can be created by an Source, but they are not subclasses of file elements

@@ -39,6 +39,7 @@ class State(str, Enum):
     HARMONIZED = "harmonized"
     INDEX = "index"
     PADDED = "padded"
+    ANNOTATE = "annotate"
     MERGED = "merged"
     PILE = "pile"
     STAT = "stat"
@@ -58,6 +59,7 @@ class State(str, Enum):
     TRANSLATE = "translate"
     ANNOTATED = "annotated"
     TRANSFORMED = "transformed"
+
     PROCESSED = "processed"
     GENERATED = "generated"
 
@@ -320,3 +322,33 @@ def from_prior(
         patched = patched.merge(tag)
 
     return patched.resolve()
+
+
+# @deprecated(reason="Use from_prior(input_element.tag, **tag) instead")
+# def merge_tag(base: ElementTag, override: PartialElementTag | None) -> ElementTag:
+#     """
+#     Return a new ElementTag using *base* as default,
+#     overriding with any non-None field from *override*.
+
+#     This lets callers specify only the fields that differ from the computed
+#     default.
+
+
+#     Parameters
+#     ----------
+#     base : ElementTag | PartialElementTag
+#         The base ElementTag or PartialElementTag to use as default.
+#     patch : PartialElementTag | None
+#         A PartialElementTag containing fields to override in the base.
+
+#     Returns
+#     -------
+#     ElementTag
+#         A fully initialized ElementTag instance.
+
+#     Examples
+#     --------
+
+#         ensemblmap(element, tag=PartialElementTag(root="sample"))
+#     """
+#     return PartialElementTag(**base).merge(override).resolve()
