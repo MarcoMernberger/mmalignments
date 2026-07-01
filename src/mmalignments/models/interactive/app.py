@@ -17,7 +17,8 @@ from param import Parameterized
 from typing import Mapping
 
 from .spec import PlotConfig, PlotLayer
-from .plots import PLOT_REGISTRY, TitleState, ExportState
+from .plots import PLOT_REGISTRY, TitleState, ExportState, resolve_coordinates
+from ...services.genomic import export_sgrna_bed_and_bigwig, export_sgrna_bed
 # fmt: off
 from .orchestration import (
     build_combined_state_cls, 
@@ -157,6 +158,12 @@ class InteractiveApp(Parameterized):
     def _action_export_tables(self):
         self._export_tables()
 
+    def _action_export_bed(self):
+        self._export_genomic_tracks(export_bigwig=False)
+
+    def _action_export_bigwig(self):
+        self._export_genomic_tracks(export_bigwig=True)
+
     def _action_export_app(self) -> None:
         """
         Generate a self-contained standalone_app.py (+ requirements.txt) that
@@ -204,6 +211,119 @@ class InteractiveApp(Parameterized):
         for suffix, df in self._last_result.data.items():
             df.to_csv(path / f"{filename}.{suffix}.tsv", index=False, sep="\t")
         print(f"Saved tables to {path}")
+
+    def _get_genetrack_layer(self) -> PlotLayer | None:
+        selected_alias = (
+            getattr(self.state, self.select_param, None) if self.select_param else None
+        )
+        if selected_alias is not None:
+            selected = next(
+                (
+                    layer
+                    for layer in self.config.layers
+                    if layer.alias == selected_alias and layer.plot_type == "genetracks"
+                ),
+                None,
+            )
+            if selected is not None:
+                return selected
+        return next(
+            (layer for layer in self.config.layers if layer.plot_type == "genetracks"),
+            None,
+        )
+
+    def _export_genomic_tracks(self, export_bigwig: bool) -> None:
+        if self._last_result is None:
+            return
+
+        layer = self._get_genetrack_layer()
+        if layer is None:
+            print("No genetracks layer configured. Nothing to export.")
+            return
+
+        df = self._last_result[layer.source].copy()
+        roles = layer.roles
+        chrom_col = roles.get("chrom", "Chromosome")
+        start_col = roles.get("start", "Start")
+        stop_col = roles.get("stop", "Stop")
+        name_col = roles.get("feature", "Feature")
+        strand_col = roles.get("dir", "Direction")
+        track_col = roles.get("track", "Type")
+
+        required = [start_col, stop_col, name_col, strand_col]
+        missing = [col for col in required if col not in df.columns]
+        if missing:
+            print(f"Missing columns for genomic export: {missing}")
+            return
+
+        coord_param = f"{layer.alias}_track_coordinates"
+        coord_str = getattr(self.state, coord_param, "")
+        window = resolve_coordinates(
+            coord_str,
+            df,
+            start_col=start_col,
+            end_col=stop_col,
+            feature_col=name_col,
+            type_col=track_col,
+        )
+        if window is not None:
+            xmin, xmax = sorted(window)
+            df = df[(df[start_col] <= xmax) & (df[stop_col] >= xmin)]
+
+        metric_col = getattr(self.state, f"{layer.alias}_track_metric", "")
+        df = df[~df[metric_col].isna()]
+        if df.empty:
+            print("No features found in current coordinate window. Nothing exported.")
+            return
+
+        for chrom_col in ["Chromosome", "chrom", "chr", "seqname", "seqid"]:
+            if chrom_col in df.columns and df[chrom_col].notna().any():
+                chrom = str(df[chrom_col].dropna().iloc[0])
+                break
+
+        folder = Path(getattr(self.state, "export_folder", "results"))
+        filename = getattr(self.state, "export_filename", "figure")
+
+        score_cols = []
+        for col in df.columns:
+            print(col)
+        if export_bigwig:
+            print("metric_col", metric_col)
+            if metric_col in df.columns:
+                score_cols = [metric_col]
+            else:
+                print(
+                    "No valid metric column selected for BigWig export. "
+                    "Exporting BED only."
+                )
+        # export_sgrna_bed(
+        #     df,
+        #     output_path=folder / f"{filename}.combined.bed",
+        #     chrom_col=chrom_col,
+        #     start_col=start_col,
+        #     stop_col=stop_col,
+        #     name_col=name_col,
+        #     score_cols=score_cols,
+        #     strand_col=strand_col,
+        # )
+
+        bed_path, bw_paths = export_sgrna_bed_and_bigwig(
+            df=df,
+            chrom_col=chrom_col,
+            start_col=start_col,
+            stop_col=stop_col,
+            name_col=name_col,
+            strand_col=strand_col,
+            score_cols=score_cols,
+            folder=folder,
+            out_prefix=filename,
+        )
+
+        if bw_paths:
+            print(f"Saved BED to {bed_path}")
+            print(f"Saved BigWig files: {bw_paths}")
+        else:
+            print(f"Saved BED to {bed_path}")
 
     # ── layout ───────────────────────────────────────────────────────────────
 

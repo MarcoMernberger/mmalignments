@@ -22,9 +22,11 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import Mapping, Sequence, Callable, Iterable
-from pandas import DataFrame, Series
+from typing import Callable, Iterable, Mapping, Sequence
+
+from pandas import DataFrame
 from statsmodels.stats.multitest import multipletests
+
 from mmalignments.models.elements import Element, TableElement, element
 from mmalignments.models.parameters import (
     ParamRegistry,
@@ -584,7 +586,7 @@ class Mageck(External):
             "tsv": sgrna_summary,
             "gene": gene_summary,
             "sgrna": sgrna_summary,
-            "output_prefix": prefix_path,
+            "output_prefix": str(prefix_path),
         }
         if (params or Params()).get("normcounts_to_file"):
             artifacts["normalized"] = prefix_path.with_suffix(".normalized.txt")
