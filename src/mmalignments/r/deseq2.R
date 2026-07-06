@@ -124,46 +124,75 @@ deseq2_unpaired <- function(
     model_conditions,
     column_map = list()
 ) {
+    cat("=== counts_df ===\n")
+    print(head(counts_df))
+    cat("\nDimensions:", nrow(counts_df), "genes x", ncol(counts_df), "samples\n")
+    cat("Columns:\n")
+    print(colnames(counts_df))
+    cat("First gene IDs:\n")
+    print(head(rownames(counts_df)))
+
     # build sample metadata
     all_samples <- c()
     all_labels  <- c()
+
     for (cond in names(model_conditions)) {
-        cols        <- as.character(unlist(model_conditions[[cond]]))
+        cols <- as.character(unlist(model_conditions[[cond]]))
         all_samples <- c(all_samples, cols)
         all_labels  <- c(all_labels, rep(cond, length(cols)))
     }
 
-    extra_levels <- setdiff(names(model_conditions),
-                            c(condition_a, condition_b))
+    cat("\n=== model_conditions ===\n")
+    print(model_conditions)
+
+    cat("\n=== all_samples ===\n")
+    print(all_samples)
+
+    cat("\n=== missing samples ===\n")
+    print(setdiff(all_samples, colnames(counts_df)))
+
+    extra_levels <- setdiff(
+        names(model_conditions),
+        c(condition_a, condition_b)
+    )
+
     col_data <- data.frame(
-        condition = factor(all_labels,
-                           levels = c(condition_a, condition_b, extra_levels)),
+        condition = factor(
+            all_labels,
+            levels = c(condition_a, condition_b, extra_levels)
+        ),
         row.names = all_samples
     )
 
-    count_mat         <- round(as.matrix(counts_df[, all_samples, drop = FALSE]))
-    rownames(count_mat) <- rownames(counts_df)
+    count_mat <- round(as.matrix(counts_df[, all_samples, drop = FALSE]))
 
     dds <- DESeqDataSetFromMatrix(
         countData = count_mat,
         colData   = col_data,
         design    = ~condition
     )
+
     dds <- DESeq(dds)
-
-    res    <- results(dds, contrast = c("condition", condition_a, condition_b))
+    res <- results(dds, contrast = c("condition", condition_a, condition_b))
     df_res <- as.data.frame(res)
-    df_res <- df_res[rownames(counts_df), ]   # restore original row order
+    df_res <- df_res[rownames(counts_df), ]
 
-    # rename columns
     for (r_col in names(column_map)) {
         pipeline_col <- as.character(column_map[[r_col]])
         if (r_col %in% colnames(df_res)) {
             colnames(df_res)[colnames(df_res) == r_col] <- pipeline_col
         }
     }
-
-    return(df_res)
+    sf <- sizeFactors(dds)
+    result_bundle <- list(
+        results = as.data.frame(res),
+        size_factors = as.data.frame(
+            sample = names(sizeFactors(dds)),
+            size_factor = as.numeric(sizeFactors(dds))
+        )
+    )
+    # df_res
+    return(result_bundle)
 }
 
 # ---------------------------------------------------------------------------

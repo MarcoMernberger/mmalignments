@@ -14,16 +14,17 @@ duplicated in every plot class's render().
 
 from __future__ import annotations
 
+import bisect
+import heapq
+from typing import Any
+
+import numpy as np
 import pandas as pd
 import param
 import plotly.colors
 import plotly.express as px
 import plotly.graph_objects as go
-import bisect
-import heapq
-import numpy as np
-from pandas import DataFrame, Series, Index
-from typing import Any
+from pandas import DataFrame, Series
 
 from .spec import (
     BasePlot,
@@ -161,7 +162,7 @@ class RatePlot(BasePlot):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RatePlot (scatter-style) — layout state + plot class
+# GenePlot (very situational) — layout state + plot class
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -650,6 +651,612 @@ class HorizontalBarPlot(BasePlot):
         new_fig.update_traces(opacity=state.opacity)
         new_fig = processor.apply(new_fig, state, self.trace_capabilities)
         return _merge(fig, new_fig)
+
+
+################################################################################
+# Volcano
+################################################################################
+
+
+class VolcanoPlotState(PlotState):
+    """Layout knobs for VolcanoPlot. NOT data roles — those are in PlotLayer."""
+
+    sidebar_group = "Layer"
+
+    marker_size = param.Integer(default=8, bounds=(1, 50), label="Marker Size")
+    marker_linewidth = param.Number(
+        default=1.0, bounds=(0.0, 10.0), label="Marker Edge Width"
+    )
+    marker_edgecolor = param.Color(default="#000000", label="Marker Edge Color")
+    marker_opacity = param.Number(default=1.0, bounds=(0.0, 1.0), label="Opacity")
+    threshold_linewidth = param.Number(
+        default=1.0, bounds=(0.0, 10.0), label="Threshold Line Width"
+    )
+    threshold_line = param.Selector(
+        default="dash",
+        objects=["solid", "dot", "dash", "longdash", "dashdot", "longdashdot"],
+        label="Threshold Line Style",
+    )
+    pvalue_threshold = param.Number(
+        default=0.05, bounds=(0.0, 1.0), label="P-value Threshold"
+    )
+
+    show_threshold_lines = param.Boolean(default=True, label="Show Threshold Lines")
+    highlight_significant = param.Boolean(
+        default=True, label="Highlight Significant Points"
+    )
+
+    positive_color = param.Color(default="#d62728", label="Upregulated Color")
+    negative_color = param.Color(default="#1f77b4", label="Downregulated Color")
+    neutral_color = param.Color(default="#7f7f7f", label="Neutral Color")
+
+    section = None
+
+
+class VolcanoPlot(BasePlot):
+
+    ROLE_SPECS = {
+        "x": RoleSpec(name="x", dtype="continuous", description="Log2 fold change"),
+        "y": RoleSpec(name="y", dtype="continuous", description="-log10 p-value"),
+        "color": RoleSpec(
+            name="color",
+            dtype="categorical",
+            required=False,
+            description="Optional grouping variable",
+        ),
+    }
+
+    state_cls = VolcanoPlotState
+
+    trace_capabilities = {
+        "marker.size",
+        "marker.line.width",
+        "marker.line.color",
+        "marker.opacity",
+        "marker.color",
+    }
+
+    def render(
+        self,
+        df: pd.DataFrame,
+        layer: PlotLayer,
+        state: VolcanoPlotState,
+        processor: TraceProcessor,
+        fig=None,
+    ) -> go.Figure:
+        roles = layer.roles
+        kwargs = {}
+
+        # color scheme
+        if "color" in roles:
+            kwargs["color"] = roles["color"]
+            color_map = layer.color_maps.get("color")
+            if color_map:
+                kwargs["color_discrete_map"] = color_map
+
+        # add hover
+        if layer.hover:
+            kwargs["hover_data"] = layer.hover
+
+        # scatter
+        new_fig = px.scatter(df, x=roles["x"], y=roles["y"], **kwargs)
+
+        # threshold lines
+        if state.show_threshold_lines:
+            new_fig.add_shape(
+                type="line",
+                x0=-getattr(state, f"{layer.alias}_log_fc_threshold"),
+                x1=-getattr(state, f"{layer.alias}_log_fc_threshold"),
+                y0=0,
+                y1=df[roles["y"]].max(),
+                line={"dash": state.threshold_line, "width": state.threshold_linewidth},
+            )
+            new_fig.add_shape(
+                type="line",
+                x0=getattr(state, f"{layer.alias}_log_fc_threshold"),
+                x1=getattr(state, f"{layer.alias}_log_fc_threshold"),
+                y1=df[roles["y"]].max(),
+                y0=0,
+                line={"dash": state.threshold_line, "width": state.threshold_linewidth},
+            )
+
+            new_fig.add_shape(
+                type="line",
+                x0=df[roles["x"]].min(),
+                x1=df[roles["x"]].max(),
+                y0=-np.log10(getattr(state, f"{layer.alias}_pvalue_threshold")),
+                y1=-np.log10(getattr(state, f"{layer.alias}_pvalue_threshold")),
+                line={"dash": state.threshold_line, "width": state.threshold_linewidth},
+            )
+        # marker styling
+        new_fig.update_traces(
+            marker={
+                "size": state.marker_size,
+                "line": {
+                    "width": state.marker_linewidth,
+                    "color": state.marker_edgecolor,
+                },
+                "opacity": state.marker_opacity,
+            }
+        )
+        # processor hooks
+        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+
+        return _merge(fig, new_fig)
+
+
+################################################################################
+# Heatmap
+################################################################################
+
+
+class HeatmapPlotState(PlotState):
+    """Layout knobs for HeatmapPlot. NOT data roles — those are in PlotLayer."""
+
+    sidebar_group = "Layer"
+
+    colorscale = param.Selector(
+        default="RdBu",
+        objects=[
+            "Viridis",
+            "Plasma",
+            "Inferno",
+            "Magma",
+            "Cividis",
+            "RdBu",
+            "Blues",
+            "Reds",
+        ],
+        label="Color Scale",
+    )
+
+    zmin = param.Number(default=None, allow_None=True, label="Z Min")
+    zmax = param.Number(default=None, allow_None=True, label="Z Max")
+
+    show_values = param.Boolean(default=False, label="Show Values in Cells")
+
+    x_tickangle = param.Integer(default=0, bounds=(0, 90), label="X Tick Angle")
+
+    section = None
+
+
+class HeatmapPlot(BasePlot):
+
+    ROLE_SPECS = {
+        "x": RoleSpec(
+            name="x", dtype="categorical", description="Columns (samples/features)"
+        ),
+        "y": RoleSpec(
+            name="y", dtype="categorical", description="Rows (genes/features)"
+        ),
+        "z": RoleSpec(name="z", dtype="continuous", description="Matrix values"),
+    }
+
+    state_cls = HeatmapPlotState
+
+    trace_capabilities = {
+        "colorscale",
+        "zmin",
+        "zmax",
+        "showscale",
+    }
+
+    def render(
+        self,
+        df: pd.DataFrame,
+        layer: PlotLayer,
+        state: HeatmapPlotState,
+        processor: TraceProcessor,
+        fig=None,
+    ) -> go.Figure:
+
+        roles = layer.roles
+
+        # --- reshape to matrix form ---
+        pivot = df.pivot(
+            index=roles["y"],
+            columns=roles["x"],
+            values=roles["z"],
+        )
+
+        z = pivot.values
+        x = pivot.columns.tolist()
+        y = pivot.index.tolist()
+
+        # --- heatmap trace ---
+        new_fig = go.Figure(
+            data=go.Heatmap(
+                z=z,
+                x=x,
+                y=y,
+                colorscale=state.colorscale,
+                zmin=state.zmin,
+                zmax=state.zmax,
+                colorbar=dict(title=roles["z"]),
+            )
+        )
+
+        # --- optional annotations ---
+        if state.show_values:
+            annotations = []
+            for i, yi in enumerate(y):
+                for j, xj in enumerate(x):
+                    val = z[i][j]
+                    if pd.notnull(val):
+                        annotations.append(
+                            dict(
+                                x=xj,
+                                y=yi,
+                                text=str(round(val, 2)),
+                                showarrow=False,
+                                font=dict(color="black", size=10),
+                            )
+                        )
+
+            new_fig.update_layout(annotations=annotations)
+
+        # --- layout tweaks ---
+        new_fig.update_layout(
+            xaxis=dict(tickangle=state.x_tickangle),
+        )
+
+        # --- processor hooks ---
+        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+
+        return _merge(fig, new_fig)
+
+
+################################################################################
+# Dotplot State
+################################################################################
+
+
+class GSEADotplotState(PlotState):
+
+    sidebar_group = "Layer"
+
+    dot_size = param.Integer(default=10, bounds=(1, 50), label="Dot Size")
+    show_colorbar = param.Boolean(default=True, label="Show Colorbar")
+
+    color_scale = param.Selector(
+        default="Viridis",
+        objects=["Viridis", "Cividis", "Plasma", "Inferno", "Magma", "RdBu"],
+        label="Color Scale",
+    )
+
+    section = None
+
+
+################################################################################
+# Dotplot Plot
+################################################################################
+
+
+class GSEADotplotPlot(BasePlot):
+
+    ROLE_SPECS = {
+        "x": RoleSpec(name="x", dtype="categorical", description="Gene set or term"),
+        "y": RoleSpec(
+            name="y", dtype="categorical", description="Category (e.g. condition)"
+        ),
+        "size": RoleSpec(
+            name="size", dtype="continuous", description="Gene ratio or count"
+        ),
+        "color": RoleSpec(
+            name="color", dtype="continuous", description="Adjusted p-value or NES"
+        ),
+    }
+
+    state_cls = GSEADotplotState
+
+    trace_capabilities = {
+        "marker.size",
+        "marker.color",
+        "marker.colorscale",
+        "marker.showscale",
+    }
+
+    def render(self, df, layer, state, processor, fig=None):
+
+        roles = layer.roles
+
+        new_fig = px.scatter(
+            df,
+            x=roles["x"],
+            y=roles["y"],
+            size=roles.get("size"),
+            color=roles.get("color"),
+            color_continuous_scale=state.color_scale.lower(),
+        )
+
+        new_fig.update_traces(
+            marker=dict(
+                size=state.dot_size,
+                showscale=state.show_colorbar,
+            )
+        )
+
+        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+
+        return _merge(fig, new_fig)
+
+
+################################################################################
+# Barplot State
+################################################################################
+
+
+class GSEABarplotState(PlotState):
+
+    sidebar_group = "Layer"
+
+    orientation = param.Selector(
+        default="h",
+        objects=["h", "v"],
+        label="Orientation",
+    )
+
+    bar_color = param.Color(default="#1f77b4", label="Bar Color")
+
+    show_values = param.Boolean(default=False, label="Show Values")
+
+    section = None
+
+
+################################################################################
+# Barplot Plot
+################################################################################
+
+
+class GSEABarplotPlot(BasePlot):
+
+    ROLE_SPECS = {
+        "x": RoleSpec(name="x", dtype="categorical", description="Gene set"),
+        "y": RoleSpec(
+            name="y", dtype="continuous", description="NES or enrichment score"
+        ),
+        "color": RoleSpec(name="color", dtype="categorical", required=False),
+    }
+
+    state_cls = GSEABarplotState
+
+    trace_capabilities = {
+        "marker.color",
+        "marker.line.width",
+        "marker.line.color",
+    }
+
+    def render(self, df, layer, state, processor, fig=None):
+
+        roles = layer.roles
+
+        orientation = state.orientation
+
+        new_fig = px.bar(
+            df,
+            x=roles["x"] if orientation == "v" else roles["y"],
+            y=roles["y"] if orientation == "v" else roles["x"],
+            orientation=orientation,
+        )
+
+        new_fig.update_traces(
+            marker=dict(
+                color=state.bar_color,
+            )
+        )
+
+        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+
+        return _merge(fig, new_fig)
+
+
+################################################################################
+# GSEA Plot State
+################################################################################
+
+
+class GSEAGseaPlotState(PlotState):
+
+    sidebar_group = "Layer"
+
+    enrichment_color = param.Color(default="#d62728", label="Enrichment Color")
+
+    hit_color = param.Color(default="#000000", label="Hit Color")
+
+    line_width = param.Number(default=2.0, bounds=(0.5, 10.0), label="Line Width")
+
+    show_hits = param.Boolean(default=True, label="Show Gene Hits")
+
+    section = None
+
+
+################################################################################
+# GSEA Plot
+################################################################################
+
+
+class GSEAGseaPlot(BasePlot):
+
+    ROLE_SPECS = {
+        "rank": RoleSpec(
+            name="rank", dtype="continuous", description="Ranked gene list"
+        ),
+        "es": RoleSpec(
+            name="es", dtype="continuous", description="Enrichment score curve"
+        ),
+        "hits": RoleSpec(
+            name="hits", dtype="continuous", required=False, description="Hit positions"
+        ),
+    }
+
+    state_cls = GSEAGseaPlotState
+
+    trace_capabilities = {
+        "line.color",
+        "line.width",
+    }
+
+    def render(self, df, layer, state, processor, fig=None):
+
+        roles = layer.roles
+
+        new_fig = go.Figure()
+
+        # enrichment curve
+        new_fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df[roles["es"]],
+                mode="lines",
+                line=dict(
+                    color=state.enrichment_color,
+                    width=state.line_width,
+                ),
+                name="Enrichment Score",
+            )
+        )
+
+        # hits (rug plot style)
+        if state.show_hits and "hits" in roles:
+            hit_positions = df[roles["hits"]].dropna().values
+
+            new_fig.add_trace(
+                go.Scatter(
+                    x=hit_positions,
+                    y=np.zeros_like(hit_positions),
+                    mode="markers",
+                    marker=dict(
+                        color=state.hit_color,
+                        size=4,
+                        symbol="line-ns",
+                    ),
+                    name="Hits",
+                )
+            )
+
+        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+
+        return _merge(fig, new_fig)
+
+
+################################################################################
+# PCA Plot State
+################################################################################
+
+
+class PCAPlotState(PlotState):
+
+    sidebar_group = "Layer"
+
+    marker_size = param.Integer(default=8, bounds=(1, 50), label="Marker Size")
+    marker_opacity = param.Number(default=0.9, bounds=(0.0, 1.0), label="Opacity")
+
+    show_axes_zero = param.Boolean(default=True, label="Show Zero Axes")
+
+    color_by_explained_variance = param.Boolean(
+        default=False, label="Color by Explained Variance"
+    )
+
+    section = None
+
+
+################################################################################
+# PCA Plot
+################################################################################
+
+
+class PCAPlot(BasePlot):
+
+    ROLE_SPECS = {
+        "x": RoleSpec(name="x", dtype="continuous", description="PC1 scores"),
+        "y": RoleSpec(name="y", dtype="continuous", description="PC2 scores"),
+        "color": RoleSpec(
+            name="color",
+            dtype="categorical",
+            required=False,
+            description="Optional group label (e.g. condition, batch)",
+        ),
+        "size": RoleSpec(
+            name="size",
+            dtype="continuous",
+            required=False,
+            description="Optional magnitude (e.g. sample weight)",
+        ),
+    }
+
+    state_cls = PCAPlotState
+
+    trace_capabilities = {
+        "marker.size",
+        "marker.color",
+        "marker.opacity",
+        "marker.line.width",
+        "marker.line.color",
+    }
+
+    def render(
+        self,
+        df: pd.DataFrame,
+        layer,
+        state: PCAPlotState,
+        processor,
+        fig=None,
+    ) -> go.Figure:
+
+        roles = layer.roles
+        kwargs = {}
+
+        # grouping
+        if "color" in roles:
+            kwargs["color"] = roles["color"]
+
+        # optional size
+        if "size" in roles:
+            kwargs["size"] = roles["size"]
+
+        # base scatter
+        new_fig = px.scatter(df, x=roles["x"], y=roles["y"], **kwargs)
+
+        # styling
+        new_fig.update_traces(
+            marker=dict(
+                size=state.marker_size,
+                opacity=state.marker_opacity,
+            )
+        )
+
+        # zero axes (classic PCA crosshair)
+        if state.show_axes_zero:
+            x_min, x_max = df[roles["x"]].min(), df[roles["x"]].max()
+            y_min, y_max = df[roles["y"]].min(), df[roles["y"]].max()
+
+            new_fig.add_shape(
+                type="line",
+                x0=0,
+                x1=0,
+                y0=y_min,
+                y1=y_max,
+                line=dict(width=1, dash="dot"),
+            )
+
+            new_fig.add_shape(
+                type="line",
+                x0=x_min,
+                x1=x_max,
+                y0=0,
+                y1=0,
+                line=dict(width=1, dash="dot"),
+            )
+
+        # processor hook (your global styling system)
+        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+
+        return _merge(fig, new_fig)
+
+
+################################################################################
+# convenience
+################################################################################
 
 
 def _merge(fig: go.Figure | None, new_fig: go.Figure) -> go.Figure:

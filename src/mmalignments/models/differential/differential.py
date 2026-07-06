@@ -59,7 +59,9 @@ class EdgeR_Unpaired(DifferentialStatistics):
         comparison_name: Optional[str] = None,
         **parameters,
     ):
-        library_sizes: Optional[Iterable] = parameters.get("library_sizes", None)
+        library_sizes: Optional[Iterable] = parameters.get(
+            "library_sizes", None
+        )  # noqa: E501
         manual_dispersion_value = parameters.get("manual_dispersion_value", 0.4)
         super().__init__(
             "EdgeR_Unpaired",
@@ -108,7 +110,9 @@ class EdgeR_Unpaired(DifferentialStatistics):
             samples = pd.DataFrame({"lib.size": input_df.sum(axis=0)})
         # this looks like it inverts the columns, but it doesnt'
         samples.insert(
-            0, "group", ["z"] * len(self.columns_a) + ["x"] * len(self.columns_b)
+            0,
+            "group",
+            ["z"] * len(self.columns_a) + ["x"] * len(self.columns_b),  # noqa: E501
         )
         samples.index = input_df.columns
         return samples
@@ -135,28 +139,38 @@ class EdgeR_Unpaired(DifferentialStatistics):
         dgelist = ro.r("DGEList")(counts=r_counts, samples=r_samples)
         # apply TMM normalization
         dgelist = ro.r("calcNormFactors")(dgelist)
-        if len(self.columns_a) == 1 and len(self.columns_b) == 1:  # pragma: no cover
+        if len(self.columns_a) == 1 and len(self.columns_b) == 1:
             # not currently used.
             dispersion = self.manual_dispersion_value
             exact_tested = ro.r("exactTest")(
                 dgelist, dispersion=math.pow(self.manual_dispersion_value, 2)
             )
-            print(
-                """
+            print("""
             you are attempting to estimate dispersions without any replicates.
-            Since this is not possible, there are several inferior workarounds to come up with something
-            still semi-useful.
-            1. pick a reasonable dispersion value from "Experience": 0.4 for humans, 0.1 for genetically identical model organisms, 0.01 for technical replicates. We'll try this for now.
-            2. estimate dispersions on a number of genes that you KNOW to be not differentially expressed.
-            3. In case of multiple factor experiments, discard the least important factors and treat the samples as replicates.
+            Since this is not possible, there are several inferior workarounds
+            to come up with something still semi-useful.
+
+            1. pick a reasonable dispersion value from "Experience": 0.4 for
+            humans, 0.1 for genetically identical model organisms, 0.01 for
+            technical replicates. We'll try this for now.
+
+            2. estimate dispersions on a number of genes that you KNOW to be
+            not differentially expressed.
+
+            3. In case of multiple factor experiments, discard the least
+            important factors and treat the samples as replicates.
+
             4. just use logFC and forget about significance.
-            """
-            )
+            """)
         else:
             dispersion = ro.r("estimateDisp")(dgelist, robust=True)
             exact_tested = ro.r("exactTest")(dispersion)
-        res = ro.r("topTags")(exact_tested, n=len(input_df), **{"sort.by": "none"})
-        return self.__post_call(convert_dataframe_from_r(res[0]), input_df.index)
+        res = ro.r("topTags")(
+            exact_tested, n=len(input_df), **{"sort.by": "none"}
+        )  # noqa: E501
+        return self.__post_call(
+            convert_dataframe_from_r(res[0]), input_df.index
+        )  # noqa: E501
 
 
 class DESeq2UnpairedAB(DifferentialStatistics):
@@ -222,7 +236,8 @@ class DESeq2UnpairedAB(DifferentialStatistics):
         df_samples = pd.DataFrame(
             {
                 "samples": list(self.columns_a) + list(self.columns_b),
-                "condition": ["z"] * len(self.columns_a) + ["x"] * len(self.columns_b),
+                "condition": ["z"] * len(self.columns_a)
+                + ["x"] * len(self.columns_b),  # noqa: E501
             }
         )
         df_samples = df_samples.set_index("samples")
@@ -248,7 +263,7 @@ class DESeq2UnpairedAB(DifferentialStatistics):
         """
         if not isinstance(df_raw_counts, DataFrame):
             raise ValueError(
-                f"Transformer calls need a DataFrame as first parameter, was {type(df_raw_counts)}."
+                f"Transformer calls need a DataFrame as first parameter, was {type(df_raw_counts)}."  # noqa: E501
             )
         ro.r("library(DESeq2)")
         df_samples = self.__prepare_sample_df()
@@ -352,7 +367,9 @@ class DESeq2Unpaired(DifferentialStatistics):
         if self.include_other_columns_for_variance:
             for condition in self.condition_to_columns:
                 if condition not in [self.condition_a, self.condition_b]:
-                    to_df["samples"] += list(self.condition_to_columns[condition])
+                    to_df["samples"] += list(
+                        self.condition_to_columns[condition]
+                    )  # noqa: E501
                     to_df["condition"] += [f"o_{condition}"] * len(
                         self.condition_to_columns[condition]
                     )
@@ -380,7 +397,7 @@ class DESeq2Unpaired(DifferentialStatistics):
         """
         if not isinstance(df_raw_counts, DataFrame):
             raise ValueError(
-                f"Transformer calls need a DataFrame as first parameter, was {type(df_raw_counts)}."
+                f"Transformer calls need a DataFrame as first parameter, was {type(df_raw_counts)}."  # noqa: E501
             )
         ro.r("library(DESeq2)")
         df_samples = self.__prepare_sample_df()
@@ -499,14 +516,16 @@ class DESeq2Timeseries(DifferentialStatistics):
         """
         if not isinstance(df_raw_counts, DataFrame):
             raise ValueError(
-                f"Transformer calls need a DataFrame as first parameter, was {type(df_raw_counts)}."
+                f"Transformer calls need a DataFrame as first parameter, was {type(df_raw_counts)}."  # noqa: E501
             )
         ro.r("library(DESeq2)")
         df_samples = self.__prepare_sample_df()
         r_counts = convert_dataframe_to_r(df_raw_counts)
         r_samples = convert_dataframe_to_r(df_samples)
         deseq_dataset = ro.r("DESeqDataSetFromMatrix")(
-            countData=r_counts, colData=r_samples, design=ro.Formula(self.formula)
+            countData=r_counts,
+            colData=r_samples,
+            design=ro.Formula(self.formula),  # noqa: E501
         )
 
         # dds <- DESeq(dds, test="LRT", reduced=~batch)
@@ -522,7 +541,8 @@ class DESeq2Timeseries(DifferentialStatistics):
         df_samples = pd.DataFrame(
             {
                 "samples": list(self.sample_columns),
-                "condition": ["z"] * len(self.columns_a) + ["x"] * len(self.columns_b),
+                "condition": ["z"] * len(self.columns_a)
+                + ["x"] * len(self.columns_b),  # noqa: E501
             }
         )
         df_samples = df_samples.set_index("samples")
@@ -571,11 +591,13 @@ class NOISeq(Differential):
         accepted = ["tmm", "rpkm", "uqua", "n"]
         if self.norm not in accepted:
             raise ValueError(
-                f"Only {accepted} are accepted as values for norm, given was {self.norm}"
+                f"Only {accepted} are accepted as values for norm, given was {self.norm}"  # noqa: E501
             )
-        self.biotypes = self.parameters.get("biotypes", ["protein_coding", "lincRNA"])
+        self.biotypes = self.parameters.get(
+            "biotypes", ["protein_coding", "lincRNA"]
+        )  # noqa: E501
         # if self.df_genes is None:
-        #    raise ValueError(f"Noiseq needs a chromosome dataframe, none was supplied in parameters. Given was {list(parameters.keys())}.")
+        #    raise ValueError(f"Noiseq needs a chromosome dataframe, none was supplied in parameters. Given was {list(parameters.keys())}.")    # noqa: E501
         if comparison_name is not None:
             self.suffix = f" ({comparison_name})"
         self._columns = [
@@ -628,7 +650,9 @@ class NOISeq(Differential):
         if self.include_other_columns_for_variance:
             for condition in self.condition_to_columns:
                 if condition not in [self.condition_a, self.condition_b]:
-                    to_df["samples"] += list(self.condition_to_columns[condition])
+                    to_df["samples"] += list(
+                        self.condition_to_columns[condition]
+                    )  # noqa: E501
                     to_df["condition"] += [f"other_{condition}"] * len(
                         self.condition_to_columns[condition]
                     )
@@ -638,7 +662,7 @@ class NOISeq(Differential):
 
     def __prepare_chromosome_df(self, df_genes) -> DataFrame:
         df_chrom = None
-        required = set(["chr", "start", "stop"])
+        required = {"chr", "start", "stop"}
         if len(required.difference(df_genes.columns)) == 0:
             df_chrom = df_genes.copy()
             df_chrom = df_genes[required]
@@ -646,7 +670,7 @@ class NOISeq(Differential):
         return df_chrom
 
     def __prepare_lengths(self, df_genes) -> DataFrame:
-        required = set(["start", "stop"])
+        required = {"start", "stop"}
         lengths = None
         if len(required.difference(df_genes.columns)) == 0:
             lengths = df_genes["stop"] - df_genes["start"]
@@ -678,12 +702,14 @@ class NOISeq(Differential):
         """
         if not isinstance(df_raw_counts, DataFrame):
             raise ValueError(
-                f"Transformer calls need a DataFrame as first parameter, was {type(df_raw_counts)}."
+                f"Transformer calls need a DataFrame as first parameter, was {type(df_raw_counts)}."  # noqa: E501
             )
         ro.r("library('NOISeq')")
-        # if "gene_stable_id" in df_raw_counts.columns:  # this is probably not needed
+        # if "gene_stable_id" in df_raw_counts.columns:  # probably not needed
         #    df_raw_counts = df_raw_counts.set_index("gene_stable_id")
-        data = convert_dataframe_to_r(df_raw_counts[self.columns_a + self.columns_b])
+        data = convert_dataframe_to_r(
+            df_raw_counts[self.columns_a + self.columns_b]
+        )  # noqa: E501
         df_samples = self.__prepare_sample_df()
         factors = convert_dataframe_to_r(df_samples)
         stable_ids = ro.vectors.StrVector(list(df_raw_counts.index.values))
@@ -714,7 +740,9 @@ class NOISeq(Differential):
             length = ro.vectors.IntVector(lengths)
             length.names = stable_ids
             optional_arguments["length"] = length
-        noisedata = ro.r("readData")(data=data, factors=factors, **optional_arguments)
+        noisedata = ro.r("readData")(
+            data=data, factors=factors, **optional_arguments
+        )  # noqa: E501
         if (
             replicates == "no"
             or replicates == "technical"
@@ -758,7 +786,12 @@ class NOISeq(Differential):
             }
         )
         result = result[
-            [self.logFC_column, self.D_column, self.prob_column, self.rank_column]
+            [
+                self.logFC_column,
+                self.D_column,
+                self.prob_column,
+                self.rank_column,
+            ]  # noqa: E501
         ]
         result = result.loc[index]
         return result

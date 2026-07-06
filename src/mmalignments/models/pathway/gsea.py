@@ -49,6 +49,7 @@ from mmalignments.models.elements import (
     Runnable,
     TableElement,
     element,
+    generate_element_key_name,
 )
 from mmalignments.models.parameters import Params
 from mmalignments.models.tags import (
@@ -76,7 +77,7 @@ class Species(str, Enum):
 ###############################################################################
 
 
-class GseaPy:
+class Gseapy:
     """Wrapper for the ``gseapy`` Python library.
 
     Each method follows the ``@element`` pattern: it returns an
@@ -146,7 +147,7 @@ class GseaPy:
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
         params: Params | None = None,
-    ) -> TableElement:
+    ) -> Element:
         """Classical GSEA with phenotype permutations.
 
         Parameters
@@ -181,7 +182,7 @@ class GseaPy:
 
         Returns
         -------
-        TableElement
+        Element
             ``tsv`` → summary results TSV; ``parquet`` → Parquet version.
         """
         pres: list[Element] = [expression]
@@ -229,11 +230,17 @@ class GseaPy:
                 seed=params.seed,
             )
 
-        source = Runnable(_run, display=f"gsea({expression.name})")
-
-        return TableElement(
-            source,
+        runner = Runnable(_run, display=f"gsea({expression.name})")
+        key, name = generate_element_key_name(tag, self.version_name)
+        artifacts = {
+            "tsv": outdir_path / f"check_real_outout",
+        }
+        return Element(
+            key=key,
+            run=runner,
             tag=tag,
+            artifacts=artifacts,
+            inputs=(expression.file,),
             determinants=determinants,
             pres=tuple(pres),
         )

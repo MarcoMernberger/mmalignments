@@ -1,15 +1,18 @@
 """A module to take care of I/O related services in mmalignments."""
 
+from __future__ import annotations
+
 import gzip
 import json
-import pandas as pd
 from pathlib import Path
-from typing import IO, Any, Callable
-from pandas import DataFrame
-from typing import IO, Any, Callable, Mapping
+from typing import IO, TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
-import pandas as pd  # type: ignore[import]
-from pandas import DataFrame  # type: ignore[import]
+import pandas as pd
+import pyarrow.parquet as pq
+from pandas import DataFrame
+
+if TYPE_CHECKING:
+    from artifacts import TableArtifact  # type: ignore[import]
 
 
 def ensure(*files: Path | str) -> bool:
@@ -208,24 +211,24 @@ def absolutize(*paths: Path | str) -> tuple[Path, ...]:
     tuple[Path, ...]
         List of absolute Path objects corresponding to the input paths.
     """
-    return tuple(Path(p).absolute() for p in paths)
+    return tuple(Path(p).resolve() for p in paths)
 
 
-def paths_exists(*paths: Path | str) -> Callable[[], bool]:
+def paths_exists(*paths: Path | TableArtifact) -> Callable[[], bool]:
     """Check if all given paths exist."""
 
     def check():
-        return all(Path(p).exists() for p in paths)
+        return all(p.resolve().exists() for p in paths)
 
     return check
 
 
-def paths_exists_raise(*paths: Path | str) -> Callable[[], None]:
+def paths_exists_raise(*paths: Path | TableArtifact) -> Callable[[], None]:
     """Check if all given paths exist."""
 
     def check():
         for p in paths:
-            if not Path(p).exists():
+            if not p.resolve().exists():
                 raise FileNotFoundError(f"Required path does not exist: {p}")
 
     return check
@@ -235,7 +238,7 @@ def exists(path: Path | str) -> Callable[[], bool]:
     """Check if a file or directory exists at the given path."""
 
     def check():
-        return Path(path).exists()
+        return Path(path).resolve().exists()
 
     return check
 
@@ -259,8 +262,7 @@ def write_fasta(path: Path, sequences: dict[str, str]) -> None:
 
 def write_frames(
     df: DataFrame,
-    path: Path,
-    mode: str = "both",
+    paths: Iterable[Path],
     **kwargs,
 ) -> None:
     """
@@ -280,12 +282,8 @@ def write_frames(
     ValueError
         If the file format is unsupported.
     """
-    write_frame(df, path, **kwargs)
-    if mode == "both":
-        if path.suffix == ".tsv":
-            write_frames(df, path.with_suffix(".parquet"), mode="parquet", **kwargs)
-        elif path.suffix == ".parquet":
-            write_frames(df, path.with_suffix(".tsv"), mode="tsv", **kwargs)
+    for path in paths:
+        write_frame(df, path, **kwargs)
 
 
 def write_frame(df: DataFrame, path: Path, **kwargs) -> None:
@@ -304,15 +302,15 @@ def write_frame(df: DataFrame, path: Path, **kwargs) -> None:
     ValueError
         If the file format is unsupported.
     """
-    print(path)
     ext = path.suffix.lower()
     parents(path)
-    params = {"sep": "\t", "index": False}
+    params = {"sep": "\t", "index": True}
     params.update(kwargs)
     if ext in (".tsv", ".csv", ".txt"):
         df.to_csv(path, **params)
     elif ext == ".parquet":
         params.pop("sep", None)
+        print(df.head())
         df.to_parquet(path, **params)
     elif ext in (".xlsx", ".xls"):
         params.pop("sep", None)
@@ -352,6 +350,37 @@ def read_frame(path: Path, **kwargs) -> DataFrame:
         raise ValueError(f"Unsupported file format: {path.suffix}")
 
 
+def read_schema(path: Path, **kwargs) -> list[str]:
+    """
+    Read a DataFrame schema from a file.
+
+    Parameters
+    ----------
+    path : Path
+        The path to the file to read.
+
+    Returns
+    -------
+    list[str]
+        The list of column names from the DataFrame.
+
+    Raises
+    ------
+    ValueError
+        If the file format is unsupported.
+    """
+    if path.suffix in (".tsv", ".txt"):
+        return pd.read_csv(path, sep="\t", nrows=0, **kwargs).columns.tolist()
+    elif path.suffix == ".parquet":
+        return pq.read_schema(path).names
+    elif path.suffix in (".csv",):
+        return pd.read_csv(path, nrows=0, **kwargs).columns.tolist()
+    elif path.suffix in (".xlsx", ".xls"):
+        return pd.read_excel(path, nrows=0, **kwargs).columns.tolist()
+    else:
+        raise ValueError(f"Unsupported file format: {path.suffix}")
+
+
 def concat_files(output_file: Path, *input_files: Path) -> None:
     """
     Concatenate multiple input files into a single output file.
@@ -372,7 +401,8 @@ def concat_files(output_file: Path, *input_files: Path) -> None:
 
 def get_paths_from_prefix_path(path: str | Path) -> Mapping[str, Path]:
     """
-    Get all paths in the same directory as the given path that start with the same prefix.
+    Get all paths in the same directory as the given path that start with the
+    same prefix.
 
     Parameters
     ----------

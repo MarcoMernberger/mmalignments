@@ -26,6 +26,7 @@ class Stage(str, Enum):
 
 
 class State(str, Enum):
+
     RAW = "raw"
     TRIM = "trim"
     SORT = "sort"
@@ -38,6 +39,7 @@ class State(str, Enum):
     MODEL = "model"
     HARMONIZED = "harmonized"
     INDEX = "index"
+    INCOMING = "incoming"
     PADDED = "padded"
     ANNOTATE = "annotate"
     MERGED = "merged"
@@ -59,7 +61,7 @@ class State(str, Enum):
     TRANSLATE = "translate"
     ANNOTATED = "annotated"
     TRANSFORMED = "transformed"
-
+    COMBINED = "combined"
     PROCESSED = "processed"
     GENERATED = "generated"
 
@@ -121,7 +123,7 @@ class ElementTag:
         missing = [f for f in self._REQUIRED if getattr(self, f) is None]
         if missing:
             raise ValueError(
-                f"ElementTag: required field(s) must not be None: {', '.join(missing)}"
+                f"ElementTag: required field(s) must not be None: {', '.join(missing)}"  # noqa: E501
             )
 
     @cached_property
@@ -147,7 +149,7 @@ class ElementTag:
 
     @cached_property
     def default_output(self) -> str:
-        return self.default_name + (f".{self.ext}" if self.ext else "")
+        return f"{self.default_name}.{self.ext}" if self.ext else self.default_name
 
     def __getitem__(self, key: str) -> Any:
         """Allows tag["state"] access to the fields."""
@@ -207,7 +209,7 @@ class PartialElementTag:
     method: Method | None = None
     state: State | None = None
     omics: Omics | None = None
-    ext: str | None = None
+    ext: str | None = None  # remove
     param: str | None = None
 
     def resolve(self) -> ElementTag:

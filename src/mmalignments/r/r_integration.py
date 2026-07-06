@@ -4,25 +4,34 @@ from __future__ import annotations
 
 import json
 import logging
-import rpy2.robjects as ro
-from pathlib import Path
-from typing import Any, Mapping, Callable
 from datetime import datetime
-from inspect import signature
 from functools import wraps
+from inspect import signature
+from pathlib import Path
+from typing import Any, Callable, Mapping, TypeAlias
 
-from mmalignments.models.externals import External, ExternalRunConfig, Runnable, subroutine, SubroutineIn
-from mmalignments.models.parameters import Params, ParamSet
-from mmalignments.services.io import parents
-from mmalignments.services.errors import (
-    PipelineError,
+import rpy2.robjects as ro  # type: ignore[import]
+from rpy2.rinterface import NULL  # type: ignore[import]
+from rpy2.robjects.vectors import FloatVector, StrVector  # type: ignore[import]
+
+from mmalignments.models.externals import (
+    External,
+    ExternalRunConfig,
+    Runnable,
+    subroutine,
 )
+from mmalignments.models.parameters import Params, ParamSet
 from mmalignments.models.resources import (
     current_resources,
 )
+from mmalignments.services.errors import (
+    PipelineError,
+)
+from mmalignments.services.io import parents
 
-from rpy2.robjects.vectors import StrVector, FloatVector
-from rpy2.rinterface import NULL
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+R_SCRIPT_DIR = PROJECT_ROOT / "r"
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +40,8 @@ def _convert_value(v: Any) -> Any:
     """Recursively convert a Python value to an rpy2-compatible R type."""
     try:
         import pandas as pd
-        from rpy2.robjects import pandas2ri
+        from rpy2.robjects import pandas2ri  # type: ignore[import]
+
         if isinstance(v, pd.DataFrame):
             with (ro.default_converter + pandas2ri.converter).context():
                 return pandas2ri.py2rpy(v)
@@ -43,7 +53,11 @@ def _convert_value(v: Any) -> Any:
         return ro.ListVector({dk: _convert_value(dv) for dk, dv in v.items()})
     if isinstance(v, list) and v and all(isinstance(i, str) for i in v):
         return StrVector(v)
-    if isinstance(v, list) and v and all(isinstance(i, (int, float)) for i in v):
+    if (
+        isinstance(v, list)
+        and v
+        and all(isinstance(i, (int, float)) for i in v)  # noqa: E501
+    ):
         return FloatVector(v)
     if isinstance(v, list) and not v:
         return StrVector([])
@@ -53,13 +67,37 @@ def _convert_value(v: Any) -> Any:
 
 
 def _r_to_pandas(r_result: Any) -> Any:
-    """Convert an R data.frame result back to a pandas DataFrame, if possible."""
+    """
+    Convert R result to pandas. Supports data.frame AND named lists of
+    data.frames.
+    """
+
     try:
         from rpy2.robjects import pandas2ri
+        from rpy2.robjects.vectors import ListVector
+
         with (ro.default_converter + pandas2ri.converter).context():
+
+            # CASE 1: named list (your new DESeq2 bundle)
+            if isinstance(r_result, ListVector):
+                return {k: pandas2ri.rpy2py(v) for k, v in r_result.items()}
+
+            # CASE 2: normal data.frame
             return pandas2ri.rpy2py(r_result)
+
     except Exception:
         return r_result
+
+
+RSubroutineIn: TypeAlias = tuple[
+    str,  # r_function
+    dict[str, Any],  # payload
+    list[Path] | None,  # inpaths
+    list[Path] | None,  # outpaths
+    Any | None,  # pipeoutput
+    Runnable | Callable | None,  # pre
+    Callable[[Any], Any] | None,  # post
+]
 
 
 class RScriptInternal(External):
@@ -83,7 +121,9 @@ class RScriptInternal(External):
         r_source_file: str | Path,
         version: str | None = None,
         source: str | None = None,
-        parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None = None,
+        parameters: (
+            Mapping[str, ParamSet] | ParamSet | str | Path | None
+        ) = None,  # noqa: E501
         loglevel: int = logging.INFO,
     ) -> None:
         self.rsource = Path(r_source_file).resolve()
@@ -112,18 +152,17 @@ class RScriptInternal(External):
         if fn is None:
             raise NameError(
                 f"R function {r_function!r} not found in {self.rsource}"
-            )
+            )  # noqa: E501
         return fn
 
     def runnable(
         self,
         *,
         r_function: str,
-        payload: dict[str, Any],
+        context: dict[str, Any] | Callable[[], dict[str, Any]],
         output: Path | None = None,
         pre: Runnable | Callable | None = None,
         post: Callable | None = None,
-        params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Runnable:
         """Build a :class:`Runnable` that calls *r_function* with *payload*.
@@ -132,9 +171,11 @@ class RScriptInternal(External):
         ----------
         r_function : str
             Name of the R function to call (must exist in *r_source_file*).
-        payload : dict[str, Any]
-            Keyword arguments already converted to R types via
-            :func:`adjust_r_types`.
+        context : dict[str, Any] | Callable[[], dict[str, Any]]
+            Either a dict of keyword arguments to pass to the R function, or a
+            zero-argument callable that returns a dict with a payload-dict and
+            an optional context-dict. The context-dict is passed to the *post*
+            callable.
         output : Path | None
             Primary output path (used by the logger).
         pre : Runnable | Callable | None
@@ -150,7 +191,6 @@ class RScriptInternal(External):
         def _runner():
             _name = f"{self.rsource.stem}.{r_function}"
             call_logger = None
-            print("calling R function", r_function)
             try:
                 now = datetime.now()
                 call_logger = self._initalize_logger(cfg, _name, now, output)
@@ -158,14 +198,19 @@ class RScriptInternal(External):
                 self._run_callback(pre, phase="PRE", call_logger=call_logger)
 
                 r_fn = self._load_r_function(r_function)
-                r_result = r_fn(**payload)
+                if callable(context):
+                    _context = context()
+                    _payload = _context["payload"]
+                    post_context = _context.get("context", None)
+                else:
+                    _payload, post_context = context, None
+                _payload = adjust_r_types(_payload)
+                r_result = r_fn(**_payload)
                 result = _r_to_pandas(r_result)
 
                 # post receives (and returns) the pandas result
-                print("post is", post)
                 if post is not None:
-                    print("Calling post")
-                    result = post(result)
+                    result = post(result, post_context)
 
                 call_logger.mark_success()
                 return result
@@ -193,7 +238,9 @@ class RScriptInternal(External):
                 if call_logger:
                     call_logger.finalize()
 
-        return Runnable(_runner, [r_function], f"R: {self.rsource.stem}::{r_function}")
+        return Runnable(
+            _runner, [r_function], f"R: {self.rsource.stem}::{r_function}"
+        )  # noqa: E501
 
 
 def adjust_r_types(payload: dict[str, Any]) -> dict[str, Any]:
@@ -204,7 +251,7 @@ def adjust_r_types(payload: dict[str, Any]) -> dict[str, Any]:
 def rsubroutine(
     fn: Callable[
         ...,
-        SubroutineIn,
+        RSubroutineIn,
     ],
 ) -> Callable[..., Callable[[], Any]]:
     """Decorator for :class:`RScriptInternal` methods.
@@ -213,9 +260,9 @@ def rsubroutine(
 
         (r_function, payload, inpaths, outpaths, pipeoutput, pre, post)
 
-    where *post* is an optional ``Callable[[DataFrame], DataFrame]`` that
-    receives the R result (already converted to pandas) and handles
-    file-writing / annotation merging.
+    where *post* is a optional ``Callable[[DataFrame, dict | None], DataFrame]``
+    that receives the R result (already converted to pandas) and an optional
+    context dictionary, and handles file-writing / annotation merging.
     """
     sig = signature(fn)
 
@@ -228,7 +275,7 @@ def rsubroutine(
         cfg = bound.arguments.get("cfg", None) or ExternalRunConfig()
         resources = current_resources()
 
-        r_function, payload, inpaths, outpaths, _, pre, post = fn(
+        r_function, context, inpaths, outpaths, _, pre, post = fn(
             *bound.args, **bound.kwargs
         )
         outpaths = [Path(p) for p in (outpaths or []) if p is not None]
@@ -236,17 +283,15 @@ def rsubroutine(
         paths = inpaths + outpaths
 
         parents(*paths)
-        payload = adjust_r_types(payload)
-
         params, cfg = self.apply_threads(
             params, cfg=cfg, resources=resources, subroutine=r_function
         )
         runner = self.runnable(
             r_function=r_function,
-            payload=payload,
+            context=context,
+            output=outpaths[0] if outpaths else None,
             pre=pre,
             post=post,
-            params=params,
             cfg=cfg,
         )
         runner.threads = cfg.threads
@@ -269,7 +314,6 @@ class RScriptExternal(External):
 
     # Path to the directory that contains the bundled R scripts (override in
     # subclass or let the default point to the package's ``r/`` folder).
-    _r_script_dir: Path | None = None
 
     def __init__(
         self,
@@ -277,9 +321,11 @@ class RScriptExternal(External):
         r_script_dir: Path | None = None,
         version: str | None = None,
         source: str | None = None,
-        parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None = None,
+        parameters: (
+            Mapping[str, ParamSet] | ParamSet | str | Path | None
+        ) = None,  # noqa: E501
     ) -> None:
-        self._r_script_dir = r_script_dir or (Path(__file__).parent / "r")
+        self.r_script_dir = r_script_dir or (Path(__file__).parent / "r")
         super().__init__(
             name=name,
             primary_binary="Rscript",
@@ -314,25 +360,30 @@ class RScriptExternal(External):
         script_name : str
             Filename, e.g. ``"deseq2_unpaired.R"``.
         """
-        path = (self._r_script_dir / script_name).resolve()
+        path = (self.r_script_dir / script_name).resolve()
         if not path.exists():
             raise FileNotFoundError(
                 f"R script not found: {path}\n"
-                f"Expected it in r_script_dir={self._r_script_dir}"
+                f"Expected it in r_script_dir={self.r_script_dir}"
             )
         return path
 
-    def write_params_json(self, params_path: Path, payload: dict[str, Any]) -> None:
+    def write_params_json(
+        self, params_path: Path, payload: dict[str, Any]
+    ) -> None:  # noqa: E501
         """Serialise *payload* to *params_path* as UTF-8 JSON.
 
-        All Path values are converted to strings so they survive JSON round-trips.
+        All Path values are converted to strings so they survive JSON
+        round-trips.
         """
         parents(params_path)
 
         def _default(obj: Any) -> Any:
             if isinstance(obj, Path):
                 return str(obj)
-            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+            raise TypeError(
+                f"Object of type {type(obj)} is not JSON serializable"
+            )  # noqa: E501
 
         params_path.write_text(
             json.dumps(payload, indent=2, default=_default), encoding="utf-8"
@@ -373,4 +424,12 @@ class RScriptExternal(External):
         arguments = [str(script_path), str(params_path)]
         # subroutine decorator expects a 7-tuple:
         # (arguments, subcommand, inpaths, outpaths, pipeoutput, pre, post)
-        return arguments, None, [params_path], list(output_files), None, None, None
+        return (
+            arguments,
+            None,
+            [params_path],
+            list(output_files),
+            None,
+            None,
+            None,
+        )  # noqa: E501

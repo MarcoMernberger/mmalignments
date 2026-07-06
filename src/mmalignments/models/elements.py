@@ -2,43 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
-from sys import path
 import traceback
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import cached_property, wraps
 from pathlib import Path
 from subprocess import CompletedProcess
-from types import MappingProxyType
 from typing import (
     Any,
     Callable,
     Iterable,
     Mapping,
     ParamSpec,
-    TypeVar,
-    cast,
-    overload,
-    Literal,
-    ParamSpec,
     TypeAlias,
     TypeVar,
     cast,
     overload,
-)
-from pandas import DataFrame
-from dataclasses import dataclass, field
-from mmalignments.services.logging import current_call_to_string
-from mmalignments.models.data import Pairing
-from mmalignments.services.io import parents, paths_exists
-from mmalignments.services.dependencies import (
-    function_hash,
-    file_sig,
-    stable_hash,
-    collect_code_dependency,
-    file_signature,
-    DynamicValue,
 )
 
 import pandas as pd
@@ -47,23 +26,14 @@ from pandas import DataFrame, Series
 
 from mmalignments.models.data import Pairing
 from mmalignments.services.dependencies import (
-    DynamicValue,
     collect_code_dependency,
     file_sig,
-    file_signature,
     function_hash,
     stable_hash,
-    try_cast,
 )
-from mmalignments.services.io import (
-    get_paths_from_prefix_path,
-    parents,
-    paths_exists,
-    paths_exists_raise,
-    read_frame,
-    write_frame,
-)
+from mmalignments.services.io import parents, paths_exists
 
+from .artifacts import Artifact, ArtifactSet, TableArtifact, TransientArtifact
 from .registry import current_element_registry
 from .tags import (
     ElementTag,
@@ -72,132 +42,7 @@ from .tags import (
     PartialElementTag,
     Stage,
     State,
-    from_prior,
 )
-
-###############################################################################
-# External Wrapper
-###############################################################################
-
-ArtifactType = Literal["file", "value"]
-ArtifactLifeTime = Literal["persistent", "transient", "ephemeral"]
-
-
-class Artifact(ABC):
-    def resolve(self) -> Any:
-        raise NotImplementedError
-
-    def signature(self) -> str:
-        raise NotImplementedError
-
-
-@dataclass(frozen=True)
-class FileArtifact(Artifact):
-    path: Path
-
-    def resolve(self) -> Path:
-        return self.path
-
-    def signature(self) -> str:
-        return file_signature(self.path)
-
-
-@dataclass(frozen=True)
-class ValueArtifact(Artifact):
-    value: Any
-
-    def resolve(self) -> Any:
-        return self.value
-
-    def signature(self) -> str:
-        return stable_hash(self.value)
-
-
-@dataclass(frozen=True)
-class DynamicArtifact(Artifact):
-    value: DynamicValue
-
-    def resolve(self) -> Any:
-        return self.value.resolve()
-
-    def signature(self) -> str:
-        return self.value.signature
-
-
-@dataclass(frozen=True)
-class TransientArtifact(Artifact):
-    value: Any
-
-    def resolve(self) -> Any:
-        return self.value
-
-    def signature(self) -> str:
-        return "transient"  # transient artifacts are not considered for signature
-
-
-# @dataclass(frozen=True)
-# class Artifact:
-#     kind: Literal["file", "value", "dynamic"]
-#     lifetime: Literal["persistent", "transient", "ephemeral"]
-#     value: str | int | float | bool | Path | None | DynamicValue
-
-#     def resolve(self) -> Any:
-#         if isinstance(self.value, DynamicValue):
-#             return self.value.resolve()
-#         return self.value
-
-#     @cached_property
-#     def signature(self) -> str:
-#         if self.kind == "dynamic":
-#             if isinstance(self.value, DynamicValue):
-#                 return self.value.signature()
-#             else:
-#                 raise TypeError(f"Expected DynamicValue for dynamic artifact, got {type(self.value)}")
-#         elif self.kind == "file":
-#             if isinstance(self.value, Path):
-#                 return file_signature(self.value)
-#             else:
-#                 return file_signature(Path(self.value))
-#         else:
-#             return stable_hash(self.value)
-
-# def stable_repr(self) -> str:  # for signature hashing
-#     if self.kind == "file":
-#         if isinstance(self.value, Path):
-#             return file_signature(self.value)
-#         else:
-#             return file_signature(Path(self.value))
-#     # elif self.kind == "dynamic":
-#     #     if isinstance(self.value, DynamicValue):
-#     #         return self.__dynamic_sig()
-#     #     else:
-#     #         raise TypeError(f"Expected DynamicValue for dynamic artifact, got {type(self.value)}")
-#     else:
-
-#         return str(self.value)
-
-# def __file_hash(self, path: Path) -> str:
-#     h = hashlib.sha256()
-#     with path.open("rb") as f:
-#         for chunk in iter(lambda: f.read(1024 * 1024), b""):
-#             h.update(chunk)
-#     return h.hexdigest()
-
-# @dataclass(frozen=True)
-# class Artifact:
-#     name: str
-#     value: Any
-#     kind: ArtifactType = "file"
-#     lifetime: ArtifactLifeTime = "persistent"
-
-#     def stable_repr(self) -> str:
-#         if self.kind == "file":
-#             return self.file_hash(Path(self.value))
-#         return self.value_repr()
-
-
-#     def value_repr(self) -> str:
-#         return str(self.value)
 
 
 class Runnable:
@@ -247,9 +92,9 @@ class CallSpec:
         return f"{'.'.join(self.path)}({callargs})"
 
 
-########################################################################################
+################################################################################
 # Aliases
-########################################################################################
+################################################################################
 
 RunType: TypeAlias = Callable[[], CompletedProcess | None | bool | Any] | Runnable
 FilesSourceType: TypeAlias = Path | str | Mapping[str, Path | str] | RunType
@@ -274,7 +119,7 @@ class Element:
         *,
         determinants: tuple[str, ...] | None = None,
         inputs: tuple[Path, ...] | None = None,
-        artifacts: Mapping[str, Any] | None = None,
+        artifacts: Mapping[str, Any] | ArtifactSet | None = None,
         validator: Callable[[], tuple[bool, str]] | None = None,
         pres: tuple["Element", ...] | None = None,
         empty_ok: bool = False,
@@ -288,7 +133,7 @@ class Element:
         )  # optional attribute for external runners
         if tag is None:
             raise ValueError("A tag must be provided, was None.")
-        self.artifacts = MappingProxyType(dict(artifacts or {}))
+        self.artifacts = ArtifactSet.from_any(artifacts)
         self.pres = tuple(pres or [])
         self.validator = validator
         self.determinants = tuple(str(det) for det in (determinants or ()))
@@ -324,6 +169,7 @@ class Element:
                     raise AssertionError(
                         f"Output file '{path}' for {self.name} does not exist or is not a valid path."  # noqa: E501
                     )
+        print(self.inputs)
         if self.inputs is not None:
             for path in self.inputs:
                 try:
@@ -348,7 +194,8 @@ class Element:
     @cached_property
     def output_files(self) -> Iterable[Path] | None:
         files = sorted(
-            [v for v in self.artifacts.values() if isinstance(v, Path)], key=str
+            [v.resolve() for v in self.artifacts.values() if hasattr(v, "resolve")],
+            key=str,
         )
         return files if files else None
 
@@ -546,7 +393,13 @@ class Element:
         return isinstance(other, Element) and self.key == other.key
 
     @property
-    def file(self) -> Path:
+    def primary(self) -> Any:
+        return self.artifacts.primary
+
+    @property
+    def file(self) -> Path | None:
+        if "primary" in self.artifacts:
+            return self.artifacts["primary"].resolve()
         if "parquet" in self.artifacts:
             return self.artifacts["parquet"]
         elif "tsv" in self.artifacts:
@@ -702,32 +555,26 @@ class FilesElement(Element):
 
     def __init__(
         self,
-        path: str | Path | Mapping[str, Path | str],
+        path: Path | str | Mapping[str, Path | TableArtifact],
         *,
-        runner: Runnable | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
+        # runner: Runnable | None = None,
         root: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
         ext: str | None = None,
         is_prefix: bool = False,
         pres: tuple[Element, ...] | None = None,
     ):
 
         if is_prefix and isinstance(path, (str, Path)):
-            paths = {}
-            p = Path(path)
-            file_dir = p.parent
-            prefix = p.stem
-            for p in file_dir.iterdir():
-                if p.stem.startswith(prefix):
-                    paths[p.stem] = p.absolute()
+            artifacts = self.artifacts_from_prefix(path)
         else:
-            paths = (
+            artifacts = (
                 path
                 if isinstance(path, Mapping)
-                else {Path(path).stem: Path(path).absolute()}
+                else {Path(path).stem: Path(path).resolve()}
             )
-        artifacts = {k: Path(v).absolute() for k, v in paths.items()}
-        first = artifacts.values().__iter__().__next__()
+        inputs = tuple(v.resolve() for v in artifacts.values() if hasattr(v, "resolve"))
+        first = artifacts.values().__iter__().__next__().resolve()
         root = root or first.stem
         ext = ext or first.suffix.lstrip(".")
         tag = ElementTag(
@@ -739,24 +586,39 @@ class FilesElement(Element):
             state=State.RAW,
             ext=ext,
         ).merge(tag)
-
-        runner = runner or self.exist
+        runner = self.exist
         key = f"{tag.default_name}::{'::'.join(str(p) for p in artifacts.values())}"
+
         super().__init__(
             key=key,
             run=runner,
             tag=tag,
             validator=self.validate,
-            inputs=tuple(artifacts.values()),
+            inputs=inputs,
             artifacts=artifacts,
             pres=pres,
         )
         self.ext = tag.ext
 
+    @classmethod
+    def artifacts_from_prefix(cls, prefix: str | Path) -> dict[str, Path]:
+        artifacts = {}
+        p = Path(prefix)
+        file_dir = p.parent
+        file_prefix = p.stem
+        for p in file_dir.iterdir():
+            if p.stem.startswith(file_prefix):
+                artifacts[p.stem] = p.resolve()
+
+        return artifacts
+
     @cached_property
     def files(self) -> tuple[Path, ...]:
         return tuple(
-            sorted([v for v in self.artifacts.values() if isinstance(v, Path)], key=str)
+            sorted(
+                [v.resolve() for v in self.artifacts.values() if hasattr(v, "resolve")],
+                key=str,
+            )
         )
 
     @cached_property
@@ -797,22 +659,36 @@ class FileElement(FilesElement):
 
     def __init__(
         self,
-        filepath: Path | str,
+        source: Path | str | TableArtifact,
         *,
         tag: PartialElementTag | ElementTag | None = None,
         root: str | None = None,
+        pres: tuple[Element, ...] | None = None,
     ):
-        path = Path(filepath).absolute()
-        self.ext = path.suffix.lstrip(".")
-        by_suffix = {self.ext: path}
-        super().__init__(by_suffix, root=root, tag=tag)
+        if isinstance(source, str):
+            source = Path(source)
+
+        self.ext = source.resolve().suffix.lstrip(".")
+        by_suffix = {self.ext: source}
+        super().__init__(by_suffix, root=root, tag=tag, pres=pres)
 
     @property
     def file(self) -> Path:
-        return self.artifacts[self.ext]
+        print("FileElement.file called, artifacts:", self.artifacts)
+        if "primary" in self.artifacts:
+            return self.artifacts["primary"].resolve()
+        else:
+            return self.artifacts[self.ext].resolve()
+
+    @classmethod
+    def resolve_path(cls, path: Path | str | TableArtifact) -> Path:
+        if isinstance(path, str):
+            path = Path(path)
+        return path.resolve()
 
 
 class Sample(FilesElement):
+    #
 
     def __init__(
         self,
@@ -896,6 +772,38 @@ def register(element: Element):
     return element
 
 
+# class TableElement(Element):
+
+#     def __init__(
+#         self,
+#         key: str,
+#         run: RunType,
+#         tag: ElementTag,
+#         *,
+#         determinants: tuple | None = None,
+#         inputs: tuple[Path, ...] | None = None,
+#         artifacts: Mapping[str, Any] | None = None,
+#         pres: tuple[Element, ...] | None = None,
+#         name: str | None = None,
+#     ):
+
+#         super().__init__(
+#             key=key,
+#             run=run,
+#             tag=tag,
+#             determinants=determinants,
+#             inputs=inputs,
+#             artifacts=artifacts,
+#             pres=pres,
+#             name=name,
+#         )
+
+#     @property
+#     def table(self) -> Path:
+#         return self.artifacts.primary
+
+
+# deprectated - this will in future be an TableArtifact
 class TableElement(Element):
     """An Element that produces a TSV (for humans) and a Parquet file (for the pipeline).
 
@@ -1009,7 +917,7 @@ class TableElement(Element):
             paths_to_check = [p for p in (tsv, parquet) if p is not None]
             actual_run = paths_exists(*paths_to_check)
             actual_run.threads = 1
-            actual_run.command = [f"check_exists(...)"]  # type: ignore[attr-defined]
+            actual_run.command = ["check_exists(...)"]  # type: ignore[attr-defined]
             inputs = inputs or tuple(paths_to_check)
             default_root = paths_to_check[0].stem
 
