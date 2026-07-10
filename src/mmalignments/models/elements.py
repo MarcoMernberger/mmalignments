@@ -169,7 +169,6 @@ class Element:
                     raise AssertionError(
                         f"Output file '{path}' for {self.name} does not exist or is not a valid path."  # noqa: E501
                     )
-        print(self.inputs)
         if self.inputs is not None:
             for path in self.inputs:
                 try:

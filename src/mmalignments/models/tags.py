@@ -28,6 +28,9 @@ class Stage(str, Enum):
 class State(str, Enum):
 
     RAW = "raw"
+    VST = "vst"
+    TMM = "tmm"
+    CPM = "cpm"
     TRIM = "trim"
     SORT = "sort"
     MAP = "map"
@@ -64,6 +67,13 @@ class State(str, Enum):
     COMBINED = "combined"
     PROCESSED = "processed"
     GENERATED = "generated"
+    LONG = "long"
+    WIDE = "wide"
+    ZSCORE = "zscore"
+    FILTERED = "filtered"
+    NORMALIZED = "normalized"
+    RESHAPED = "reshaped"
+    SELECTED = "selected"
 
 
 class Method(str, Enum):
@@ -94,6 +104,7 @@ class Method(str, Enum):
     TABLE = "table"
     NGMERGE = "ngmerge"
     TABLES = "tables"
+    SKLEARN = "sklearn"
 
 
 def level(level: int) -> str:

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable, Iterable, Literal
 
+from mmalignments.utils import as_tuple
+
 _GENE_ANNOTATIONS = {
     "gene_stable_id": "META",
     "name": "META",
@@ -31,7 +33,7 @@ class View:
     """
 
     # role: Role | None = None
-    metric: str | tuple[str, ...] | list[str] | None = None
+    metric: str | tuple[str, ...] | None = None
     sample_id: str | tuple[str, ...] | None = None
     pipeline: str | None = None  #  e.g. "STAR_UMI-tools_dedup-directional"
 
@@ -42,6 +44,8 @@ _VIEWS = {  # often used, for convenience
     "esc": View(metric=("Count", "ES")),
     "escd": View(metric=("Count", "ES", "Dedup")),
     "vst": View(metric=("VST",)),
+    "log2fc": View(metric=("Log2FC",)),
+    "zscore": View(metric=("Z",)),
 }
 
 
@@ -107,9 +111,8 @@ def _legacy_to_tag(colname: str, sample_names: list[str]) -> ColumnTag | None:
                 f"Unknown category/dedup combination: {(category, is_dedup)}"
             )
         return ColumnTag(
-            metric=role_metric,
+            metric=tuple(role_metric),
             sample_id=sample_id,
-            # role=role_metric[0],
             pipeline=None,  # pipeline
         )
 
@@ -140,28 +143,12 @@ class ColumnTag:
     based on their characteristics.
     """
 
-    metric: tuple[str, ...]
+    metric: tuple[str, ...] | str
     sample_id: str | None = None
     pipeline: str | None = None  # "STAR_UMI-tools_dedup-directional", optional
 
-    def encode(self) -> str:
-        """
-        Generate a canonical column name from the tag's attributes.
-
-        Returns
-        -------
-        str
-            The canonical column name generated from the tag's attributes.
-        """
-        column_name = f"{'.'.join(self.metric)}"
-        if self.sample_id:
-            column_name = f"{column_name} ({self.sample_id})"
-        if self.pipeline:
-            column_name = f"{column_name} [{self.pipeline}]"
-        return column_name
-
     @classmethod
-    def decode(cls, colname: str) -> ColumnTag | None:
+    def decode(cls, colname: str) -> ColumnTag:
         """
         Decode a canonical column name into a ColumnTag.
 
@@ -182,7 +169,11 @@ class ColumnTag:
         """
         m = _COL_PATTERN.match(colname.strip())
         if not m:
-            return None
+            return ColumnTag(
+                metric=(colname.strip(),),
+                sample_id=None,
+                pipeline=None,
+            )
 
         sample = m.group("sample")
         pipeline = m.group("pipeline")
@@ -195,6 +186,115 @@ class ColumnTag:
             pipeline=pipeline.strip() if pipeline else None,
         )
 
+    def encode(self) -> str:
+        """
+        Generate a canonical column name from the tag's attributes.
+
+        Returns
+        -------
+        str
+            The canonical column name generated from the tag's attributes.
+        """
+        column_name = f"{'.'.join(self.metric)}"
+        if self.sample_id:
+            column_name = f"{column_name} ({self.sample_id})"
+        if self.pipeline:
+            column_name = f"{column_name} [{self.pipeline}]"
+        return column_name
+
+    @classmethod
+    def generate_new_tag(
+        cls,
+        old_tag: ColumnTag,
+        view: View,
+        append: bool = True,
+    ) -> ColumnTag:
+        if append:
+            new_metric = (
+                as_tuple(old_tag.metric) + as_tuple(view.metric)
+                if view.metric is not None
+                else old_tag.metric
+            )
+        else:
+            new_metric = as_tuple(view.metric)
+        sample_id = (
+            view.sample_id
+            if view.sample_id is not None and isinstance(view.sample_id, str)
+            else old_tag.sample_id
+        )
+        pipeline = old_tag.pipeline if view.pipeline is None else view.pipeline
+        new_tag = ColumnTag(
+            metric=new_metric,
+            sample_id=sample_id,
+            pipeline=pipeline,
+        )
+        return new_tag
+
+    @classmethod
+    def rename_columns(
+        cls, columns: list[str], view: View, append: bool = True
+    ) -> dict[str, str]:
+        rename = {}
+        for col in columns:
+            old = cls.decode(col)
+            new_tag = cls.generate_new_tag(old, view=view, append=append)
+            rename[col] = new_tag.encode()
+        return rename
+
+    def matches_view(self, view: View) -> bool:
+        """
+        Check if a ColumnTag matches the criteria specified in a View.
+
+        Parameters
+        ----------
+        tag : ColumnTag
+            The ColumnTag to check against the View.
+        view : View
+            The View containing filtering criteria.
+
+        Returns
+        -------
+        bool
+            True if the ColumnTag matches the View's criteria, False otherwise.
+        """
+        tag = self
+        metric_match = False
+        pipeline_match = False
+        sample_match = False
+        if view.metric is None:
+            metric_match = True
+        elif isinstance(view.metric, str) and isinstance(tag.metric, tuple):
+            metric_match = tag.metric == (view.metric,)
+        else:
+            metric_match = tag.metric == view.metric
+        if view.pipeline is None:
+            pipeline_match = True
+        else:
+            pipeline_match = tag.pipeline == view.pipeline
+
+        if view.sample_id is None:
+            sample_match = True
+        elif isinstance(view.sample_id, str):
+            sample_match = tag.sample_id == view.sample_id
+        else:
+            sample_match = tag.sample_id in view.sample_id
+        print(tag.metric, view.metric)
+        print(metric_match, pipeline_match, sample_match)
+        return metric_match and pipeline_match and sample_match
+
+    @classmethod
+    def select_from_view(
+        cls, columns: list[str], view: View | None = None
+    ) -> list[str]:
+        selected = []
+        if view is None:
+            return columns
+        for col in columns:
+            tag = cls.decode(col)
+            if tag.matches_view(view):
+                selected.append(col)
+        return selected
+
 
 class ColumnSchema(Mapping[str, ColumnTag]):
     """
@@ -202,9 +302,13 @@ class ColumnSchema(Mapping[str, ColumnTag]):
     Provides methods for selecting and deselecting columns based on their tags.
     """
 
-    __slots__ = ("_tags",)
+    __slots__ = ("_tags", "_index_column")
 
-    def __init__(self, tags: Mapping[str, ColumnTag], index: str | None = None):
+    def __init__(
+        self,
+        tags: Mapping[str, ColumnTag],
+        index_column: str | None = None,
+    ):
         """
         Initialize the ColumnSchema with a mapping of columnnames to ColumnTags.
 
@@ -214,7 +318,7 @@ class ColumnSchema(Mapping[str, ColumnTag]):
             A mapping from column names to their corresponding ColumnTags.
         """
         object.__setattr__(self, "_tags", MappingProxyType(dict(tags)))
-        self.index_column = index
+        object.__setattr__(self, "_index_column", index_column)
 
     def __getitem__(self, key: str) -> ColumnTag:
         return self._tags[key]
@@ -238,10 +342,7 @@ class ColumnSchema(Mapping[str, ColumnTag]):
     def _matches(
         self,
         tag: ColumnTag,
-        *,
-        # role: Role | None,
-        metric_prefix: tuple[str, ...] | None,
-        samples: set[str] | None,
+        view: View,
     ) -> bool:
         """
         Check if a column tag matches the given filtering criteria.
@@ -254,13 +355,8 @@ class ColumnSchema(Mapping[str, ColumnTag]):
         ----------
         tag : ColumnTag
             The ColumnTag to check against the filtering criteria.
-        role : Role | None
-            The role to filter by. If None, do not filter by role.
-        metric_prefix : tuple[str, ...] | None
-            The metric prefix to filter by. If None, do not filter by metric.
-        samples : set[str] | None
-            The set of sample IDs to filter by. If None, do not filter by
-            sample ID.
+        view : View
+            The view containing filtering criteria.
 
         Returns
         -------
@@ -269,14 +365,15 @@ class ColumnSchema(Mapping[str, ColumnTag]):
         """
         # if role is not None and tag.role != role:
         #     return False
-        if (
-            metric_prefix is not None
-            and tag.metric[: len(metric_prefix)] != metric_prefix
-        ):
-            return False
-        if samples is not None and tag.sample_id not in samples:
-            return False
-        return True
+        # if (
+        #     metric_prefix is not None
+        #     and tag.metric[: len(metric_prefix)] != metric_prefix
+        # ):
+        #     return False
+        # if samples is not None and tag.sample_id not in samples:
+        #     return False
+        # return True
+        return tag.matches_view(view)
 
     def select(
         self,
@@ -297,28 +394,13 @@ class ColumnSchema(Mapping[str, ColumnTag]):
             A list of column names that match the specified filtering criteria.
         """
         if view is None:
-            print("view is None, returning all columns")
             return list(self._tags.keys())
-        metric_prefix = (
-            (view.metric,) if isinstance(view.metric, str) else view.metric
-        )  # noqa: E501
-        samples = (
-            {view.sample_id}
-            if isinstance(view.sample_id, str)
-            else (set(view.sample_id) if view.sample_id is not None else None)
-        )
-        for col, tag in self._tags.items():
-            print(
-                f"Checking column: {col}, tag: {tag}: matches",
-                self._matches(tag, metric_prefix=metric_prefix, samples=samples),
-            )
         return [
             col
             for col, tag in self._tags.items()
             if self._matches(
                 tag,
-                metric_prefix=metric_prefix,
-                samples=samples,
+                view=view,
             )
         ]
 
@@ -348,33 +430,11 @@ class ColumnSchema(Mapping[str, ColumnTag]):
         """
         if view is None:
             return []
-        metric_prefix = (
-            (view.metric,) if isinstance(view.metric, str) else view.metric
-        )  # noqa: E501
-        samples = (
-            {view.sample_id}
-            if isinstance(view.sample_id, str)
-            else (set(view.sample_id) if view.sample_id is not None else None)
-        )
         return [
             col
             for col, tag in self._tags.items()
-            if not self._matches(
-                tag,
-                metric_prefix=metric_prefix,
-                samples=samples,
-            )
+            if not self._matches(tag, view=view)  # noqa: E501
         ]
-
-    def generate_new_tag(
-        self, column_name, old_tag, add, append, new_pipeline
-    ) -> ColumnTag:
-        new_tag = ColumnTag(
-            metric=old_tag.metric + add if append else add,
-            sample_id=old_tag.sample_id,
-            pipeline=new_pipeline,
-        )
-        return new_tag
 
     def derive(
         self,
@@ -409,11 +469,9 @@ class ColumnSchema(Mapping[str, ColumnTag]):
             The derived column schema and a mapping from old column names to new
             column names.
         """
-        add = (
-            (view_new.metric,)
-            if isinstance(view_new.metric, str)
-            else tuple(view_new.metric)
-        )
+
+        def as_tuple(x: str | tuple[str, ...]) -> tuple[str, ...]:
+            return (x,) if isinstance(x, str) else x
 
         new_tags: dict[str, ColumnTag] = {}
         rename: dict[str, str] = {}
@@ -424,39 +482,51 @@ class ColumnSchema(Mapping[str, ColumnTag]):
                     f"Column {col!r} not found in schema; cannot derive from it."  # noqa: E501
                 )
 
+            new_metric = (
+                view_new.metric
+                if view_new and view_new.metric is not None
+                else old_tag.metric
+            )
+            if append and old_tag.metric is not None:
+                if isinstance(new_metric, (str, tuple)):
+                    new_metric = as_tuple(old_tag.metric) + as_tuple(new_metric)
+                else:
+                    raise TypeError(
+                        f"Expected new_metric to be str or tuple, got {type(new_metric)}"  # noqa: E501
+                    )
             new_pipeline = (
                 view_new.pipeline
                 if view_new and view_new.pipeline is not None
                 else old_tag.pipeline
             )
-            sample_id = (
-                view_new.sample_id
-                if view_new and view_new.sample_id is not None
-                else old_tag.sample_id
-            )
-            new_tag = ColumnTag(
-                metric=old_tag.metric + add if append else add,
-                sample_id=sample_id,
-                pipeline=new_pipeline,
-            )
-            new_name = new_tag.encode()
-            if new_name in new_tags:
-                raise ValueError(
-                    f"Duplicate derived column name: {new_name!r} (from {col!r})"  # noqa: E501
-                )
+            sample_ids = (
+                old_tag.sample_id if old_tag.sample_id is not None else (None,)
+            )  # noqa: E501
+            if view_new and view_new.sample_id is not None:
+                sample_ids = as_tuple(view_new.sample_id)
 
-            new_tags[new_name] = new_tag
-            rename[col] = new_name
+            for sample_id in sample_ids:
+                new_tag = ColumnTag(
+                    metric=new_metric,
+                    sample_id=sample_id,
+                    pipeline=new_pipeline,
+                )
+                new_name = new_tag.encode()
+                if new_name in new_tags:
+                    raise ValueError(
+                        f"Duplicate derived column name: {new_name!r} (from {col!r})"  # noqa: E501
+                    )
+
+                new_tags[new_name] = new_tag
+                rename[col] = new_name
 
         return ColumnSchema(new_tags), rename
 
     @staticmethod
     def derive_from_columns(
         columns: Iterable[str],
-        *,
-        view_new: View | None = None,
-        append: bool = False,
-    ) -> tuple[ColumnSchema, dict[str, str]]:
+        index_column: str | None = None,
+    ) -> ColumnSchema:
         """
         Derive new columns from existing ones by modifying their tags.
         Also returns a mapping from old column names to new column names, to
@@ -488,16 +558,15 @@ class ColumnSchema(Mapping[str, ColumnTag]):
         new_tags: dict[str, ColumnTag] = {}
 
         for col in columns:
-            print(col)
             new_tag = ColumnTag.decode(col)
-            new_name = new_tag.encode()
+            new_name = new_tag.encode() if new_tag else col
             if new_name in new_tags:
                 raise ValueError(
                     f"Duplicate derived column name: {new_name!r} (from {col!r})"  # noqa: E501
                 )
             new_tags[new_name] = new_tag
 
-        return ColumnSchema(new_tags)
+        return ColumnSchema(new_tags, index_column=index_column)
 
     @staticmethod
     def derive_from_view(view_out: View) -> ColumnSchema:
@@ -540,42 +609,6 @@ class ColumnSchema(Mapping[str, ColumnTag]):
                     )
                 new_tags[new_name] = new_tag
         return ColumnSchema(new_tags)
-
-    def apply_out_view(
-        tag: ColumnTag, view_out: View, append: bool = False
-    ) -> ColumnTag:
-        """
-        Create a new ColumnTag based on a future output view.
-
-        Parameters
-        ----------
-        tag : ColumnTag
-            The old Tag to be modified.
-        view_out : View
-            The output view containing the new metric and pipeline information.
-        append : bool, optional
-            If True, the new metric is appended to the existing metric. If
-            False, it replaces the existing metric. By default False.
-
-        Returns
-        -------
-        ColumnTag
-            A new ColumnTag instance with the updated metric and pipeline.
-        """
-        add = (
-            (view_out.metric,)
-            if isinstance(view_out.metric, str)
-            else (view_out.metric or ())
-        )
-        return ColumnTag(
-            metric=tag.metric + add,
-            sample_id=tag.sample_id,
-            pipeline=(
-                view_out.pipeline
-                if view_out.pipeline is not None
-                else tag.pipeline  # noqa: E501
-            ),
-        )
 
     def drop(self, columns: Iterable[str]) -> ColumnSchema:
         """

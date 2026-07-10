@@ -5,8 +5,8 @@ from functools import cached_property, wraps
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Protocol
 
-import pandas as pd
-from pandas import DataFrame
+import pandas as pd  # type: ignore[import]
+from pandas import DataFrame  # type: ignore[import]
 
 from mmalignments.core.annotations import _VIEWS, ColumnSchema, ColumnTag, View
 from mmalignments.models.artifacts import ArtifactSet, OutputSpec, TableArtifact
@@ -31,7 +31,12 @@ from mmalignments.services.dependencies import (
     function_hash,
     stable_hash,
 )
-from mmalignments.services.io import read_frame, read_schema, write_frames
+from mmalignments.services.io import (
+    read_frame,
+    read_schema,
+    write_frame,
+    write_frames,
+)
 
 ################################################################################
 # Table sources
@@ -74,8 +79,10 @@ class PathTableSource:
         return self.path
 
     def view(self, view: View | None = None) -> DataFrame:
-        cols = self.schema.select(view) if view else list(self.frame.columns)
-        return self.frame[cols]
+        cols = (
+            list(self.schema.select(view)) if view else list(self.frame.columns)
+        )  # noqa: E501
+        return self.frame[cols]  # type: ignore[return-value]
 
 
 ################################################################################
@@ -83,11 +90,22 @@ class PathTableSource:
 ################################################################################
 
 
+class MorphProtocol(Protocol):
+    fn: Callable
+    view_in: View | None
+    params: Mapping[str, str | float | int | bool]
+
+
 @dataclass(frozen=True)
 class Morph:
-    fn: Callable[[DataFrame, Any, ...], DataFrame]
+    fn: Callable[
+        [
+            DataFrame,
+        ],
+        DataFrame,
+    ]
     view_in: View | None = None
-    parameter: dict[str, str | float | int | bool] = field(default_factory=dict)
+    params: Mapping[str, str | float | int | bool] = field(default_factory=dict)
     # view_out: View | None = None
     # create_new: bool = False
     # add: bool = False
@@ -95,18 +113,19 @@ class Morph:
 
     @classmethod
     def from_callable(
-        cls, fn: Callable, *, view: View | None = None
+        cls,
+        fn: Callable,
+        *,
+        view: View | None = None,
+        params: dict[str, str] | None = None,
     ) -> Morph:  # noqa: E501
-        # if not hasattr(fn, "morph_role"):
-        #     raise TypeError(f"{fn.__name__} is not decorated with @morph(...)")   # noqa: E501
-        morph_view = getattr(fn, "morph_view", view)
-        return cls(fn=fn, view_in=morph_view)
+        return cls(fn=fn, view_in=view, params=params or {})
 
     def __str__(self):
-        return f"Morph(fn={self.fn.__name__}, view_in={self.view_in}, view_out={self.view_out}, create_new={self.create_new}, add={self.add}, append_metric={self.append_metric})"  # noqa: E501
+        return f"Morph(fn={self.fn.__name__}, view_in={self.view_in}, params={self.params})"  # noqa: E501
 
     def signature(self):
-        params_hash = stable_hash(self.parameter)
+        params_hash = stable_hash(self.params) + stable_hash(self.view_in)
         return function_hash(self.fn) + params_hash
 
 
@@ -114,10 +133,7 @@ def morph(
     _fn: Callable | None = None,
     *,
     view_in: View | None = None,
-    view_out: View | None = None,
-    create_new: bool = False,
-    add: bool = False,
-    append_metric: bool = True,
+    params: Mapping[str, str | float | int | bool] | None = None,
 ):
     """Decorator turning a function into a Morph."""
 
@@ -129,10 +145,7 @@ def morph(
         return Morph(
             fn=wrapped,
             view_in=view_in,
-            # view_out=view_out,
-            # create_new=create_new,
-            # add=add,
-            # append_metric=append_metric,
+            params=params or {},
         )
 
     if _fn is None:
@@ -142,23 +155,29 @@ def morph(
 
 
 @dataclass(frozen=True)
-class MultiMorph(Morph):
-    fn: Callable[[Mapping[str, DataFrame], Any, ...], DataFrame]
+class MultiMorph:
+    fn: Callable[[Mapping[str, DataFrame]], Mapping[str, DataFrame]]
     views: Mapping[str, View] | None = None
-
-    @classmethod
-    def from_callable(
-        cls, fn: Callable, *, views: Mapping[str, View] | None = None
-    ) -> MultiMorph:
-        # if not hasattr(fn, "morph_role"):
-        #     raise TypeError(f"{fn.__name__} is not decorated with @morph(...)")   # noqa: E501
-        morph_views = getattr(fn, "morph_views", views)
-        return cls(
-            fn=fn, views={"default": morph_views} if morph_views else None
-        )  # noqa: E501
+    params: Mapping[str, Mapping[str, Any]] | None = field(default_factory=dict)
 
     def __str__(self):
         return f"MultiMorph(fn={self.fn.__name__}, views={self.views})"  # noqa: E501
+
+    def signature(self):
+        view_hash = stable_hash(self.views) if self.views else ""
+        params_hash = stable_hash(self.params) if self.params else ""
+        return function_hash(self.fn) + params_hash + view_hash
+
+    @classmethod
+    def from_callable(
+        cls,
+        fn: Callable[[Mapping[str, DataFrame]], Mapping[str, DataFrame]],  # noqa: E501
+        *,
+        views: Mapping[str, View] | None = None,
+    ) -> MultiMorph:
+
+        morph_views = getattr(fn, "morph_views", views)
+        return cls(fn=fn, views=morph_views if morph_views else None)  # noqa: E501
 
 
 ################################################################################
@@ -173,9 +192,8 @@ def filter_to_threshold(
     columns: list[str] | None = None,
     view: View | None = _VIEWS["escd"],
     greater_than: bool = True,
-) -> Callable[[DataFrame], DataFrame]:
+) -> Morph:
 
-    @morph(params=[threshold, how])
     def filter_func(df: DataFrame) -> DataFrame:
         count_columns = columns if columns is not None else df.columns.to_list()
         passed = (
@@ -185,84 +203,102 @@ def filter_to_threshold(
         )
 
         if how == "any":
-            mask = passed.any(axis=1)
+            mask = passed.any(axis=1)  # type: ignore[return-value]
         elif how == "all":
-            mask = passed.all(axis=1)
+            mask = passed.all(axis=1)  # type: ignore[return-value]
         elif how == "atleast":
-            mask = passed.sum(axis=1) >= atleast
+            mask = passed.sum(axis=1) >= atleast  # type: ignore[return-value]
         else:
             raise ValueError(
                 f"Invalid 'how' parameter: {how}. Use 'any', 'all', or 'atleast'."  # noqa: E501
             )
 
-        return df[mask]
+        return df.loc[mask, :]  # type: ignore[return-value]
 
-    return filter_func
+    return Morph.from_callable(
+        filter_func,
+        params={
+            "threshold": threshold,
+            "how": how,
+            "atleast": atleast,
+            "columns": columns,
+            "view": view,
+            "greater_than": greater_than,
+        },
+    )
 
 
 def filter_abs_threshold(
-    columns: list[str] | str,
+    columns: list[str] | None = None,
     threshold: int | float = 1,
     how: Literal["any", "all", "atleast"] = "any",
     atleast: int = 3,
-    view: View | None = _VIEWS["log2fc"],
-) -> Callable[[DataFrame], DataFrame]:
+    view: View | None = View(metric="log2FC", sample_id="Miss_vs_Non"),
+) -> Morph:
 
     def filter_func(df: DataFrame) -> DataFrame:
-        selected_columns = (
-            columns if columns is not None else df.columns.to_list()
-        )  # noqa: E501
+        selected_columns = columns or df.columns.to_list()
+        if view:
+            selected_columns = ColumnTag.select_from_view(
+                selected_columns, view
+            )  # noqa: E501
+
         passed = df[selected_columns].abs().gt(threshold)
 
         if how == "any":
-            mask = passed.any(axis=1)
+            mask = passed.any(axis=1)  # type: ignore[return-value]
         elif how == "all":
-            mask = passed.all(axis=1)
+            mask = passed.all(axis=1)  # type: ignore[return-value]
         elif how == "atleast":
-            mask = passed.sum(axis=1) >= atleast
+            mask = passed.sum(axis=1) >= atleast  # type: ignore[return-value]
         else:
             raise ValueError(
                 f"Invalid 'how' parameter: {how}. Use 'any', 'all', or 'atleast'."  # noqa: E501
             )
 
-        return df[mask]
+        return df[mask]  # type: ignore[return-value]
 
-    return filter_func
+    return Morph.from_callable(
+        filter_func,
+        params={
+            "columns": columns,
+            "threshold": threshold,
+            "how": how,
+            "atleast": atleast,
+            "view": view,
+        },
+    )
 
 
 def filter_morphs(filter_specs: Mapping[str, Any]) -> list[Morph]:
     morphs: list[Morph] = []
     for key, spec in filter_specs.items():
-        morphs.append(morph(**spec))
+        morphs.append(Morph(**spec))
     return morphs
 
 
 def de_filter(
-    sample_id: list[str],
+    columns_log: tuple[str] | None = None,
+    columns_fdr: tuple[str] | None = None,
     log2_view: View | None = None,
     fdr_view: View | None = None,
     alpha: float = 0.05,
     logthreshold: float = 1,
 ) -> list[Morph]:
-    log2_view = log2_view or View(metric=("Log2FC"), samples=sample_id)
-    log_fdr_view = fdr_view or View(metric=("FDR"), samples=sample_id)
-
+    log2_view = log2_view or View(metric=("Log2FC"))
+    log_fdr_view = fdr_view or View(metric=("FDR"))
     return [
-        Morph.from_callable(
-            filter_to_threshold(
-                threshold=alpha,
-                how="any",
-                view=log_fdr_view,
-                greater_than=False,
-            )
+        filter_to_threshold(
+            threshold=alpha,
+            how="any",
+            view=log_fdr_view,
+            greater_than=False,
         ),
-        Morph.from_callable(
-            filter_abs_threshold(
-                columns="log2fc",
-                threshold=logthreshold,
-                how="any",
-                view=log2_view,
-            )
+        filter_abs_threshold(
+            columns=None,
+            threshold=logthreshold,
+            how="any",
+            view=log2_view,
         ),
     ]
 
@@ -291,68 +327,86 @@ def artifacts_for_mode(path: Path, mode: str = "both") -> dict[str, Path]:
         raise ValueError(f"Invalid mode: {mode}")
 
 
-def bundle_morphs(
-    schema: ColumnSchema, morphs: list[Morph]
-) -> tuple[ColumnSchema, list[dict[str, str]]]:
-    running_schema = schema
-    select_columns: list[list[str]] = []
-    renames: list[dict[str, str]] = []
-    drops: list[list[str]] = []
+# def bundle_morphs(
+#     schema: ColumnSchema, morphs: list[Morph]
+# ) -> tuple[ColumnSchema, list[dict[str, str]]]:
+#     running_schema = schema
+#     select_columns: list[list[str]] = []
+#     renames: list[dict[str, str]] = []
+#     drops: list[list[str]] = []
 
-    for m in morphs:
-        in_cols = (
-            running_schema.select(view=m.view_in)
-            if m.view_in
-            else list(running_schema)  # noqa: E501
-        )
-        print("Morph", m)
-        if m.view_out is None:
-            renames.append({})
-            select_columns.append(in_cols)
-            continue
-        if m.create_new:
-            # we create completely new columns based on the view alone
-            derived_schema = running_schema.derive_from_view(m.view_out)
-            renames.append({})  # no need to rename
-            drops.append([]) if m.add else drops.append(in_cols)
-        else:
-            # we modify the inputz columns create new column names
-            derived_schema, rename = running_schema.derive(
-                in_cols,
-                m.view_out,
-                m.append_metric,
-            )
-        if m.add:
-            running_schema = running_schema.merge(derived_schema)
-        else:
-            running_schema = running_schema.drop(in_cols).merge(derived_schema)
-        renames.append(rename)
-        drops.append([]) if m.add else drops.append(in_cols)
-    return running_schema, renames, drops
+#     for m in morphs:
+#         in_cols = (
+#             running_schema.select(view=m.view_in)
+#             if m.view_in
+#             else list(running_schema)  # noqa: E501
+#         )
+#         print("Morph", m)
+#         if m.view_out is None:
+#             renames.append({})
+#             select_columns.append(in_cols)
+#             continue
+#         if m.create_new:
+#             # we create completely new columns based on the view alone
+#             derived_schema = running_schema.derive_from_view(m.view_out)
+#             renames.append({})  # no need to rename
+#             drops.append([]) if m.add else drops.append(in_cols)
+#         else:
+#             # we modify the inputz columns create new column names
+#             derived_schema, rename = running_schema.derive(
+#                 in_cols,
+#                 m.view_out,
+#                 m.append_metric,
+#             )
+#         if m.add:
+#             running_schema = running_schema.merge(derived_schema)
+#         else:
+#            running_schema = running_schema.drop(in_cols).merge(derived_schema)
+#         renames.append(rename)
+#         drops.append([]) if m.add else drops.append(in_cols)
+#     return running_schema, renames, drops
 
 
 def divide(
-    numerator: str, denominator: str, *, views: Mapping[str, View]
+    numerator: str,
+    denominator: str,
+    denominator_column: str,
+    views: Mapping[str, View] | None = None,
+    *,
+    rename_fn: Callable[[list[str]], dict[str, str]] | None = None,
 ) -> MultiMorph:
 
-    @morph
-    def morph_divide(dataframes: Mapping[str, DataFrame]) -> DataFrame:
+    def morph_divide(
+        dataframes: Mapping[str, DataFrame],
+    ) -> Mapping[str, DataFrame]:  # noqa: E501
         num_df = dataframes[numerator]
         denom_df = dataframes[denominator]
-        result_df = num_df.divide(denom_df)
+
+        result_df = num_df.divide(
+            denom_df[denominator_column].reindex(num_df.columns), axis="columns"
+        )
+        if rename_fn:
+            rename = rename_fn(result_df.columns.to_list())
+            result_df = result_df.rename(columns=rename)
         rename = {}
         for col in num_df.columns:
             old = ColumnTag.decode(col)
+            new_metric = (
+                old.metric + ("Norm",)
+                if isinstance(old.metric, tuple)
+                else (old.metric, "Norm")
+            )
+
             new_tag = ColumnTag(
-                metric=old.metric + ("Norm",),
                 sample_id=old.sample_id,
                 pipeline=old.pipeline,
+                metric=new_metric,
             )
             rename[col] = new_tag.encode()
         result_df = result_df.rename(columns=rename)
-        return result_df
+        return {"primary": result_df}
 
-    return morph_divide
+    return MultiMorph.from_callable(morph_divide, views=views)
 
 
 ################################################################################
@@ -378,28 +432,28 @@ class Tables:
         """
         return Path("results/tables")
 
-    def _finalize(
-        self,
-        *,
-        source: Element,
-        tag: ElementTag,
-        artifacts: ArtifactSet,
-        run_body: Callable[[], None],
-        determinants: tuple[str, ...] | None,
-        depends_on: tuple[Callable, ...] = (),
-    ) -> Element:
-        runner = depends(*depends_on)(run_body) if depends_on else run_body
-        key, name = generate_element_key_name(tag, "Tables")
-        return Element(
-            key,
-            runner,
-            tag=tag,
-            determinants=determinants,
-            inputs=(source.primary.resolve(),),
-            artifacts=artifacts,
-            pres=(source,),
-            name=name,
-        )
+    # def _finalize(
+    #     self,
+    #     *,
+    #     source: Element,
+    #     tag: ElementTag,
+    #     artifacts: ArtifactSet,
+    #     run_body: Callable[[], None],
+    #     determinants: tuple[str, ...] | None,
+    #     depends_on: tuple[Callable, ...] = (),
+    # ) -> Element:
+    #     # runner = depends(*depends_on)(run_body) if depends_on else run_body
+    #     key, name = generate_element_key_name(tag, "Tables")
+    #     return Element(
+    #         key,
+    #         runner,
+    #         tag=tag,
+    #         determinants=determinants,
+    #         inputs=(source.primary.resolve(),),
+    #         artifacts=artifacts,
+    #         pres=(source,),
+    #         name=name,
+    #     )
 
     ############################################################################
     # Table Elements
@@ -461,27 +515,23 @@ class Tables:
         @depends(frame_callable, *(m.fn for m in morphs))
         def __run():
             df = table_source.view(view)
-            # columns = table_source.schema.select(view=view) if view else df.columns   # noqa: E501
-            # df = df[columns]  # select columns for this view, if any
             for m in morphs:
-                # for m, rename in zip(morphs, renames, drops):
-                # cols = [c for c in rename]  #
-                # result = m.fn(df[cols]).rename(columns=rename)
                 df = m.fn(df)  # .rename(columns=rename)
-                # df = pd.concat(
-                #     [df, result], axis=1
-                # )
 
-            print(df.head())
             write_frames(df, output)
 
-        return self._finalize(
-            source=source,
+        key, name = generate_element_key_name(
+            tag, "Tables", subroutine="transform"
+        )  # noqa: E501
+        return Element(
+            key,
+            __run,
             tag=tag,
-            artifacts=artifacts,
-            run_body=__run,
             determinants=(str(params),) if params else None,
-            depends_on=(frame_callable, *(m.fn for m in morphs), bundle_morphs),
+            inputs=(source.primary.resolve(),),
+            artifacts=artifacts,
+            pres=(source,),
+            name=name,
         )
 
     @element
@@ -507,12 +557,7 @@ class Tables:
         # default morph if none provided
         if not morphs:
             view = _VIEWS["escd"] if view is None else view
-
-            morphs = (
-                Morph.from_callable(
-                    filter_to_threshold(**params.to_dict()),
-                ),
-            )
+            morphs = (filter_to_threshold(**params.to_dict()),)
 
         infile = source.primary.resolve()
         artifacts, output = ArtifactSet.generate_file_artifacts(
@@ -523,28 +568,44 @@ class Tables:
             index_column=source.primary.index_column,
         )
 
-        @depends(frame_callable, *(m.fn for m in morphs), bundle_morphs)
+        # @depends(frame_callable, *(m.fn for m in morphs), bundle_morphs)
         def __run():
-            df = source.primary.view(view)
+            filter_df = source.primary.view(view)
+            df = source.primary.view()
             for morph in morphs:
-                df = morph.fn(df)
+                index = morph.fn(filter_df).index
+                df = df.loc[index, :]
             write_frames(df, output)
 
-        return self._finalize(
-            source=source,
+        # return self._finalize(
+        #     source=source,
+        #     tag=tag,
+        #     artifacts=artifacts,
+        #     run_body=__run,
+        #     determinants=(str(params),) if params else None,
+        #   depends_on=(frame_callable, *(m.fn for m in morphs), bundle_morphs),
+        # )
+        key, name = generate_element_key_name(
+            tag, "Tables", subroutine="filter"
+        )  # noqa: E501
+        return Element(
+            key,
+            __run,
             tag=tag,
-            artifacts=artifacts,
-            run_body=__run,
             determinants=(str(params),) if params else None,
-            depends_on=(frame_callable, *(m.fn for m in morphs), bundle_morphs),
+            inputs=(source.primary.resolve(),),
+            artifacts=artifacts,
+            pres=(source,),
+            name=name,
         )
 
     @element
     def combine(
         self,
-        source: Element,
-        others: Element | Iterable[Element],
+        sources: Mapping[str, Element],
         *morphs: MultiMorph,
+        artifact_keys: Mapping[str, str] | None = None,
+        first_key: str | None = None,
         root: str | None = None,
         index_column: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
@@ -562,10 +623,9 @@ class Tables:
 
         Parameters
         ----------
-        source : Element
-            The input element containing the dataframe to be transformed.
-        others : Element | Iterable[Element]
-            Other elements to be combined with the source element.
+        sources : Mapping[str, Element]
+            The input elements containing the dataframes to be transformed and
+            combined.
         morphs : MultiMorph
             Multiple morph functions that take a mapping of DataFrames and
             return a transformed mapping of DataFrames.
@@ -583,49 +643,56 @@ class Tables:
         params : Params | None, optional
             Parameters for the morph functions, by default None
         """
+        artifact_keys = artifact_keys or {}
+        first_element = (
+            sources[first_key] if first_key else next(iter(sources.values()))
+        )
         views = views or {}
         tag = from_prior(
-            source.tag,
+            first_element.tag,
             tag,
             root=root,
             state=State.COMBINED,
             method=Method.TABLES,
         )
-        sources = {
-            source.root: as_table_source(source),
-            **{
-                s.root: as_table_source(s)
-                for s in others
-                if isinstance(others, Iterable)
-            },
+        input_paths = {
+            key: s.artifacts[artifact_keys.get(key, "primary")].resolve()
+            for key, s in sources.items()
         }
-        infiles = {k: s.resolve() for k, s in sources.items()}
+        infile = first_element.primary.resolve()
         output_spec = output_spec or self.default_output_spec
-        artifacts, output = ArtifactSet.generate_file_artifacts(
+        artifacts, _ = ArtifactSet.generate_file_artifacts(
             tag=tag,
-            infile=infiles,
+            infile=infile,
             spec=output_spec,
-            # column_schema=None,  # column_schema or running_schema,
-            index_column=index_column or sources[source.root].index_column,
+            index_column=index_column or first_element.primary.index_column,
         )  # in another function
 
-        @depends(frame_callable, *(m.fn for m in morphs))
+        @depends(frame_callable)
         def __run():
-            table_sources = {
-                k: s.view(views.get(k)) for k, s in sources.items()
-            }  # noqa: E501
-            inputs = table_sources
+            inputs = {}
+            for key, source in sources.items():
+                inputs[key] = source.artifacts[
+                    artifact_keys.get(key, "primary")
+                ].view(  # noqa: E501
+                    views.get(key)
+                )
+            # apply the morphs
             for m in morphs:
                 inputs = m.fn(inputs)
 
-            for (result_key,) in inputs.items():
+            results = (
+                {artifacts.primary_name: inputs}
+                if isinstance(inputs, DataFrame)
+                else inputs
+            )
+            for result_key, df in results.items():
                 if result_key not in artifacts:
                     raise ValueError(
                         f"Result key '{result_key}' not found in artifacts."
                     )
-                output = artifacts[result_key]
-                df = inputs[result_key]
-                write_frames(df, output)
+                out = artifacts.primary.resolve()
+                write_frame(df, out)
 
         key, name = generate_element_key_name(
             tag, "Tables", subroutine="combine"
@@ -635,15 +702,244 @@ class Tables:
             __run,
             tag=tag,
             determinants=tuple(m.signature() for m in morphs),
-            inputs=tuple(infiles.values()),
+            inputs=tuple(s.resolve() for s in input_paths.values()),
             artifacts=artifacts,
-            pres=(
-                (source, *others.values())
-                if isinstance(others, dict)
-                else (source, *others)
-            ),
+            pres=tuple(sources.values()),
             name=name,
         )
+
+    @element
+    def join(
+        self,
+        *sources: tuple[Element, str] | Element,
+        on: str | None = None,
+        how: Literal[
+            "left",
+            "right",
+            "outer",
+            "inner",
+            "cross",
+            "left_anti",
+            "right_anti",  # noqa: E501
+        ] = "left",
+        views: Mapping[str, View | None] | None = None,
+        root: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        output_spec: OutputSpec | None = None,
+    ) -> Element:
+        """
+        Combine multiple DataFrame elements into a single DataFrame element
+        using the provided morph function.
+
+        This method applies the given morph function to the dataframe contained
+        within the element, producing a new transformed element. This should
+        also be usable for merging, concatenation and joining.
+
+        Parameters
+        ----------
+        sources : Element
+            an arbitrary number of Element instances.
+        on : str, optional
+            Column name to join on, by default "__index"
+        how : str, optional
+            Type of join to perform, by default "inner"
+        root : str | None, optional
+            Root name for the combined element, by default None
+        tag : PartialElementTag | ElementTag | None, optional
+            Tag for the combined element, by default None
+        output_spec : OutputSpec | None, optional
+            Output specification for the combined element, by default None
+
+        Returns
+        -------
+        Element
+            A new Element instance representing the joined DataFrame.
+        """
+
+        def get_element_and_key(
+            source: tuple[Element, str] | Element,
+        ) -> tuple[Element, str]:
+            if isinstance(source, tuple):
+                return source
+            else:
+                return source, "primary"
+
+        views = views or {}
+        output_spec = output_spec or self.default_output_spec
+        first_element, fkey = get_element_and_key(sources[0])
+        fkey = fkey or "primary"
+        tag = from_prior(
+            first_element.tag,
+            tag,
+            root=root or first_element.tag.root,
+            state=State.COMBINED,
+            method=Method.TABLES,
+        )
+        elements = []
+        names_in_order = []
+        pre = []
+        for source in sources:
+            el, key = get_element_and_key(source)
+            key = key or "primary"
+            pre.append(el)
+            names_in_order.append(el.name)
+            elements.append(el)
+
+        artifacts, output = ArtifactSet.generate_file_artifacts(
+            tag=tag,
+            infile=first_element.artifacts[fkey].resolve(),
+            spec=output_spec,
+            index_column=first_element.artifacts[fkey].index_column,
+        )  # in another function
+
+        def __load_frame(source: Path | TableArtifact) -> DataFrame:
+            if isinstance(source, TableArtifact):
+                return source.view()
+            else:
+                return read_frame(source)
+
+        @depends(__load_frame)
+        def __run():
+            df: DataFrame | None = None
+            for ii, key in enumerate(names_in_order):
+                el = elements[ii]
+                view = views.get(key)
+                other_df: DataFrame = el.artifacts["primary"].view(view)
+                if df is None:
+                    df = other_df
+                else:
+                    df = df.join(other_df, on=on, how=how)
+            if df is None:
+                raise ValueError("Cannot join empty input artifacts.")
+            write_frames(df, output)
+
+        key, name = generate_element_key_name(
+            tag, "Tables", subroutine="join"
+        )  # noqa: E501
+        return Element(
+            key,
+            __run,
+            tag=tag,
+            determinants=(str(on), str(how)),
+            artifacts=artifacts,
+            pres=tuple(pre),
+            name=name,
+        )
+
+    def long(
+        self,
+        source: FileElement,
+        *,
+        sample_filter: Callable[[str | None], bool] | None = None,
+        root: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        index_column: str | None = "gene_stable_id [META]",
+        output_spec: OutputSpec | None = None,
+    ):
+        """
+        Convert a wide-format table to long-format.
+
+        Parameters
+        ----------
+        source : FileElement
+            The input FileElement containing the wide-format table.
+        sample_filter : Callable[[ColumnTag], bool] | None, optional
+            A function to filter sample columns, by default None
+        root : str | None, optional
+            The root tag for the output element, by default None
+        tag : PartialElementTag | ElementTag | None, optional
+            The tag for the output element, by default None
+        index_column : str | None, optional
+            The column to use as the index, by default "gene_stable_id [META]"
+        output_spec : OutputSpec | None, optional
+            The output specification, by default None
+
+        Returns
+        -------
+        Element
+            The output Element containing the long-format table.
+        """
+        tag = from_prior(
+            source.tag,
+            tag,
+            root=root,
+            state=State.TRANSFORMED,
+            method=Method.TABLES,
+            param="long",
+        )
+        return self.transform(
+            source,
+            self.to_long(
+                index=index_column, sample_filter=sample_filter
+            ),  # pivot table
+            root=root,
+            tag=tag,
+            index_column=index_column,
+            output_spec=output_spec,
+        )
+
+    def to_long(
+        self,
+        index: str | None = "gene_stable_id [META]",
+        sample_filter: Callable[[str | None], bool] | None = None,
+    ) -> Morph:
+        def sample_filter_default(sample_id: str | None) -> bool:
+            return sample_id is not None
+
+        def __transform(df: DataFrame) -> DataFrame:
+            if index in df.columns:
+                df = df.set_index(index)
+
+            tags = {c: ColumnTag.decode(c) for c in df.columns}
+            is_sample = sample_filter or sample_filter_default
+            for c, tag in tags.items():
+                print(tag.sample_id)
+            # raise NotImplementedError("sample_filter is not implemented yet.")
+            sample_cols = [
+                c for c, tag in tags.items() if is_sample(tag.sample_id)
+            ]  # columns with samples in ()
+            meta_cols = [
+                c for c, tag in tags.items() if tag.sample_id is None
+            ]  # columns with META pipeline
+
+            # vectorized lookup maps statt apply(pd.Series)
+            sample_id_map = {c: tags[c].sample_id for c in sample_cols}
+            pipeline_map = {c: tags[c].pipeline for c in sample_cols}
+            metric_map = {
+                c: (
+                    ".".join(tags[c].metric)
+                    if isinstance(tags[c].metric, tuple)
+                    else tags[c].metric
+                )
+                for c in sample_cols
+            }
+
+            long = (
+                df[sample_cols]
+                .reset_index()
+                .melt(
+                    id_vars=[df.index.name],
+                    var_name="column",
+                    value_name="value",  # noqa: E501
+                )  # long format
+            )
+            long["sample_id"] = long["column"].map(sample_id_map)
+            long["pipeline"] = long["column"].map(pipeline_map)
+            long["metric"] = long["column"].map(metric_map)
+            long = long.drop(columns="column")
+            # pivot statt pivot_table -> kein Aggregations-Overhead
+            long = long.pivot(
+                index=[df.index.name, "sample_id", "pipeline"],
+                columns="metric",
+                values="value",
+            ).reset_index()
+            if meta_cols:
+                long = long.merge(
+                    df[meta_cols].reset_index(), on=df.index.name, how="left"
+                )
+            return long
+
+        return Morph.from_callable(__transform)
 
     ############################################################################
     # From genes
@@ -678,12 +974,11 @@ class Tables:
         ]
 
         def __rename_legacy(df: DataFrame) -> DataFrame:
+            df = df[df["gene_stable_id"].str.startswith("ENS")]  # filter for gene rows
             for col in gene_cols:
                 df[col] = df[col].astype("str")
             if rename:
                 df = df.rename(columns=rename)
-                for col in df.columns:
-                    print("col", col)
             if index_column:
                 df = df.set_index(index_column)
             return df
@@ -739,14 +1034,14 @@ def frame_callable(
 ) -> Callable[[], tuple[DataFrame, DataFrame]]:
 
     def __load() -> tuple[DataFrame, DataFrame]:
-        cols = primary.column_schema.select(view)
+        cols = primary.schema.select(view)
         if not cols:
             raise ValueError(f"No columns match view={view!r}")
         df = primary.frame  # via read_frame
         if additional_filter is not None:
             df = additional_filter(df)
 
-        return df, df[cols]
+        return df, df[cols]  # type: ignore[return-value]
 
     return __load
 
@@ -777,13 +1072,13 @@ def drop_retain_rename(
                 assert all(
                     col in df.columns for col in selected_columns
                 ), "Some columns in 'select' are not in the DataFrame"
-                df = df[[col for col in df.columns if col in selected_columns]]
+                df = df[[col for col in df.columns if col in selected_columns]]  # type: ignore[return-value]
             else:
                 assert all(
                     col in df.columns for col in selected_columns
                 ), "Some columns in 'select' are not in the DataFrame"
                 df = df[
-                    [col for col in df.columns if col not in selected_columns]
+                    [col for col in df.columns if col not in selected_columns]  # type: ignore[return-value]
                 ]  # noqa: E501
         return df
 
@@ -818,25 +1113,149 @@ def append_label(label: str) -> Callable[[str], str]:
     return _transform_name
 
 
-@morph(view_out=View(metric=("Z")), add=True)
-def zscore(df: pd.DataFrame, rename, drop) -> pd.DataFrame:
+@morph
+def zscore(df: pd.DataFrame) -> pd.DataFrame:
     """
     Computes the z-score for specified columns in a DataFrame.
     The z-score is calculated as (x - mean) / std for each value x in column.
     """
-    columns = df.columns
-    rename = {}
-    for col in columns:
-        old = ColumnTag.decode(col)
-        new_tag = ColumnTag(
-            metric=old.metric + ("Z",),
-            sample_id=old.sample_id,
-            pipeline=old.pipeline,  # noqa: E501
-        )
-        rename[col] = new_tag.encode()
+    rename = ColumnTag.rename_columns(
+        df.columns.to_list(), view=_VIEWS["zscore"], append=True
+    )
     df = df.rename(columns=rename)
     for col in df.columns:
         mean = df[col].mean()
         std = df[col].std()
         df[col] = (df[col] - mean) / std
     return df
+
+
+@morph
+def cpm(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Computes counts per million (CPM) for specified columns in a DataFrame.
+    CPM is calculated as (x / column_sum) * 1e6 for each value x in column.
+    """
+    rename = ColumnTag.rename_columns(
+        df.columns.to_list(), view=_VIEWS["cpm"], append=True
+    )
+    df = df.rename(columns=rename)
+    for col in df.columns:
+        column_sum = df[col].sum()
+        df[col] = (df[col] / column_sum) * 1e6
+    return df
+
+
+def append_value(columns_values: dict[str, str]) -> Morph:
+    """
+    Returns a Morph that appends new columns with specified values to a DataFrame.
+
+    Parameters
+    ----------
+    columns_values : dict[str, str]
+        Dictionary mapping column names to the values to be appended.
+
+    Returns
+    -------
+    Morph
+        Morph that appends new columns with specified values to a DataFrame.
+    """
+
+    def __append(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Appends new columns with specified values to the DataFrame.
+        """
+        for key, value in columns_values.items():
+            if key in df.columns:
+                raise ValueError(f"Column '{key}' already exists in the DataFrame.")
+            df[key] = value
+        return df
+
+    return Morph.from_callable(__append, params=columns_values)
+
+
+def left_join(
+    other: Element,
+    *,
+    on: str | None = None,
+    view: View | None = None,
+    artifact: str = "primary",
+    how: Literal[
+        "left",
+        "right",
+        "outer",
+        "inner",
+        "cross",
+        "left_anti",
+        "right_anti",
+    ] = "left",
+) -> Morph:
+    def __left_join(df: DataFrame) -> DataFrame:
+        print(other.artifacts[artifact].view())
+        other_df = other.artifacts[artifact].view(view)
+        return df.join(other_df, on=on, how=how)
+
+    return Morph.from_callable(
+        __left_join, params={"on": on, "view": view, "artifact": artifact, "how": how}
+    )
+
+
+def to_long(
+    index: str | None = "gene_stable_id [META]",
+    sample_filter: Callable[[str | None], bool] | None = None,
+) -> Morph:
+    def sample_filter_default(sample_id: str | None) -> bool:
+        return sample_id is not None
+
+    def __transform(df: DataFrame) -> DataFrame:
+        if index in df.columns:
+            df = df.set_index(index)
+
+        tags = {c: ColumnTag.decode(c) for c in df.columns}
+        is_sample = sample_filter or sample_filter_default
+        for c, tag in tags.items():
+            print(tag.sample_id)
+        # raise NotImplementedError("sample_filter is not implemented yet.")
+        sample_cols = [
+            c for c, tag in tags.items() if is_sample(tag.sample_id)
+        ]  # columns with samples in ()
+        meta_cols = [
+            c for c, tag in tags.items() if tag.sample_id is None
+        ]  # columns with META pipeline
+
+        # vectorized lookup maps statt apply(pd.Series)
+        sample_id_map = {c: tags[c].sample_id for c in sample_cols}
+        pipeline_map = {c: tags[c].pipeline for c in sample_cols}
+        metric_map = {
+            c: (
+                ".".join(tags[c].metric)
+                if isinstance(tags[c].metric, tuple)
+                else tags[c].metric
+            )
+            for c in sample_cols
+        }
+
+        long = (
+            df[sample_cols]
+            .reset_index()
+            .melt(
+                id_vars=[df.index.name],
+                var_name="column",
+                value_name="value",  # noqa: E501
+            )  # long format
+        )
+        long["sample_id"] = long["column"].map(sample_id_map)
+        long["pipeline"] = long["column"].map(pipeline_map)
+        long["metric"] = long["column"].map(metric_map)
+        long = long.drop(columns="column")
+        # pivot statt pivot_table -> kein Aggregations-Overhead
+        long = long.pivot(
+            index=[df.index.name, "sample_id", "pipeline"],
+            columns="metric",
+            values="value",
+        ).reset_index()
+        if meta_cols:
+            long = long.merge(df[meta_cols].reset_index(), on=df.index.name, how="left")
+        return long
+
+    return Morph.from_callable(__transform)

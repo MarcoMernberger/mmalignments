@@ -8,11 +8,12 @@ back something with .panel() (live) and .export_html() (standalone).
 from __future__ import annotations
 
 from pathlib import Path
+from xml.sax import handler
 
 import pandas as pd
-import panel as pn
-import param
-from param import Parameterized
+import panel as pn  # type: ignore[import]
+import param  # type: ignore[import]
+from param import Parameterized  # type: ignore[import]
 
 from typing import Mapping
 
@@ -64,19 +65,19 @@ class InteractiveApp(Parameterized):
         else:
             self.data = data
         self.config = config
-        self.select_param = config.select_param
+        self.select_param = f"General_{config.select_param}"
 
         config.validate_against(PLOT_REGISTRY)
-        build_color_maps(
-            config.layers, self.data, explicit_maps=config.explicit_color_maps
-        )
+        # build_color_maps(
+        #     config.layers, self.data, explicit_maps=config.explicit_color_maps
+        # )
 
         extra_state = config.extra_state or self.DEFAULT_EXTRA_STATE
 
         # build the renderer
         if self.select_param is not None:
             select_state = build_selection_state_cls(
-                config.layers, pname=self.select_param
+                config.layers, pname=config.select_param
             )
             extra_state.append(select_state)
             self.renderer = SelectiveRenderer(
@@ -87,7 +88,7 @@ class InteractiveApp(Parameterized):
 
         # build combined class state
         self.state_cls = build_combined_state_cls(config.layers, extra_state)
-        data_for_dynamic = self.data["raw"]
+        data_for_dynamic = self.data
         populate_dynamic_selectors(
             self.state_cls,
             data_for_dynamic,
@@ -95,7 +96,6 @@ class InteractiveApp(Parameterized):
             shared_roles=config.shared_roles,
         )
         self.state = self.state_cls()
-
         self._last_fig = None
         self._last_result = None
         self._result_populated_from_analysis = False
@@ -124,93 +124,102 @@ class InteractiveApp(Parameterized):
         if not self._result_populated_from_analysis:
             populate_dynamic_selectors(
                 self.state_cls,
-                self.data["raw"],
+                self.data,
                 result=result,
                 shared_roles=self.config.shared_roles,
             )
             self._result_populated_from_analysis = True
 
-        self.config.validate_output(result, PLOT_REGISTRY)
+        # self.config.validate_output(result, PLOT_REGISTRY, self.state)
         fig = self.renderer.render(result, self.state)
         self._last_fig = fig
         self._last_result = result
-        return pn.pane.Plotly(fig, sizing_mode="stretch_width", height=520)
+        return pn.pane.Plotly(fig, sizing_mode="stretch_both")
 
     # ── actions ───────────────────────────────────────────────────────────────
 
     def _bind_actions(self) -> None:
         self._handlers = {}
-        for name in self.state_cls.param:
+        for name in self.state.param:
             if name == "name":
-                continue
-            if isinstance(self.state_cls.param[name], param.Action):
-                self._handlers[name] = getattr(self, f"_action_{name}", self._noop)
+                continue  # this is some internal param thing
+            if isinstance(self.state.param[name], param.Action):
 
-    def _noop(self):
-        pass
+                def handler(n=name):
+                    self.state.param[n].default(self)
 
-    def _action_export_png(self):
-        self._export("png")
+                self._handlers[name] = handler
 
-    def _action_export_svg(self):
-        self._export("svg")
+                # self._handlers[name] = getattr(self, f"_action_{name}", self._noop)
+            #     self.state.param[name].set_param(
+            #         callback=handler
+            # )
 
-    def _action_export_tables(self):
-        self._export_tables()
+    # def _noop(self):
+    #     pass
 
-    def _action_export_bed(self):
-        self._export_genomic_tracks(export_bigwig=False)
+    # def _action_export_png(self):
+    #     self._export("png")
 
-    def _action_export_bigwig(self):
-        self._export_genomic_tracks(export_bigwig=True)
+    # def _action_export_svg(self):
+    #     self._export("svg")
 
-    def _action_export_app(self) -> None:
-        """
-        Generate a self-contained standalone_app.py (+ requirements.txt) that
-        runs without the mmalignments package.
+    # def _action_export_tables(self):
+    #     self._export_tables()
 
-        Uses a lazy relative import so that:
-          - in the full package, export.py is imported at call time (avoids a
-            circular dependency at module load: export.py imports app.py).
-          - in a standalone script (which doesn't ship the export module), the
-            ImportError / SystemError is caught silently and the button is
-            harmlessly inert.
-        """
-        try:
-            from . import export as _exp
-        except (ImportError, SystemError):
-            print("[export_app] Export module not available in this environment.")
-            return
-        folder = getattr(self.state, "export_folder", "results")
-        stem = getattr(self.state, "export_filename", "standalone_app")
-        _exp.export_standalone_script(
-            data=self.data,
-            config=self.config,
-            outdir=folder,
-            stem=stem,
-            title=self.title,
-        )
+    # def _action_export_bed(self):
+    #     self._export_genomic_tracks(export_bigwig=False)
 
-    def _export(self, fmt: str) -> None:
-        if self._last_fig is None:
-            return
-        folder = getattr(self.state, "export_folder", "results")
-        filename = getattr(self.state, "export_filename", "figure")
-        path = Path(folder) / f"{filename}.{fmt}"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._last_fig.write_image(str(path))
-        print(f"Saved {path}")
+    # def _action_export_bigwig(self):
+    #     self._export_genomic_tracks(export_bigwig=True)
 
-    def _export_tables(self) -> None:
-        if self._last_result is None:
-            return
-        folder = getattr(self.state, "export_folder", "results")
-        filename = getattr(self.state, "export_filename", "figure")
-        path = Path(folder)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        for suffix, df in self._last_result.data.items():
-            df.to_csv(path / f"{filename}.{suffix}.tsv", index=False, sep="\t")
-        print(f"Saved tables to {path}")
+    # def _action_export_app(self) -> None:
+    #     """
+    #     Generate a self-contained standalone_app.py (+ requirements.txt) that
+    #     runs without the mmalignments package.
+
+    #     Uses a lazy relative import so that:
+    #       - in the full package, export.py is imported at call time (avoids a
+    #         circular dependency at module load: export.py imports app.py).
+    #       - in a standalone script (which doesn't ship the export module), the
+    #         ImportError / SystemError is caught silently and the button is
+    #         harmlessly inert.
+    #     """
+    #     try:
+    #         from . import export as _exp
+    #     except (ImportError, SystemError):
+    #         print("[export_app] Export module not available in this environment.")
+    #         return
+    #     folder = getattr(self.state, "export_folder", "results")
+    #     stem = getattr(self.state, "export_filename", "standalone_app")
+    #     _exp.export_standalone_script(
+    #         data=self.data,
+    #         config=self.config,
+    #         outdir=folder,
+    #         stem=stem,
+    #         title=self.title,
+    #     )
+
+    # def _export(self, fmt: str) -> None:
+    #     if self._last_fig is None:
+    #         return
+    #     folder = getattr(self.state, "export_folder", "results")
+    #     filename = getattr(self.state, "export_filename", "figure")
+    #     path = Path(folder) / f"{filename}.{fmt}"
+    #     path.parent.mkdir(parents=True, exist_ok=True)
+    #     self._last_fig.write_image(str(path))
+    #     print(f"Saved {path}")
+
+    # def _export_tables(self) -> None:
+    #     if self._last_result is None:
+    #         return
+    #     folder = getattr(self.state, "export_folder", "results")
+    #     filename = getattr(self.state, "export_filename", "figure")
+    #     path = Path(folder)
+    #     path.parent.mkdir(parents=True, exist_ok=True)
+    #     for suffix, df in self._last_result.data.items():
+    #         df.to_csv(path / f"{filename}.{suffix}.tsv", index=False, sep="\t")
+    #     print(f"Saved tables to {path}")
 
     def _get_genetrack_layer(self) -> PlotLayer | None:
         selected_alias = (
@@ -285,10 +294,7 @@ class InteractiveApp(Parameterized):
         filename = getattr(self.state, "export_filename", "figure")
 
         score_cols = []
-        for col in df.columns:
-            print(col)
         if export_bigwig:
-            print("metric_col", metric_col)
             if metric_col in df.columns:
                 score_cols = [metric_col]
             else:
@@ -363,10 +369,15 @@ class InteractiveApp(Parameterized):
             items = []
             if normal:
                 items.append(pn.Param(self.state, parameters=normal, show_name=False))
-            for a in actions:
-                label = self.state_cls.param[a].label or a
+            for action_name in actions:
+                label = self.state_cls.param[action_name].label or action_name
+
                 btn = pn.widgets.Button(name=label, button_type="success")
-                btn.on_click(lambda e, n=a: self._handlers[n]())
+
+                def callback(event, name=action_name):
+                    self._handlers[name]()
+
+                btn.on_click(callback)
                 items.append(btn)
 
             section_content = pn.Column(*items)

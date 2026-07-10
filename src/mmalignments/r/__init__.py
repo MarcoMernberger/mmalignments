@@ -2,8 +2,9 @@ from .r_integration import (
     R_SCRIPT_DIR,
     RScriptExternal,
     RScriptInternal,
-    rsubroutine,
     RSubroutineIn,
+    listvector_to_dict,
+    rsubroutine,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "rsubroutine",
     "R_SCRIPT_DIR",
     "RSubroutineIn",
+    "listvector_to_dict",
 ]

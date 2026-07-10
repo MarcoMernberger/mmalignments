@@ -1,3 +1,5 @@
+from typing import Any
+
 try:
     import string
 
@@ -26,3 +28,11 @@ def reverse_complement(sequence: str) -> str:
         Reverse complement of input sequence.
     """
     return sequence[::-1].translate(rev_comp_table)
+
+
+def as_tuple(x: Any) -> tuple[Any, ...]:
+    if isinstance(x, tuple):
+        return x
+    if isinstance(x, list):
+        return tuple(x)
+    return (x,)

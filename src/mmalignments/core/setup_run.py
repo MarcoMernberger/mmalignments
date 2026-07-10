@@ -1,6 +1,6 @@
 "Some helper functions for setting up a run of the mmalignments pipeline."
 
-from pandas import DataFrame, Series
+from pandas import DataFrame, Series  # type: ignore[import]
 
 
 def samples_by_factors(samples: DataFrame, **factors) -> list[str]:
@@ -27,5 +27,5 @@ def samples_by_factors(samples: DataFrame, **factors) -> list[str]:
                 f"Factor values for {factor_name} must be a string or a list/tuple."  # noqa: E501
             )
         mask &= samples[factor_name].isin(factor_values)
-    matching_samples = samples[mask]["name"].tolist()
+    matching_samples = samples[mask]["name"].astype(str).tolist()
     return matching_samples

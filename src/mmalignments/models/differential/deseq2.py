@@ -23,11 +23,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
-from pandas import DataFrame
+from pandas import DataFrame  # type: ignore[import]
 
-from mmalignments.core.annotations import _VIEWS, View
+from mmalignments.core.annotations import _VIEWS, ColumnTag, View
 from mmalignments.models.artifacts import ArtifactSet, OutputSpec, TableArtifact
 from mmalignments.models.elements import (
     Element,
@@ -60,7 +60,7 @@ from mmalignments.r import (
     RSubroutineIn,
     rsubroutine,
 )
-from mmalignments.services.io import read_frame, write_frame, write_frames
+from mmalignments.services.io import read_frame, write_frames
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,7 @@ _DEFAULT_COLUMN_MAP_UNPAIRED: dict[str, str] = {
     "baseMean": "baseMean ({comparison})",
     "lfcSE": "lfcSE ({comparison})",
     "stat": "stat ({comparison})",
+    "de status": "de status ({comparison})",
 }
 
 _DEFAULT_COLUMN_MAP_TIMESERIES: dict[str, str] = {
@@ -171,12 +172,14 @@ class DESeq2In(RScriptInternal):
         cfg: ExternalRunConfig | None = None,
     ) -> Element:
         """Two-group Wald-test via DESeq2 rpy2."""
+        params = params or Params(logFC_threshold=1, alpha=0.05)
         comparison_name = comparison_name or f"{condition_a}_vs_{condition_b}"
         output_spec = output_spec or self.default_output_spec
         view = view or _VIEWS["escd"]
         tag = from_prior(
             counts.tag,
             tag,
+            root=comparison_name,
             stage=Stage.DIFF,
             method=Method.DESEQ2,
             state=State.DIFF,
@@ -196,14 +199,12 @@ class DESeq2In(RScriptInternal):
             # column_schema=column_schema,
             default_dir=self.default_dir,
         )
-        artifacts["size_factors"] = TableArtifact(
-            path=output.with_name("size_factors"),
-        )
         additional_filter = None
         if not use_all_samples_for_variance:
             additional_filter = filter_to_condition_sample(
                 model_conditions, condition_a, condition_b
             )
+
         key, name = generate_element_key_name(
             tag, self.version_name, comparison_name
         )  # noqa: E501
@@ -255,11 +256,12 @@ class DESeq2In(RScriptInternal):
 
         def make_context():
             df = source.view(view)
+            counts_df = df.copy()
             if additional_filter:
-                df = additional_filter(df)
-            counts_df = df[
-                model_conditions[condition_a] + model_conditions[condition_b]
-            ]
+                counts_df = additional_filter(counts_df)
+            # counts_df = df[
+            #     model_conditions[condition_a] + model_conditions[condition_b]
+            # ]
             other_df = (
                 df[[c for c in df.columns if c not in counts_df.columns]]
                 if propagation
@@ -274,19 +276,19 @@ class DESeq2In(RScriptInternal):
                     "model_conditions": model_conditions,
                     "column_map": column_map,
                 },
-                "context": {"other_df": other_df, "outputs": outputs},
+                "context": {
+                    "other_df": other_df,
+                    "outputs": outputs,
+                    "index": counts_df.index,
+                },
             }
 
         def post(result, context):
-            results = result["results"]
-            size_factors = result["size_factors"]
-            other_df = context["other_df"]
-            outputs = context["outputs"]
-            fn = self.merge_rename_write(outputs=outputs, other=other_df)
-            write_frame(
-                size_factors, [outputs[0].with_name("size_factors")]
-            )  # noqa: E501
-            fn(results)
+            result.index = context["index"]
+            fn = self.merge_rename_write(
+                outputs=context["outputs"], other=context["other_df"]
+            )
+            fn(result)
 
         cfg = cfg or ExternalRunConfig(threads=1)
         return (
@@ -299,9 +301,9 @@ class DESeq2In(RScriptInternal):
             post,
         )
 
-    # ------------------------------------------------------------------
+    ############################################################################
     # Variance-stabilising transformation (VST)
-    # ------------------------------------------------------------------
+    ############################################################################
 
     @element
     def vst(
@@ -313,6 +315,7 @@ class DESeq2In(RScriptInternal):
         sample_columns: Sequence[str] | None = None,
         view: View | None = None,
         propagation: bool = False,
+        root: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         output_spec: OutputSpec | None = None,
         params: Params | None = None,
@@ -326,6 +329,7 @@ class DESeq2In(RScriptInternal):
         tag = from_prior(
             counts.tag,
             tag,
+            root=root,
             stage=Stage.ANALYSIS,
             method=Method.DESEQ2,
             state=State.NORMAL,
@@ -385,7 +389,7 @@ class DESeq2In(RScriptInternal):
         fit_type: str = "parametric",
         sample_columns: Sequence[str] | None = None,
         view: View | None = None,
-        rename: dict[str, str] | None = None,
+        # rename: dict[str, str] | None = None,
         propagation: bool = False,  # if the result is appended or not
         # params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
@@ -411,6 +415,11 @@ class DESeq2In(RScriptInternal):
                 if propagation
                 else None
             )
+            rename = ColumnTag.rename_columns(
+                columns=count_df.columns.to_list(),
+                view=_VIEWS["vst"],
+                append=False,  # noqa: E501
+            )
             return {
                 "payload": {
                     "counts_df": count_df,
@@ -420,18 +429,26 @@ class DESeq2In(RScriptInternal):
                     "blind": blind,
                     "fitType": fit_type,
                 },
-                "context": {"other_df": other_df, "rename": rename},
+                "context": {
+                    "other_df": other_df,
+                    "rename": rename,
+                    "index": count_df.index,
+                    "outputs": outputs,
+                },
             }
 
-        def post(result: DataFrame, context: dict) -> DataFrame:
-            rename = context["context"].get("rename", None)
-            other_df = context["context"].get("other_df", None)
+        def post(result: DataFrame, context: dict[str, Any]) -> DataFrame:
+            rename = context.get("rename", None)
+            result.index = context["index"]
+            outputs = context.get("outputs")
+            if outputs is None:
+                raise ValueError("Outputs not found in context.")
             if rename:
                 result = result.rename(columns=rename)
             return merge_and_write(
                 result=result,
                 outputs=outputs,
-                other_df=other_df,
+                other_df=context.get("other_df", None),
             )
 
         return (
@@ -445,6 +462,7 @@ class DESeq2In(RScriptInternal):
         )
 
     def normalize(
+        self,
         source: Element,
         deseq: Element,
         *,
@@ -456,13 +474,25 @@ class DESeq2In(RScriptInternal):
         params: Params | None = None,
     ) -> Element:
 
+        def rename_fn(columns: list[str]) -> dict[str, str]:
+            return ColumnTag.rename_columns(
+                columns=columns, view=View(metric="Norm"), append=True
+            )  # noqa: E501
+
         morph = divide(
-            numerator=source.root, denominator=deseq.root, views=views
+            numerator=source.name,
+            denominator=deseq.name,
+            denominator_column="size_factor",
+            rename_fn=rename_fn,
         )  # noqa: E501
         return Tables().combine(
-            source,
-            deseq,
+            {
+                source.name: source,
+                deseq.name: deseq,
+            },
             morph,
+            artifact_keys={deseq.name: "size_factors"},
+            first_key=source.name,
             root=root,
             index_column=index_column,
             tag=tag,

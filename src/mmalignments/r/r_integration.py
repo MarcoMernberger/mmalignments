@@ -10,9 +10,18 @@ from inspect import signature
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeAlias
 
+import pandas as pd  # type: ignore[import]
 import rpy2.robjects as ro  # type: ignore[import]
 from rpy2.rinterface import NULL  # type: ignore[import]
-from rpy2.robjects.vectors import FloatVector, StrVector  # type: ignore[import]
+from rpy2.robjects import pandas2ri  # type: ignore[import]
+from rpy2.robjects.vectors import (
+    DataFrame as RDataFrame,  # type: ignore[import]
+)
+from rpy2.robjects.vectors import (  # type: ignore[import]
+    FloatVector,
+    ListVector,  # type: ignore[import]
+    StrVector,
+)
 
 from mmalignments.models.externals import (
     External,
@@ -37,16 +46,13 @@ logger = logging.getLogger(__name__)
 
 
 def _convert_value(v: Any) -> Any:
-    """Recursively convert a Python value to an rpy2-compatible R type."""
     try:
-        import pandas as pd
-        from rpy2.robjects import pandas2ri  # type: ignore[import]
-
         if isinstance(v, pd.DataFrame):
             with (ro.default_converter + pandas2ri.converter).context():
                 return pandas2ri.py2rpy(v)
     except ImportError:
         pass
+    """Recursively convert a Python value to an rpy2-compatible R type."""
     if isinstance(v, Path):
         return str(v)
     if isinstance(v, dict):
@@ -66,38 +72,38 @@ def _convert_value(v: Any) -> Any:
     return v
 
 
+def listvector_to_dict(x: ListVector) -> dict[str, "pd.DataFrame"]:
+    return {name: pandas2ri.rpy2py(x.rx2(name)) for name in x.names}
+
+
 def _r_to_pandas(r_result: Any) -> Any:
-    """
-    Convert R result to pandas. Supports data.frame AND named lists of
-    data.frames.
-    """
+    with (ro.default_converter + pandas2ri.converter).context():
 
-    try:
-        from rpy2.robjects import pandas2ri
-        from rpy2.robjects.vectors import ListVector
+        # CASE 1: actual R data.frame
+        if isinstance(r_result, RDataFrame):
+            return ro.conversion.get_conversion().rpy2py(r_result)
 
-        with (ro.default_converter + pandas2ri.converter).context():
+        # CASE 2: named list of data.frames
+        if isinstance(r_result, ListVector):
+            return {
+                name: ro.conversion.get_conversion().rpy2py(r_result.rx2(name))
+                for name in r_result.names
+            }
 
-            # CASE 1: named list (your new DESeq2 bundle)
-            if isinstance(r_result, ListVector):
-                return {k: pandas2ri.rpy2py(v) for k, v in r_result.items()}
-
-            # CASE 2: normal data.frame
-            return pandas2ri.rpy2py(r_result)
-
-    except Exception:
-        return r_result
+        return ro.conversion.get_conversion().rpy2py(r_result)
 
 
 RSubroutineIn: TypeAlias = tuple[
     str,  # r_function
-    dict[str, Any],  # payload
+    dict[str, Any] | Callable[[], dict[str, Any]],  # payload or context
     list[Path] | None,  # inpaths
     list[Path] | None,  # outpaths
     Any | None,  # pipeoutput
     Runnable | Callable | None,  # pre
-    Callable[[Any], Any] | None,  # post
+    Runnable | Callable | None,  # post
 ]
+
+logger = logging.getLogger(__name__)
 
 
 class RScriptInternal(External):

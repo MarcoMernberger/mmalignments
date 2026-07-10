@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterator, Literal, Mapping
 
-from pandas import DataFrame
+from pandas import DataFrame  # type: ignore[import]
 
 from mmalignments.core.annotations import ColumnSchema, View
 from mmalignments.models.tags import ElementTag
@@ -47,8 +47,8 @@ class ArtifactSet(Mapping):
                 f"'{primary_name}' collides with an extra artifact key."
             )  # noqa: E501
         object.__setattr__(self, "_primary", primary)
-        object.__setattr__(self, "_extras", MappingProxyType(dict(extras)))
         object.__setattr__(self, "_primary_name", primary_name)
+        object.__setattr__(self, "_extras", MappingProxyType(dict(extras)))
 
     def __getitem__(self, key: str) -> Any:
         if key == "primary" or (
@@ -134,7 +134,6 @@ class ArtifactSet(Mapping):
     def generate_file_artifacts(
         cls,
         tag: ElementTag,
-        # column_schema: ColumnSchema,
         infile: Path | None,
         spec: OutputSpec | None = None,
         default_dir: Path | None = None,
@@ -162,6 +161,100 @@ class ArtifactSet(Mapping):
         return artifacts, [
             a.resolve() for a in artifacts.values() if hasattr(a, "resolve")
         ]
+
+    @classmethod
+    def generate_from_outspec(
+        cls,
+        tag: ElementTag,
+        infile: Path | None,
+        spec: OutputSpec | None = None,
+        default_dir: Path | None = None,
+    ) -> ArtifactSet:
+        default_dir = default_dir or Path("results")
+        spec = spec or OutputSpec()
+        out_dir = Path(spec.outdir or infile.parent if infile else default_dir)
+        filename = spec.filename or tag.default_name
+        if spec.ext:
+            filename = f"{filename}.{spec.ext}"
+        output_file = out_dir / filename
+        extensions = spec.additional_extensions or []
+        additional_artifacts = {}
+        for extension in extensions:
+            additional_artifacts[extension] = output_file.with_suffix(
+                f".{extension}"
+            )  # an artifact with paths
+        artifacts = ArtifactSet(
+            output_file,
+            **additional_artifacts,
+        )
+        return artifacts
+
+    def with_extras(self, extras: Mapping[str, Any]) -> "ArtifactSet":
+        """
+        Return a new ArtifactSet with additional artifacts.
+
+        Raises
+        ------
+        KeyError
+            If any artifact key already exists.
+        """
+        conflicts = set(extras) & set(self)
+
+        if conflicts:
+            raise KeyError(f"Artifact(s) already exist: {sorted(conflicts)}")
+
+        return ArtifactSet(
+            self._primary,
+            primary_name=self._primary_name,
+            **self._extras,
+            **dict(extras),
+        )
+
+    def merge(self, other: "ArtifactSet") -> "ArtifactSet":
+        """
+        Return a new ArtifactSet containing artifacts from both sets.
+
+        The primary artifact of `self` is preserved.
+        The primary artifact of `other` is added as an extra artifact if
+        it has a different name.
+
+        Raises
+        ------
+        KeyError
+            If artifact names collide.
+        """
+        if not isinstance(other, ArtifactSet):
+            other = ArtifactSet.from_any(other)
+
+        merged = dict(self._extras)
+
+        # add other's primary
+        other_primary_name = (
+            other._primary_name if other._primary_name is not None else "primary"
+        )
+
+        if other_primary_name != (self._primary_name or "primary"):
+            if other_primary_name in self:
+                raise KeyError(f"Artifact '{other_primary_name}' already exists.")
+            merged[other_primary_name] = other._primary
+
+        # add other's extras
+        conflicts = set(merged) & set(other._extras)
+        if conflicts:
+            raise KeyError(f"Artifact(s) already exist: {sorted(conflicts)}")
+
+        merged.update(other._extras)
+
+        return ArtifactSet(
+            self._primary,
+            primary_name=self._primary_name,
+            **merged,
+        )
+
+    def output_files(self) -> Mapping[str, Path]:
+        return {
+            k: a.resolve() for k, a in self.items() if hasattr(a, "resolve")
+        }  # noqa: E501
 
 
 class Artifact(ABC):
@@ -303,10 +396,6 @@ class TableArtifact(Artifact):
             else {}
         )
         frame = read_frame(self.path, **kwargs)
-        print(f"Loaded DataFrame from {self.path} with shape {frame.shape}")
-        print(frame.head())
-        for col in frame.columns:
-            print("col in frame", col)
         if self.index_column and self.index_column in frame.columns:
             frame.set_index(self.index_column, inplace=True)
             # frame.index = Index(frame[self.index_column].copy())
@@ -315,12 +404,16 @@ class TableArtifact(Artifact):
     @cached_property
     def schema(self) -> ColumnSchema:
         # return self.column_schema
-        return ColumnSchema.derive_from_columns(self.raw_columns())
+        return ColumnSchema.derive_from_columns(
+            self.raw_columns(), index_column=self.index_column
+        )
 
     def raw_columns(self) -> list[str]:
         """Column names on disk, without loading the full table."""
-        print("raw_columns schema", read_schema(self.path))
-        return read_schema(self.path)
+        raw_columns = [
+            col for col in read_schema(self.path) if col != self.index_column
+        ]
+        return raw_columns
 
     ############################################################################
     # Selection via ColumnSchema
@@ -331,20 +424,20 @@ class TableArtifact(Artifact):
         view: View | None = None,
     ) -> DataFrame:
         cols = self.schema.select(view)
-        print(
-            "missing in frame but selected by schema",
-            [c for c in cols if c not in self.frame.columns],
-        )
+        df = self.frame
+        selected_columns = [col for col in cols if col in df.columns]
+        # difference = set(cols) - set(df.columns)
+        # if difference:
+        #     raise KeyError(
+        #         f"Columns {difference} are in the schema but not in the DataFrame for {self.path}."  # noqa: E501
+        #     )
         if not cols and view:
             print(self.frame.head())
             raise KeyError(
                 f"No columns match metric={view.metric!r}, sample_id={view.sample_id!r}, pipeline={view.pipeline!r}."  # noqa: E501
                 f"in {self.path}."
             )
-        print("in cols")
-        for col in cols:
-            print("col", col)
-        return self.frame[cols]
+        return self.frame[selected_columns]  # type: ignore[return-value]
 
     def deselect(
         self,
@@ -366,7 +459,7 @@ class TableArtifact(Artifact):
         ordered = [c for c in self.frame.columns if c in cols]
         return self.frame[ordered]
 
-    def roles_present(self) -> set[tuple[str, ...]]:
+    def roles_present(self) -> set[tuple[str, ...] | str]:
         return {tag.metric for tag in self.schema.values()}
 
     ############################################################################

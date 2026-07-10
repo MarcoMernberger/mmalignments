@@ -15,6 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+from unicodedata import name
 
 import plotly.graph_objects as go
 import pandas as pd  # type: ignore[import]
@@ -137,13 +138,16 @@ class PlotConfig:
             raise ValueError("PlotConfig invalid:\n  " + "\n  ".join(problems))
 
     def validate_output(
-        self, result: AnalysisResult, registry: dict[str, type]
+        self,
+        result: AnalysisResult,
+        registry: dict[str, type],
+        state: Parameterized | None = None,
     ) -> None:
         """After Analysis.run(): check the promised columns actually exist."""
         for layer in self.layers:
             df = result[layer.source]
             plot_cls = registry[layer.plot_type]
-            plot_cls.validate_roles(df, layer.roles)
+            plot_cls.validate_roles(df, layer.roles, state)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,6 +236,13 @@ class BasePlot:
     trace_capabilities: set[str] = set()
 
     @classmethod
+    def get_param_from_roles(cls, name: str, state: PlotState | None = None) -> str:
+        if state is not None:
+            return getattr(state, name, name)
+        else:
+            return getattr(cls.state_cls, name, name)
+
+    @classmethod
     def required_roles(cls) -> set[str]:
         return {name for name, spec in cls.ROLE_SPECS.items() if spec.required}
 
@@ -240,7 +251,9 @@ class BasePlot:
         return {name for name, spec in cls.ROLE_SPECS.items() if not spec.required}
 
     @classmethod
-    def validate_roles(cls, df: pd.DataFrame, roles: dict[str, str]) -> None:
+    def validate_roles(
+        cls, df: pd.DataFrame, roles: dict[str, str], state: PlotState | None = None
+    ) -> None:
         for role_name, spec in cls.ROLE_SPECS.items():
             if role_name not in roles:
                 if spec.required:
@@ -248,12 +261,12 @@ class BasePlot:
                         f"{cls.__name__}: missing required role '{role_name}'"
                     )
                 continue
-            col = roles[role_name]
+            col = cls.get_param_from_roles(roles[role_name], state=state)
             if col not in df.columns:
                 raise ValueError(
                     f"{cls.__name__}: role '{role_name}' maps to column "
                     f"'{col}', which is not in the DataFrame "
-                    f"(columns: {list(df.columns)})"
+                    f"(columns: {list(df.columns)}) or the PlotState: {dir(state)}"
                 )
 
     def render(

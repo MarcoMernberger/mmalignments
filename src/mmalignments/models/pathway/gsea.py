@@ -40,14 +40,15 @@ from typing import Any, Iterable, Sequence
 
 import gseapy as gp  # type: ignore[import]
 import pandas as pd  # type: ignore[import]
-from pandas import DataFrame
+from pandas import DataFrame  # type: ignore[import]
 
+from mmalignments.core.annotations import ColumnTag, View
+from mmalignments.models.artifacts import ArtifactSet, OutputSpec
 from mmalignments.models.elements import (
     CallSpec,
     Element,
     FileElement,
     Runnable,
-    TableElement,
     element,
     generate_element_key_name,
 )
@@ -62,7 +63,13 @@ from mmalignments.models.tags import (
 )
 from mmalignments.models.tags import PartialElementTag as PTag
 from mmalignments.services.dependencies import depends
-from mmalignments.services.io import concat_files, exists, parents, read_frame
+from mmalignments.services.io import (
+    concat_files,
+    exists,
+    parents,
+    read_frame,
+    write_frames,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +139,102 @@ class Gseapy:
             seed=self.DEFAULT_SEED,
         )
 
+    ####################################################################
+    # GCT
+    ####################################################################
+
+    @element
+    def gct(
+        self,
+        expression: Element,
+        annotation: Element,
+        *,
+        name_col: str = "name [META]",
+        view: View | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        output_spec: OutputSpec | None = None,
+    ) -> Element:
+        """Create a gct file.
+
+        Parameters
+        ----------
+        expression : Element
+            Expression matrix (genes × samples).  Must have one gene-name
+            column (``gene_col``) and one sample column per sample.
+        annotation : Element
+            Annotation matrix (genes × annotation columns).  Must have one
+            gene-name column (``gene_col``) and one annotation column per gene.
+        name_col : str
+            Name of the gene-name column in *annotation* (default
+            ``"name [META]"``).
+        tag : PartialElementTag | ElementTag | None
+            Optional tag override.
+        output_spec : OutputSpec | None
+            Optional output specification.  Defaults to ``parquet`` + ``tsv``.
+
+        Returns
+        -------
+        Element
+            GCT file element.
+        """
+        pres = (expression, annotation)
+        tag = from_prior(
+            expression.tag,
+            tag,
+            stage=Stage.ANALYSIS,
+            method=Method.GSEA,
+            state=State.ENRICHMENT,
+            param="expression",
+        )
+        output_spec = OutputSpec(
+            tag.default_output,
+            self.default_outdir("expr", expression.name),
+            ext="parquet",
+        )
+        artifacts = ArtifactSet.generate_from_outspec(
+            tag=tag,
+            infile=expression.primary.resolve(),
+            spec=output_spec or self.default_output_spec(),
+            default_dir=self.default_outdir("expr", expression.root),
+        )
+
+        @depends(_run_gsea)
+        def _run():
+            expression_frame = expression.primary.view()
+            index_name = expression_frame.index.name
+            # rename = ColumnTag.generate_new_tag(
+            #     old_tag=ColumnTag(...),  # replace with actual old_tag
+            #     view=View(...),  # replace with actual view
+            #     append=True,  # or False, depending on your logic
+            # )
+            expression_frame = expression_frame.reset_index()
+            expression_frame = expression_frame.rename(
+                columns={index_name: "Gene"}
+            )  # rename the Ensembl IDs to Gene for now
+            expression_frame.insert(
+                0, "NAME", annotation.primary.view()[name_col].values
+            )
+            columns = ColumnTag.select_from_view(
+                expression_frame.columns, view=view
+            )  # select samples that are actually relevant for the comparison
+            expression_frame = expression_frame[
+                ["NAME", "Gene"] + list(columns)
+            ]  # the final expression frame
+            outfiles = list(artifacts.output_files().values())
+            write_frames(expression_frame, outfiles)
+
+        runner = Runnable(_run, display=f"gsea({expression.name})")
+        key, name = generate_element_key_name(tag, "gseapy", subroutine="gsea")
+
+        return Element(
+            key=key,
+            run=runner,
+            tag=tag,
+            artifacts=artifacts,
+            pres=tuple(pres),
+            name=name,
+        )
+
     # ------------------------------------------------------------------
     # gsea — classical phenotype-permutation GSEA
     # ------------------------------------------------------------------
@@ -139,7 +242,8 @@ class Gseapy:
     @element
     def gsea(
         self,
-        expression: TableElement,
+        gct: Element,
+        name: str,
         classes: Sequence[str] | FileElement,
         gene_sets: FileElement | str | Sequence[str],
         *,
@@ -152,9 +256,12 @@ class Gseapy:
 
         Parameters
         ----------
-        expression : TableElement
-            Expression matrix (genes × samples).  Must have one gene-name
-            column (``gene_col``) and one sample column per sample.
+        gct : Element
+            GCT file element containing the expression matrix (genes × samples).
+            Must have one gene-name column (``gene_col``) and one sample column
+            per sample.
+        name : str
+            Name of the analysis (used in output filenames).
         classes : Sequence[str] | FileElement
             Class labels — either a Python list of strings matching the
             sample columns, or a :class:`FileElement` pointing to a
@@ -185,12 +292,13 @@ class Gseapy:
         Element
             ``tsv`` → summary results TSV; ``parquet`` → Parquet version.
         """
-        pres: list[Element] = [expression]
+        params = params or self.default_params()
+        pres: list[Element] = [gct]
         gene_sets_arg, pres = _resolve_gene_sets(gene_sets, pres)
         classes_arg, pres = _resolve_cls(classes, pres)
         params = self.default_params().update(params)
         tag = from_prior(
-            expression.tag,
+            gct.tag,
             tag,
             stage=Stage.ANALYSIS,
             method=Method.GSEA,
@@ -199,7 +307,9 @@ class Gseapy:
             param="gsea",
         )
 
-        outdir_path = Path(outdir or self.default_outdir("gsea", expression.root))
+        outdir_path = Path(
+            outdir or self.default_outdir("gsea", gct.root)
+        )  # noqa: E501
 
         # determinants = (
         #     str(permutation_type),
@@ -216,8 +326,10 @@ class Gseapy:
 
         @depends(_run_gsea)
         def _run():
+            gct_file = gct.primary.resolve()
             return _run_gsea(
-                expression_file=expression.file,
+                name=name,
+                expression_file=gct_file,
                 gene_sets_arg=gene_sets_arg,
                 cls_arg=classes_arg,
                 outdir=outdir_path,
@@ -230,19 +342,24 @@ class Gseapy:
                 seed=params.seed,
             )
 
-        runner = Runnable(_run, display=f"gsea({expression.name})")
-        key, name = generate_element_key_name(tag, self.version_name)
-        artifacts = {
-            "tsv": outdir_path / f"check_real_outout",
-        }
+        runner = Runnable(_run, display=f"gsea({gct.name})")
+        key, name = generate_element_key_name(tag, "gseapy", subroutine="gsea")
+        artifacts = ArtifactSet(
+            outdir_path / "gseapy.phenotype.gsea.report.csv",
+            primary_name="csv",
+            cls=outdir_path / "group.cls",
+            rnk=outdir_path / "gsea_data.rnk",
+            gmt=outdir_path / "gene_sets.gmt",
+        )
         return Element(
             key=key,
             run=runner,
             tag=tag,
             artifacts=artifacts,
-            inputs=(expression.file,),
+            inputs=(),
             determinants=determinants,
             pres=tuple(pres),
+            name=name,
         )
 
     # ------------------------------------------------------------------
@@ -265,7 +382,7 @@ class Gseapy:
         max_size: int = DEFAULT_MAX_SIZE,
         weight: float = 1.0,
         seed: int = DEFAULT_SEED,
-    ) -> TableElement:
+    ) -> Element:
         """Pre-ranked GSEA — the standard workflow after DESeq2/edgeR.
 
         Parameters
@@ -295,8 +412,8 @@ class Gseapy:
 
         Returns
         -------
-        TableElement
-            ``tsv`` / ``parquet`` with GSEA result columns (es, nes, pval,
+        Element
+            ``tsv`` with GSEA result columns (es, nes, pval,
             fdr, …).
         """
         pres: list[Element] = [ranking]
@@ -313,8 +430,10 @@ class Gseapy:
             param="prerank",
         )
 
-        output_dir = Path(outdir or self.default_outdir("prerank", ranking.root))
-
+        output_dir = Path(
+            outdir or self.default_outdir("prerank", ranking.root)
+        )  # noqa: E501
+        outfile = output_dir / "check_real_outout"
         determinants = (
             str(gene_col),
             str(stat_col),
@@ -341,16 +460,19 @@ class Gseapy:
             )
 
         runner = Runnable(_run, display=f"prerank({ranking.name})")
-
-        return TableElement(
-            source=runner,
+        artifacts = ArtifactSet(outfile)
+        key, name = generate_element_key_name(
+            tag, "gseapy", subroutine="prerank"
+        )  # noqa: E501
+        return Element(
+            key=key,
+            run=runner,
             tag=tag,
-            outdir=output_dir,
-            filename=filename,
-            mode="tsv",
+            artifacts=artifacts,
             determinants=determinants,
             inputs=(ranking.tsv,),
             pres=tuple(pres),
+            name=name,
         )
 
     # ------------------------------------------------------------------
@@ -369,7 +491,7 @@ class Gseapy:
         gene_col: str | None = "id",
         organism: str = "Human",
         cutoff: float = 0.05,
-    ) -> TableElement:
+    ) -> Element:
         """Over-representation analysis (ORA) via Enrichr.
 
         Parameters
@@ -418,7 +540,9 @@ class Gseapy:
             param="enrichr",
         )
 
-        outdir_path = Path(outdir or self.default_outdir("enrichr", gene_list.root))
+        outdir_path = Path(
+            outdir or self.default_outdir("enrichr", gene_list.root)
+        )  # noqa: E501
 
         determinants = (
             str(organism),
@@ -437,18 +561,22 @@ class Gseapy:
                 cutoff=cutoff,
             )
 
-        source = Runnable(_run, display=f"enrichr({gene_list.name})")
+        run = Runnable(_run, display=f"enrichr({gene_list.name})")
 
         inputs = (Path(gene_list.tsv),) if hasattr(gene_list, "tsv") else ()
-        return TableElement(
-            source,
+        key, name = generate_element_key_name(
+            tag, "gseapy", subroutine="enrichr"
+        )  # noqa: E501
+        artifacts = ArtifactSet(outdir_path / "check_real_outout")
+        return Element(
+            key=key,
+            run=run,
             tag=tag,
-            outdir=outdir_path,
-            filename=filename,
-            mode="tsv",
+            artifacts=artifacts,
             inputs=inputs,
             determinants=determinants,
             pres=tuple(pres),
+            name=name,
         )
 
 
@@ -458,7 +586,7 @@ class Gseapy:
 
 
 class MSigDB:
-    """Download and manage MSigDB gene sets as pipeline :class:`FileElement`\\ s.
+    """Download and manage MSigDB gene sets as pipeline :class:`Element`.
 
     MSigDB organises gene sets into *collections*:
 
@@ -502,7 +630,7 @@ class MSigDB:
     def __init__(
         self,
         cache_dir: Path | str | None = None,
-        species: Species = Species.Mus_musculus,
+        species: Species = Species.Homo_sapiens,
         version: str = "2026.1",
     ) -> None:
         """
@@ -519,22 +647,22 @@ class MSigDB:
 
     @property
     def url(self) -> str:
-        return f"https://data.broadinstitute.org/gsea-msigdb/msigdb/release/{self._version}.{self._species_short}"
+        return f"https://data.broadinstitute.org/gsea-msigdb/msigdb/release/{self._version}.{self._species_short}"  # noqa: E501
 
     @property
     def collections_files(self) -> dict[str, str]:
         if self._species == "Homo_sapiens":
             return {
-                "H": f"h.all.v{self._version}.{self._species_short}.symbols.gmt",
-                "C1": f"c1.all.v{self._version}.{self._species_short}.symbols.gmt",
-                "C2": f"c2.all.v{self._version}.{self._species_short}.symbols.gmt",
-                "C3": f"c3.all.v{self._version}.{self._species_short}.symbols.gmt",
-                "C4": f"c4.all.v{self._version}.{self._species_short}.symbols.gmt",
-                "C5": f"c5.all.v{self._version}.{self._species_short}.symbols.gmt",
-                "C6": f"c6.all.v{self._version}.{self._species_short}.symbols.gmt",
-                "C7": f"c7.all.v{self._version}.{self._species_short}.symbols.gmt",
-                "C8": f"c8.all.v{self._version}.{self._species_short}.symbols.gmt",
-                "C9": f"c9.all.v{self._version}.{self._species_short}.symbols.gmt",
+                "H": f"h.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
+                "C1": f"c1.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
+                "C2": f"c2.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
+                "C3": f"c3.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
+                "C4": f"c4.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
+                "C5": f"c5.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
+                "C6": f"c6.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
+                "C7": f"c7.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
+                "C8": f"c8.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
+                "C9": f"c9.all.v{self._version}.{self._species_short}.symbols.gmt",  # noqa: E501
             }
         else:
             # Mouse collections
@@ -569,7 +697,7 @@ class MSigDB:
         *,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
-    ) -> FileElement:
+    ) -> Element:
         """Download a MSigDB gene-set collection as a GMT file.
 
         If the file already exists (signature matches) the download is
@@ -585,7 +713,7 @@ class MSigDB:
 
         Returns
         -------
-        FileElement
+        Element
             Points to the local GMT file.
         """
 
@@ -622,23 +750,29 @@ class MSigDB:
             )
 
         runner = Runnable(_run, display=f"msigdb.download({collection_key})")
-
-        return FileElement(
-            filepath=gmt_path,
-            runner=runner,
+        artifacts = ArtifactSet(gmt_path)
+        key, name = generate_element_key_name(
+            tag, "MSigDB", subroutine="download"
+        )  # noqa: E501
+        return Element(
+            key,
+            runner,
             tag=tag,
-            root=collection_key,
+            artifacts=artifacts,
+            inputs=(),
+            determinants=(collection_key,),
+            pres=(),
         )
 
     @element
     def merge(
         self,
-        gmts: Iterable[FileElement],
+        gmts: Iterable[Element],
         *,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
-    ) -> FileElement:
+    ) -> Element:
         """Merge multiple MSigDB GMT files into a single GMT file.
 
         If the file already exists (signature matches) the merge is
@@ -646,7 +780,7 @@ class MSigDB:
 
         Parameters
         ----------
-        gmts : List[FileElement]
+        gmts : Iterable[Element]
             List of GMT files to merge.
         tag : PartialElementTag | ElementTag | None
             Optional tag override.
@@ -657,7 +791,7 @@ class MSigDB:
 
         Returns
         -------
-        FileElement
+        Element
             Points to the local GMT file.
         """
         first_element = next(iter(gmts), None)
@@ -678,20 +812,24 @@ class MSigDB:
 
         @depends(_download_gmt, concat_files)
         def _run():
-            concat_files(gmt_path, *(element.file for element in gmts))
+            concat_files(
+                gmt_path, *(element.primary.resolve() for element in gmts)
+            )  # noqa: E501
 
         spec = CallSpec(
             path=("MsigDB", "merge"),
             args=(gmts,),
         ).render()
         runner = Runnable(_run, display=spec)
-
-        return FileElement(
-            filepath=gmt_path,
-            runner=runner,
+        key, name = generate_element_key_name(tag, "MSigDB", subroutine="merge")
+        return Element(
+            key=key,
+            run=runner,
             tag=tag,
-            root=root,
+            artifacts=ArtifactSet(gmt_path),
+            inputs=tuple(element.primary.resolve() for element in gmts),
             pres=tuple(gmts),
+            name=name,
         )
 
     @element
@@ -702,7 +840,7 @@ class MSigDB:
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
-    ) -> FileElement:
+    ) -> Element:
         """
         Download and merge multiple MSigDB collections into a single GMT file.
 
@@ -719,34 +857,79 @@ class MSigDB:
 
         Returns
         -------
-        FileElement
+        Element
             Points to the local GMT file.
         """
-        gmts = [self.download(collection, outdir=outdir) for collection in collections]
+        gmts = [
+            self.download(collection, outdir=outdir)
+            for collection in collections  # noqa: E501
+        ]  # noqa: E501
 
         return self.merge(gmts, tag=tag, outdir=outdir, filename=filename)
+
+    def default_HS(self) -> Element:
+        """
+            Points to the default Homo_sapiens MSigDB Hallmark gene set
+            collection we mostly use in our analyses.
+
+        Returns
+        -------
+        Element
+            An Element of H, C2, C6, C7 geneset in a single gmt.
+        """
+        return self.collections(
+            ["H", "C2", "C6", "C7"],
+            tag=PTag(
+                stage=Stage.INPUT,
+                method=Method.MSIGDB,
+                state=State.MERGED,
+                ext="gmt",
+            ),
+        )
+
+    def default_Mm(self) -> Element:
+        """
+            Points to the default Mus_musculus MSigDB Hallmark gene set
+            collection we mostly use in our analyses.
+
+        Returns
+        -------
+        Element
+            An Element of MH, M2, M6, M7 geneset in a single gmt.
+        """
+        return self.collections(
+            ["MH", "M2", "M6", "M7"],
+            tag=PTag(
+                stage=Stage.INPUT,
+                method=Method.MSIGDB,
+                state=State.MERGED,
+                ext="gmt",
+            ),
+        )
 
     @element
     def select(
         self,
-        gmt: FileElement,
+        gmt: Element,
         genesets: Iterable[str],
         *,
         root: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
-    ) -> FileElement:
+    ) -> Element:
         """
-        Select and merge single MSigDB gene sets from a GMT file into a new GMT file.
+        Select and merge single MSigDB gene sets from a GMT file into a new GMT
+        file.
 
         Gene set ids from MSigSB must be prefixed with the MSigSB collection
         name e.g. "H.HALLMARK_ADIPOGENESIS, C2.KEGG_P53_SIGNALLING". The input
-        GMT file can be obtained from the download method or any custom GMT file.
+        GMT file can be obtained from the download method or any custom GMT
+        file.
 
         Parameters
         ----------
-        gmt : FileElement
+        gmt : Element
             Input GMT file containing the gene sets to select from.
         genesets : Iterable[str]
             List of MSigDB gene sets to select and merge.
@@ -759,7 +942,7 @@ class MSigDB:
 
         Returns
         -------
-        FileElement
+        Element
             Points to the local GMT file.
         """
         if not genesets:
@@ -780,24 +963,29 @@ class MSigDB:
         @depends(_select_gene_sets)
         def _run():
             _select_gene_sets(
-                input_gmt=Path(gmt.file),
+                input_gmt=gmt.primary.resolve(),
                 selected_genesets=genesets,
                 output_gmt=gmt_path,
             )
 
         spec = CallSpec(
-            path=_("MsigDB", "select"),
+            path=("MsigDB", "select"),
             args=(gmt, genesets),
         ).render()
         runner = Runnable(_run, display=spec)
-
-        return FileElement(
-            filepath=gmt_path,
-            runner=runner,
-            determinants=tuple(genesets),
+        key, name = generate_element_key_name(
+            tag, "MSigDB", subroutine="select"
+        )  # noqa: E501
+        artifacts = ArtifactSet(gmt_path)
+        return Element(
+            key=key,
+            run=runner,
             tag=tag,
-            root=root,
+            artifacts=artifacts,
+            inputs=(gmt.primary.resolve(),),
+            determinants=tuple(genesets),
             pres=(gmt,),
+            name=name,
         )
 
     @element
@@ -809,21 +997,22 @@ class MSigDB:
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         filename: Path | str | None = None,
-    ) -> FileElement:
+    ) -> Element:
         """
-        Download and merge single MSigDB gene sets and self-compiled custom gene sets
-        into a single GMT file.
+        Download and merge single MSigDB gene sets and self-compiled custom gene
+        sets into a single GMT file.
 
         Gene set ids from MSigSB must be prefixed with the MSigSB collection
-        name e.g. "H.HALLMARK_ADIPOGENESIS, C2.KEGG_P53_SIGNALLING". If self-defined
-        custom gene sets are to be used, we assume that instead of ids to be retrieved,
-        ready FileElements representing the input files are supplied.
+        name e.g. "H.HALLMARK_ADIPOGENESIS, C2.KEGG_P53_SIGNALLING". If
+        self-defined custom gene sets are to be used, we assume that instead of
+        ids to be retrieved, ready FileElements representing the input files are
+        supplied.
 
         Parameters
         ----------
         genesets_msig : Iterable[str]
             List of MSigDB gene sets to download and merge.
-        genesets_custom : Iterable[FileElement]
+        genesets_custom : Iterable[Element]
             List of custom gene sets to merge.
         tag : PartialElementTag | ElementTag | None, optional
             Optional tag override, by default None
@@ -834,12 +1023,12 @@ class MSigDB:
 
         Returns
         -------
-        FileElement
+        Element
             Points to the local GMT file.
         """
         if genesets_msig is None and genesets_custom is None:
             raise ValueError(
-                "At least one of genesets_msig or genesets_custom must be provided."
+                "At least one of genesets_msig or genesets_custom must be provided."  # noqa: E501
             )
 
         genesets_from_msig = {}
@@ -847,7 +1036,7 @@ class MSigDB:
             for geneset_id in genesets_msig:
                 if "." not in geneset_id:
                     raise ValueError(
-                        f"Invalid MSigDB gene set id: {geneset_id!r}.  Must be prefixed with collection name, e.g. 'H.HALLMARK_ADIPOGENESIS'."
+                        f"Invalid MSigDB gene set id: {geneset_id!r}.  Must be prefixed with collection name, e.g. 'H.HALLMARK_ADIPOGENESIS'."  # noqa: E501
                     )
                 splits = geneset_id.split(".")
                 collection, gene_set = splits[0], splits[1]
@@ -863,7 +1052,7 @@ class MSigDB:
         if genesets_custom:
             gmts.extend(
                 [genesets_custom]
-                if isinstance(genesets_custom, FileElement)
+                if isinstance(genesets_custom, Element)
                 else genesets_custom
             )
         # retrieve the relevant sets for each collection and merge them
@@ -889,7 +1078,8 @@ class MSigDB:
         ----------
         gmt : Element
             Element whose ``gmt`` artifact points to the source GMT file
-            (gene symbols).  Typically the output of :meth:`download_as_element`.
+            (gene symbols).
+            Typically the output of :meth:`download_as_element`.
         id_map : Element
             Element whose ``tsv`` artifact is a TSV with at minimum two
             columns:
@@ -960,6 +1150,7 @@ class MSigDB:
 
 def _run_gsea(
     *,
+    name: str,
     expression_file: Path,
     gene_sets_arg,
     cls_arg,
@@ -979,6 +1170,7 @@ def _run_gsea(
         expr_df = expr_df.set_index(gene_col)
 
     print(gene_sets_arg)
+    print(cls_arg)
     res = gp.gsea(
         data=expr_df,
         gene_sets=gene_sets_arg,
@@ -989,12 +1181,13 @@ def _run_gsea(
         max_size=max_size,
         weight=weight,
         outdir=str(outdir),
+        name=name,
         seed=seed,
         verbose=True,
     )
 
     df = res.res2d
-    logger.info("GSEA done — %d terms in %s", len(df), out_tsv)
+    logger.info("GSEA done — %d terms", len(df))
     return df
 
 
@@ -1012,7 +1205,7 @@ def _run_prerank(
     seed: int,
 ) -> None:
 
-    rnk = pd.read_csv(ranking_tsv, sep="\t")[[gene_col, stat_col]]
+    rnk = pd.read_csv(ranking_tsv, sep="\t")
     rnk = rnk.sort_values(stat_col, ascending=False)
 
     res = gp.prerank(
@@ -1055,7 +1248,7 @@ def _run_enrichr(
     else:
         raise ValueError(
             "enrichr: could not resolve gene list from element "
-            f"{gene_list_element.name!r}.  Pass gene_col if the element has a tsv."
+            f"{gene_list_element.name!r}.  Pass gene_col if the element has a tsv."  # noqa: E501
         )
 
     res = gp.enrichr(
@@ -1148,7 +1341,9 @@ def _translate_gmt_to_ensembl(
         )
 
     out_gmt.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
-    logger.info("Wrote translated GMT → %s (%d gene sets)", out_gmt, len(out_lines))
+    logger.info(
+        "Wrote translated GMT → %s (%d gene sets)", out_gmt, len(out_lines)
+    )  # noqa: E501
 
 
 ###############################################################################
@@ -1168,7 +1363,7 @@ def _resolve_gene_sets(
         Value to pass to gseapy (path string, library name, or list).
     """
     if isinstance(gene_sets, Element):
-        gmt_path = Path(gene_sets.gmt)
+        gmt_path = Path(gene_sets.primary.resolve())
         pres.append(gene_sets)
         return str(gmt_path), pres
     elif isinstance(gene_sets, (list, tuple)):
@@ -1179,7 +1374,7 @@ def _resolve_gene_sets(
 
 def _resolve_cls(
     classes: Sequence[str] | FileElement,
-    pres: list,
+    pres: list[Element],
 ) -> tuple[Any, list[Element]]:
     """Normalise the *classes* argument for gseapy.gsea.
 
@@ -1187,10 +1382,8 @@ def _resolve_cls(
     -------
     cls_arg
         Value for gseapy (list of labels or path string).
-    inputs
-        List of :class:`Path` objects.
-    cls_pres
-        Additional Element prerequisites.
+    pres
+        List of :class:`Element` objects.
     """
     if isinstance(classes, Element):
         cls_path = Path(classes.path)

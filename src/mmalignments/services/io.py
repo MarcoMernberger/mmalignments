@@ -7,9 +7,9 @@ import json
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
-import pandas as pd
-import pyarrow.parquet as pq
-from pandas import DataFrame
+import pandas as pd  # type: ignore[import]
+import pyarrow.parquet as pq  # type: ignore[import]
+from pandas import DataFrame  # type: ignore[import]
 
 if TYPE_CHECKING:
     from artifacts import TableArtifact  # type: ignore[import]
@@ -310,7 +310,6 @@ def write_frame(df: DataFrame, path: Path, **kwargs) -> None:
         df.to_csv(path, **params)
     elif ext == ".parquet":
         params.pop("sep", None)
-        print(df.head())
         df.to_parquet(path, **params)
     elif ext in (".xlsx", ".xls"):
         params.pop("sep", None)

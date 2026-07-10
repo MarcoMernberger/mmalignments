@@ -26,6 +26,7 @@ from .spec import (
     DynamicSelectorSpec,
 )
 from .plots import PLOT_REGISTRY, TraceProcessor
+from typing import Mapping
 
 # Same ordering Plotly Express uses by default, so "auto" mode looks
 # identical to what you'd get without any color_map — just stable across
@@ -50,7 +51,7 @@ _DEFAULT_PALETTE = [
 
 def build_color_maps(
     layers: list[PlotLayer],
-    data: dict[str, pd.DataFrame],
+    data: Mapping[str, pd.DataFrame],
     explicit_maps: dict[str, dict[str, dict]] | None = None,
 ) -> None:
     """
@@ -138,9 +139,15 @@ def _fresh_param_copy(p: param.Parameter) -> param.Parameter:
     "unexpected keyword argument 'names'".
     """
     cls = type(p)
-    exclude = {"name", "owner", "watchers", "names"}
+    if isinstance(p, param.Action):
+        return param.Action(
+            default=p.default,
+            label=p.label,
+            doc=p.doc,
+            precedence=p.precedence,
+        )
+    exclude = {"name", "owner", "watchers", "names", "length"}
     rename = {"_label": "label", "_objects": "objects"}
-
     kwargs: dict = {}
     for slot in cls._all_slots_:
         if slot in exclude:
@@ -153,7 +160,19 @@ def _fresh_param_copy(p: param.Parameter) -> param.Parameter:
         if key == "default_factory" and value is None:
             continue  # the one slot where None must be omitted, not passed
         kwargs[key] = value
-    return cls(**kwargs)
+
+    if isinstance(p, param.Selector):
+        kwargs["objects"] = (
+            p._objects
+        )  # use the raw _objects, not the derived .objects property
+    try:
+        res = cls(**kwargs)
+    except Exception as e:
+        print(p.name)
+        print(p)
+        print(kwargs)
+        raise e
+    return res
 
 
 ################################################################################
@@ -165,7 +184,7 @@ def _fresh_param_copy(p: param.Parameter) -> param.Parameter:
 
 def populate_dynamic_selectors(
     combined_cls: type[Parameterized],
-    data: pd.DataFrame,
+    data: Mapping[str, pd.DataFrame],
     result: AnalysisResult | None,
     shared_roles: dict[str, str],
 ) -> None:
@@ -214,7 +233,7 @@ def populate_dynamic_selectors(
                 )
             source_df = result[dyn_spec.source]
         else:
-            source_df = data
+            source_df = data[dyn_spec.source]
 
         if column not in source_df.columns:
             raise ValueError(
@@ -267,7 +286,6 @@ def build_combined_state_cls(
     # pname -> (sidebar_group, source class) for extra_state params only
     state_groups: dict[str, str] = {}
     dynamic_specs: list[tuple[str, DynamicSelectorSpec]] = []  # (pname, spec)
-
     for layer in layers:
         plot_cls = PLOT_REGISTRY[layer.plot_type]
         state_cls = plot_cls.state_cls
@@ -282,16 +300,23 @@ def build_combined_state_cls(
         layer_param_map[layer.alias] = own_map
 
     for extra_cls in extra_state:
+
         group = getattr(extra_cls, "sidebar_group", "General")
+        own_map: dict[str, str] = {}
         for pname in extra_cls.param:
             if pname == "name" or pname in namespace:
                 continue
-            namespace[pname] = _fresh_param_copy(extra_cls.param[pname])
-            state_groups[pname] = group
+            ns_name = f"{group}_{pname}"
+            namespace[ns_name] = _fresh_param_copy(extra_cls.param[pname])
+            # print(f"Adding extra_state param {pname} as {ns_name} in group {group}")
+            state_groups[ns_name] = group
+            own_map[pname] = ns_name
 
         if issubclass(extra_cls, DynamicPlotState):
             for dyn_spec in extra_cls.DYNAMIC_SELECTORS:
                 dynamic_specs.append((dyn_spec.param_name, dyn_spec))
+        if group in layer_param_map:
+            layer_param_map[group].update(own_map)
 
     combined_cls = type("CombinedState", (Parameterized,), namespace)
     combined_cls._layer_param_map = layer_param_map

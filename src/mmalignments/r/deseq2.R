@@ -124,13 +124,6 @@ deseq2_unpaired <- function(
     model_conditions,
     column_map = list()
 ) {
-    cat("=== counts_df ===\n")
-    print(head(counts_df))
-    cat("\nDimensions:", nrow(counts_df), "genes x", ncol(counts_df), "samples\n")
-    cat("Columns:\n")
-    print(colnames(counts_df))
-    cat("First gene IDs:\n")
-    print(head(rownames(counts_df)))
 
     # build sample metadata
     all_samples <- c()
@@ -141,15 +134,6 @@ deseq2_unpaired <- function(
         all_samples <- c(all_samples, cols)
         all_labels  <- c(all_labels, rep(cond, length(cols)))
     }
-
-    cat("\n=== model_conditions ===\n")
-    print(model_conditions)
-
-    cat("\n=== all_samples ===\n")
-    print(all_samples)
-
-    cat("\n=== missing samples ===\n")
-    print(setdiff(all_samples, colnames(counts_df)))
 
     extra_levels <- setdiff(
         names(model_conditions),
@@ -165,7 +149,6 @@ deseq2_unpaired <- function(
     )
 
     count_mat <- round(as.matrix(counts_df[, all_samples, drop = FALSE]))
-
     dds <- DESeqDataSetFromMatrix(
         countData = count_mat,
         colData   = col_data,
@@ -183,16 +166,7 @@ deseq2_unpaired <- function(
             colnames(df_res)[colnames(df_res) == r_col] <- pipeline_col
         }
     }
-    sf <- sizeFactors(dds)
-    result_bundle <- list(
-        results = as.data.frame(res),
-        size_factors = as.data.frame(
-            sample = names(sizeFactors(dds)),
-            size_factor = as.numeric(sizeFactors(dds))
-        )
-    )
-    # df_res
-    return(result_bundle)
+    return(df_res)
 }
 
 # ---------------------------------------------------------------------------

@@ -20,12 +20,13 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import param
+import param  # type: ignore[import]
 import plotly.colors
 import plotly.express as px
 import plotly.graph_objects as go
 from pandas import DataFrame, Series
-
+from param import Parameterized  # type: ignore[import]
+from textwrap import shorten
 from .spec import (
     BasePlot,
     DynamicPlotState,
@@ -34,6 +35,8 @@ from .spec import (
     PlotState,
     RoleSpec,
 )
+
+from .actions import action_export_figure, action_export_data, action_export_app
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TraceProcessor — shared appearance logic, gated by trace_capabilities
@@ -74,12 +77,12 @@ class TraceProcessor:
         return fig
 
     def _apply_labels(self, fig, combined_state) -> go.Figure:
-        if getattr(combined_state, "appearance_xlabel", None):
-            fig.update_xaxes(title=combined_state.appearance_xlabel)
-        if getattr(combined_state, "appearance_ylabel", None):
-            fig.update_yaxes(title=combined_state.appearance_ylabel)
-        if getattr(combined_state, "appearance_title", None):
-            fig.update_layout(title=combined_state.appearance_title)
+        if getattr(combined_state, "Appearance_appearance_xlabel", None):
+            fig.update_xaxes(title=combined_state.Appearance_appearance_xlabel)
+        if getattr(combined_state, "Appearance_appearance_ylabel", None):
+            fig.update_yaxes(title=combined_state.Appearance_appearance_ylabel)
+        if getattr(combined_state, "Appearance_appearance_title", None):
+            fig.update_layout(title=combined_state.Appearance_appearance_title)
         return fig
 
     def _update_tick_labels(
@@ -88,7 +91,7 @@ class TraceProcessor:
         """Relabel x-ticks using a different column than the one plotted
         (e.g. plot numeric `position`, show `sample` as tick text). Uses
         the FIRST layer's source frame as the reference for tick values."""
-        xtick_col = getattr(combined_state, "appearance_xtick", None)
+        xtick_col = getattr(combined_state, "Appearance_appearance_xtick", None)
         if xtick_col is None or not layers:
             return fig
         df = result[layers[0].source]
@@ -662,12 +665,29 @@ class VolcanoPlotState(PlotState):
     """Layout knobs for VolcanoPlot. NOT data roles — those are in PlotLayer."""
 
     sidebar_group = "Layer"
-
-    marker_size = param.Integer(default=8, bounds=(1, 50), label="Marker Size")
-    marker_linewidth = param.Number(
-        default=1.0, bounds=(0.0, 10.0), label="Marker Edge Width"
+    x_score = param.Selector(
+        default="log2FC",
+        objects=["log2FC"],
+        label="X-Axis score",
     )
-    marker_edgecolor = param.Color(default="#000000", label="Marker Edge Color")
+
+    y_score = param.Selector(
+        default="-log10 P-value",
+        objects=["FDR", "P-value", "-log10 FDR", "-log10 P-value"],
+        label="Y-Axis score",
+    )
+    fdr_threshold = param.Number(default=0.05, bounds=(0.0, 1.0), label="FDR Threshold")
+    logfc_threshold = param.Number(
+        default=1.0, bounds=(0.0, 10.0), label="Log2 Fold Change Threshold"
+    )
+    highlight_significant = param.Boolean(
+        default=True, label="Highlight Significant Points"
+    )
+    marker_size = param.Integer(default=4, bounds=(1, 50), label="Marker Size")
+    marker_linewidth = param.Number(
+        default=0, bounds=(0.0, 10.0), label="Marker Line Width"
+    )
+    marker_edgecolor = param.Color(default="#000000", label="Marker Line Color")
     marker_opacity = param.Number(default=1.0, bounds=(0.0, 1.0), label="Opacity")
     threshold_linewidth = param.Number(
         default=1.0, bounds=(0.0, 10.0), label="Threshold Line Width"
@@ -677,19 +697,10 @@ class VolcanoPlotState(PlotState):
         objects=["solid", "dot", "dash", "longdash", "dashdot", "longdashdot"],
         label="Threshold Line Style",
     )
-    pvalue_threshold = param.Number(
-        default=0.05, bounds=(0.0, 1.0), label="P-value Threshold"
-    )
-
     show_threshold_lines = param.Boolean(default=True, label="Show Threshold Lines")
-    highlight_significant = param.Boolean(
-        default=True, label="Highlight Significant Points"
-    )
-
     positive_color = param.Color(default="#d62728", label="Upregulated Color")
     negative_color = param.Color(default="#1f77b4", label="Downregulated Color")
     neutral_color = param.Color(default="#7f7f7f", label="Neutral Color")
-
     section = None
 
 
@@ -727,45 +738,50 @@ class VolcanoPlot(BasePlot):
         roles = layer.roles
         kwargs = {}
 
+        x = self.get_param_from_roles(roles["x"], state)
+        y = self.get_param_from_roles(roles["y"], state)
         # color scheme
         if "color" in roles:
-            kwargs["color"] = roles["color"]
-            color_map = layer.color_maps.get("color")
-            if color_map:
-                kwargs["color_discrete_map"] = color_map
-
+            color = self.get_param_from_roles(roles["color"], state)
+            kwargs["color"] = color
+            # color_map = layer.color_maps.get("color")
+            color_map = {
+                "up": state.positive_color,
+                "down": state.negative_color,
+                "not significant": state.neutral_color,
+            }
+            kwargs["color_discrete_map"] = color_map
         # add hover
         if layer.hover:
             kwargs["hover_data"] = layer.hover
-
         # scatter
-        new_fig = px.scatter(df, x=roles["x"], y=roles["y"], **kwargs)
+        new_fig = px.scatter(df, x=x, y=y, title="Volcano", **kwargs)
 
         # threshold lines
         if state.show_threshold_lines:
             new_fig.add_shape(
                 type="line",
-                x0=-getattr(state, f"{layer.alias}_log_fc_threshold"),
-                x1=-getattr(state, f"{layer.alias}_log_fc_threshold"),
+                x0=-state.logfc_threshold,
+                x1=-state.logfc_threshold,
                 y0=0,
-                y1=df[roles["y"]].max(),
+                y1=df[y].max(),
                 line={"dash": state.threshold_line, "width": state.threshold_linewidth},
             )
             new_fig.add_shape(
                 type="line",
-                x0=getattr(state, f"{layer.alias}_log_fc_threshold"),
-                x1=getattr(state, f"{layer.alias}_log_fc_threshold"),
-                y1=df[roles["y"]].max(),
+                x0=state.logfc_threshold,
+                x1=state.logfc_threshold,
+                y1=df[y].max(),
                 y0=0,
                 line={"dash": state.threshold_line, "width": state.threshold_linewidth},
             )
 
             new_fig.add_shape(
                 type="line",
-                x0=df[roles["x"]].min(),
-                x1=df[roles["x"]].max(),
-                y0=-np.log10(getattr(state, f"{layer.alias}_pvalue_threshold")),
-                y1=-np.log10(getattr(state, f"{layer.alias}_pvalue_threshold")),
+                x0=df[x].min(),
+                x1=df[x].max(),
+                y0=-np.log10(state.fdr_threshold),
+                y1=-np.log10(state.fdr_threshold),
                 line={"dash": state.threshold_line, "width": state.threshold_linewidth},
             )
         # marker styling
@@ -779,8 +795,18 @@ class VolcanoPlot(BasePlot):
                 "opacity": state.marker_opacity,
             }
         )
+
         # processor hooks
         new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+
+        if state.highlight_significant:  # this must be after the general trace apply
+            new_fig.update_traces(
+                selector=lambda t: t.name in {"up", "down"},
+                marker={
+                    "size": state.marker_size * 1.5,
+                    "opacity": 1.0,
+                },
+            )
 
         return _merge(fig, new_fig)
 
@@ -795,6 +821,29 @@ class HeatmapPlotState(PlotState):
 
     sidebar_group = "Layer"
 
+    gene_filter = param.String(
+        default=None,
+        label="Gene Filter",
+    )
+    sample_filter = param.String(
+        default=None,
+        label="Sample Filter",
+    )
+    logfc_threshold = param.Number(
+        default=1.0,
+        bounds=(0.0, 10.0),
+        label="Log2 Fold Change Threshold",
+    )
+    FDR_threshold = param.Number(
+        default=0.05,
+        bounds=(0.0, 1.0),
+        label="FDR Threshold",
+    )
+    direction_filter = param.Selector(
+        default=None,
+        objects=["not significant", "up", "down", None],
+        label="Comparison Filter",
+    )
     colorscale = param.Selector(
         default="RdBu",
         objects=[
@@ -812,11 +861,9 @@ class HeatmapPlotState(PlotState):
 
     zmin = param.Number(default=None, allow_None=True, label="Z Min")
     zmax = param.Number(default=None, allow_None=True, label="Z Max")
-
     show_values = param.Boolean(default=False, label="Show Values in Cells")
 
     x_tickangle = param.Integer(default=0, bounds=(0, 90), label="X Tick Angle")
-
     section = None
 
 
@@ -853,10 +900,13 @@ class HeatmapPlot(BasePlot):
         roles = layer.roles
 
         # --- reshape to matrix form ---
+        index = self.get_param_from_roles(roles["y"], state)
+        columns = self.get_param_from_roles(roles["x"], state)
+        values = self.get_param_from_roles(roles["z"], state)
         pivot = df.pivot(
-            index=roles["y"],
-            columns=roles["x"],
-            values=roles["z"],
+            index=index,
+            columns=columns,
+            values=values,
         )
 
         z = pivot.values
@@ -872,32 +922,33 @@ class HeatmapPlot(BasePlot):
                 colorscale=state.colorscale,
                 zmin=state.zmin,
                 zmax=state.zmax,
-                colorbar=dict(title=roles["z"]),
+                colorbar={"title": "values"},
+                title="Heatmap",
             )
         )
 
         # --- optional annotations ---
-        if state.show_values:
+        if state.show_values and z.size <= 2500:
             annotations = []
             for i, yi in enumerate(y):
                 for j, xj in enumerate(x):
                     val = z[i][j]
                     if pd.notnull(val):
                         annotations.append(
-                            dict(
-                                x=xj,
-                                y=yi,
-                                text=str(round(val, 2)),
-                                showarrow=False,
-                                font=dict(color="black", size=10),
-                            )
+                            {
+                                "x": xj,
+                                "y": yi,
+                                "text": str(round(val, 2)),
+                                "showarrow": False,
+                                "font": {"color": "black", "size": 10},
+                            }
                         )
 
             new_fig.update_layout(annotations=annotations)
 
         # --- layout tweaks ---
         new_fig.update_layout(
-            xaxis=dict(tickangle=state.x_tickangle),
+            xaxis={"tickangle": state.x_tickangle},
         )
 
         # --- processor hooks ---
@@ -915,14 +966,52 @@ class GSEADotplotState(PlotState):
 
     sidebar_group = "Layer"
 
-    dot_size = param.Integer(default=10, bounds=(1, 50), label="Dot Size")
-    show_colorbar = param.Boolean(default=True, label="Show Colorbar")
-
+    top_x = param.Integer(default=20, bounds=(1, None), label="Top X Terms")
+    fdr_threshold = param.Number(
+        default=1,
+        bounds=(0.0, 1.0),
+        label="FDR Threshold",
+    )
+    geneset_filter = param.String(
+        default="",
+        label="Filter Gene Sets",
+        doc="Filter gene sets by name. For multiple sets provide a comma-separated list.",
+    )
+    nes_range = param.Range(
+        default=(-5.0, 5.0),
+        bounds=(-5.0, 5.0),
+        doc="Range of normalized enrichment scores (NES) to display",
+        label="NES threshold",
+    )
+    color = param.Selector(
+        default="NES",
+        objects=["NES", "ES", "FDR q-val", "FWER p-val"],
+        label="Color by",
+    )
+    size = param.Selector(
+        default="Leading Edge %",
+        objects=["Leading Edge %", "Size", "NES", "ES", "FDR q-val", "FWER p-val"],
+        label="Size by",
+    )
+    sort_by = param.Selector(
+        default="NES",
+        objects=["FDR q-val", "NES", "ES", "NOM p-val", "FWER p-val"],
+        doc="Sort by which column in the GSEA results table.",
+        label="Sort By",
+    )
+    sort_by_ascending = param.Boolean(default=True, label="Sort Ascending")
     color_scale = param.Selector(
         default="Viridis",
         objects=["Viridis", "Cividis", "Plasma", "Inferno", "Magma", "RdBu"],
         label="Color Scale",
     )
+    show_colorbar = param.Boolean(default=True, label="Show Colorbar")
+    size_max = param.Number(
+        default=15,
+        bounds=(1, 50),
+        label="Size Max",
+    )
+    y_tickangle = param.Integer(default=0, bounds=(-75, 75), label="Y Tick Angle")
 
     section = None
 
@@ -959,21 +1048,39 @@ class GSEADotplotPlot(BasePlot):
     def render(self, df, layer, state, processor, fig=None):
 
         roles = layer.roles
-
+        x = self.get_param_from_roles(roles["x"], state)
+        y = self.get_param_from_roles(roles["y"], state)
+        size = self.get_param_from_roles(roles["size"], state)
+        color = self.get_param_from_roles(roles["color"], state)
+        kwargs = {}
+        if layer.hover:
+            kwargs["hover_data"] = layer.hover
         new_fig = px.scatter(
             df,
-            x=roles["x"],
-            y=roles["y"],
-            size=roles.get("size"),
-            color=roles.get("color"),
+            x=x,
+            y=y,
+            size=size,
+            color=color,
             color_continuous_scale=state.color_scale.lower(),
+            range_color=(df[color].min(), df[color].max()),
+            size_max=state.size_max,
+            title="GSEA",
+            **kwargs,
         )
-
+        if not state.show_colorbar:
+            new_fig.update_coloraxes(showscale=False)
         new_fig.update_traces(
-            marker=dict(
-                size=state.dot_size,
-                showscale=state.show_colorbar,
-            )
+            marker={
+                # size=df["_marker_size"],
+                "showscale": state.show_colorbar,
+            },
+            cliponaxis=False,
+        )
+        new_fig.update_layout(
+            uniformtext_minsize=8,
+            uniformtext_mode="hide",
+            showlegend=state.show_colorbar,
+            yaxis={"tickangle": state.y_tickangle},
         )
 
         new_fig = processor.apply(new_fig, state, self.trace_capabilities)
@@ -990,16 +1097,63 @@ class GSEABarplotState(PlotState):
 
     sidebar_group = "Layer"
 
+    top_x = param.Integer(default=20, bounds=(1, None), label="Top X Terms")
+    fdr_threshold = param.Number(
+        default=1,
+        bounds=(0.0, 1.0),
+        label="FDR Threshold",
+    )
+    geneset_filter = param.String(
+        default="",
+        label="Filter Gene Sets",
+        doc="Filter gene sets by name. For multiple sets provide a comma-separated list.",
+    )
+    nes_range = param.Range(
+        default=(-5.0, 5.0),
+        bounds=(-5.0, 5.0),
+        doc="Range of normalized enrichment scores (NES) to display",
+        label="NES threshold",
+    )
+    score = param.Selector(
+        default="NES",
+        objects=["NES", "ES", "FDR q-val", "FWER p-val"],
+        label="Score to display",
+    )
+
+    bar_color = param.Selector(
+        default="Leading Edge %",
+        objects=["Leading Edge %", "Size", "NES", "ES", "FDR q-val", "FWER p-val"],
+        label="Color by",
+    )
     orientation = param.Selector(
         default="h",
         objects=["h", "v"],
         label="Orientation",
     )
-
-    bar_color = param.Color(default="#1f77b4", label="Bar Color")
-
-    show_values = param.Boolean(default=False, label="Show Values")
-
+    sort_by = param.Selector(
+        default="NES",
+        objects=["FDR q-val", "NES", "ES", "NOM p-val", "FWER p-val"],
+        doc="Sort by which column in the GSEA results table.",
+        label="Sort By",
+    )
+    sort_by_ascending = param.Boolean(default=True, label="Sort Ascending")
+    y_tickangle = param.Integer(default=0, bounds=(-75, 75), label="Y Tick Angle")
+    show_values = param.Boolean(default=True, label="Show Values")
+    color_scale = param.Selector(
+        default="Viridis",
+        objects=[
+            "Viridis",
+            "Balance",
+            "Curl",
+            "Cividis",
+            "Plasma",
+            "Inferno",
+            "Magma",
+            "RdBu",
+        ],
+        label="Color Scale",
+    )
+    show_colorbar = param.Boolean(default=True, label="Show Colorbar")
     section = None
 
 
@@ -1031,21 +1185,49 @@ class GSEABarplotPlot(BasePlot):
         roles = layer.roles
 
         orientation = state.orientation
+        x = self.get_param_from_roles(roles["x"], state)
+        y = self.get_param_from_roles(roles["y"], state)
+        color = self.get_param_from_roles(roles["color"], state)
+        kwargs = {}
+        if layer.hover:
+            kwargs["hover_data"] = layer.hover
+        if state.show_values:
+            kwargs["text"] = x
+
+        color_continuous_midpoint = None
+        if color in ["FDR q-val", "FWER p-val"]:
+            color_continuous_midpoint = state.fdr_threshold
 
         new_fig = px.bar(
             df,
-            x=roles["x"] if orientation == "v" else roles["y"],
-            y=roles["y"] if orientation == "v" else roles["x"],
+            x=x if orientation == "h" else y,
+            y=y if orientation == "h" else x,
             orientation=orientation,
+            color=color,
+            color_continuous_scale=state.color_scale.lower(),
+            color_continuous_midpoint=color_continuous_midpoint,
+            title="GSEA Bar",
+            **kwargs,
         )
-
-        new_fig.update_traces(
-            marker=dict(
-                color=state.bar_color,
-            )
-        )
-
         new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+        if not state.show_colorbar:
+            new_fig.update_coloraxes(showscale=False)
+        if state.show_values:
+            new_fig.update_traces(
+                texttemplate="%{text:.2f}",
+                textposition="inside",
+                cliponaxis=False,
+            )
+        show_text = "show" if state.show_values else "hide"
+        new_fig.update_layout(
+            showlegend=False,  # state.show_colorbar,
+            yaxis={"tickangle": state.y_tickangle},
+        )
+        new_fig.update_yaxes(
+            tickmode="array",
+            tickvals=df[y],
+            ticktext=[s[: min(len(s), 40)] for s in df[y]],
+        )
 
         return _merge(fig, new_fig)
 
@@ -1150,13 +1332,23 @@ class PCAPlotState(PlotState):
 
     marker_size = param.Integer(default=8, bounds=(1, 50), label="Marker Size")
     marker_opacity = param.Number(default=0.9, bounds=(0.0, 1.0), label="Opacity")
-
     show_axes_zero = param.Boolean(default=True, label="Show Zero Axes")
 
-    color_by_explained_variance = param.Boolean(
-        default=False, label="Color by Explained Variance"
+    # color_by_explained_variance = param.Boolean(
+    #     default=False, label="Color by Explained Variance"
+    # )
+    pca_1 = param.Selector(
+        default="PC1",
+        objects=["PC1", "PC2", "PC3", "PC4", "PC5"],
+        doc="Principal component to use for the X-axis.",
+        label="X-axis Component",
     )
-
+    pca_2 = param.Selector(
+        default="PC2",
+        objects=["PC1", "PC2", "PC3", "PC4", "PC5"],
+        doc="Principal component to use for the Y-axis.",
+        label="Y-axis Component",
+    )
     section = None
 
 
@@ -1202,20 +1394,25 @@ class PCAPlot(BasePlot):
         processor,
         fig=None,
     ) -> go.Figure:
-
         roles = layer.roles
         kwargs = {}
-
+        x = self.get_param_from_roles(roles["x"], state)
+        y = self.get_param_from_roles(roles["y"], state)
         # grouping
         if "color" in roles:
-            kwargs["color"] = roles["color"]
+            color = self.get_param_from_roles(roles["color"], state)
+            kwargs["color"] = color
 
         # optional size
         if "size" in roles:
-            kwargs["size"] = roles["size"]
+            size = self.get_param_from_roles(roles["size"], state)
+            kwargs["size"] = size
+
+        if layer.hover:
+            kwargs["hover_data"] = layer.hover
 
         # base scatter
-        new_fig = px.scatter(df, x=roles["x"], y=roles["y"], **kwargs)
+        new_fig = px.scatter(df, x=x, y=y, title="PCA", **kwargs)
 
         # styling
         new_fig.update_traces(
@@ -1227,8 +1424,8 @@ class PCAPlot(BasePlot):
 
         # zero axes (classic PCA crosshair)
         if state.show_axes_zero:
-            x_min, x_max = df[roles["x"]].min(), df[roles["x"]].max()
-            y_min, y_max = df[roles["y"]].min(), df[roles["y"]].max()
+            x_min, x_max = df[x].min(), df[x].max()
+            y_min, y_max = df[y].min(), df[y].max()
 
             new_fig.add_shape(
                 type="line",
@@ -1255,6 +1452,79 @@ class PCAPlot(BasePlot):
 
 
 ################################################################################
+# Scree
+################################################################################
+class ScreePlotState(PlotState):
+    show_cumulative = param.Boolean(default=True)
+    n_components = param.Integer(default=5, bounds=(1, None))
+    bar_color = param.Color(default="#4C78A8")
+    cumulative_color = param.Color(default="#E45756")
+
+
+class ScreePlot(BasePlot):
+    ROLE_SPECS = {
+        "component": RoleSpec(
+            name="component",
+            dtype="categorical",
+            description="PC label (e.g. PC1, PC2, ...)",
+        ),
+        "variance": RoleSpec(
+            name="variance",
+            dtype="continuous",
+            description="Explained variance ratio per PC",
+        ),
+    }
+    state_cls = ScreePlotState
+    trace_capabilities = {
+        "marker.color",
+        "marker.line.width",
+        "marker.line.color",
+        "marker.opacity",
+    }
+
+    def render(
+        self,
+        df: pd.DataFrame,
+        layer,
+        state: ScreePlotState,
+        processor,
+        fig=None,
+    ) -> go.Figure:
+        roles = layer.roles
+        dff = df.head(state.n_components)
+
+        new_fig = go.Figure()
+        new_fig.add_bar(
+            x=dff[roles["component"]],
+            y=dff[roles["variance"]],
+            marker=dict(color=state.bar_color),
+            name="Explained variance",
+        )
+
+        if state.show_cumulative:
+            cum = dff[roles["variance"]].cumsum()
+            new_fig.add_scatter(
+                x=dff[roles["component"]],
+                y=cum,
+                mode="lines+markers",
+                line=dict(color=state.cumulative_color),
+                name="Cumulative",
+                yaxis="y2",
+            )
+            new_fig.update_layout(
+                yaxis2=dict(
+                    overlaying="y",
+                    side="right",
+                    range=[0, 1.05],
+                    title="Cumulative variance",
+                )
+            )
+
+        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+        return _merge(fig, new_fig)
+
+
+################################################################################
 # convenience
 ################################################################################
 
@@ -1267,13 +1537,29 @@ def _merge(fig: go.Figure | None, new_fig: go.Figure) -> go.Figure:
     return fig
 
 
+def build_pca_overview(
+    pca_scores_df: pd.DataFrame, variance_df: pd.DataFrame
+) -> pn.viewable.Viewable:
+    scatter_plot = PanelPlot(
+        plot_cls=PCAPlot,
+        df=pca_scores_df,
+        layer=Layer(roles={"x": "PC1", "y": "PC2", "color": "condition"}),
+    )
+    scree_plot = PanelPlot(
+        plot_cls=ScreePlot,
+        df=variance_df,
+        layer=Layer(roles={"component": "component", "variance": "variance"}),
+    )
+    return pn.Row(scatter_plot.panel(), scree_plot.panel())
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Cross-cutting shared state — independent of which plots are combined
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TitleState(PlotState):
-    sidebar_group = "General"
+    sidebar_group = "Appearance"
 
     appearance_title = param.String(default="", label="Title")
     appearance_xlabel = param.String(default=None, allow_None=True, label="X Label")
@@ -1285,12 +1571,28 @@ class ExportState(PlotState):
 
     export_folder = param.String(default="results", label="Export Folder")
     export_filename = param.String(default="figure", label="File Name")
-    export_png = param.Action(lambda self: None, label="Export PNG")
-    export_svg = param.Action(lambda self: None, label="Export SVG")
-    export_tables = param.Action(lambda self: None, label="Export TSV")
-    export_bed = param.Action(lambda self: None, label="Export BED")
-    export_bigwig = param.Action(lambda self: None, label="Export BigWig")
-    export_app = param.Action(lambda self: None, label="Export Standalone App")
+
+    # actions
+    export_svg = param.Action(action_export_figure("svg"), label="Export SVG")
+    export_png = param.Action(action_export_figure("png"), label="Export PNG")
+    export_pdf = param.Action(action_export_figure("pdf"), label="Export PDF")
+
+    export_tables = param.Action(action_export_data(format="tsv"), label="Export TSV")
+    # export_bed = param.Action(lambda self: None, label="Export BED")
+    # export_bigwig = param.Action(lambda self: None, label="Export BigWig")
+    export_app = param.Action(action_export_app(), label="Export Standalone App")
+
+    # reset_button = param.Action(
+    #     reset(
+    #         [
+    #             f"{sidebar_group}_select_sample",
+    #             f"{sidebar_group}_select_mouse",
+    #             f"{sidebar_group}_select_tissue",
+    #             f"{sidebar_group}_select_trp53_status",
+    #         ]
+    #     ),
+    #     label="Reset Selection",
+    # )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1349,6 +1651,13 @@ PLOT_REGISTRY: dict[str, type[BasePlot]] = {
     "rate": RatePlot,
     "hbar": HorizontalBarPlot,
     "genetracks": GenePlot,
+    "volcano": VolcanoPlot,
+    "heat": HeatmapPlot,
+    "gsea": GSEADotplotPlot,
+    "gsea_bar": GSEABarplotPlot,
+    "gsea_enrich": GSEAGseaPlot,
+    "pca": PCAPlot,
+    "scree": ScreePlot,
 }
 
 
