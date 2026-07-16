@@ -339,6 +339,8 @@ class Element:
         cached_sig_data: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
         # TODO turn this into Validation Policy
+        print("cached_signature", self.name, cached_signature)
+        print("current signature", self.name, self.signature)
         if self.validation_policy == ValidationPolicy.FORCE_RUN:
             return False, "Validation policy forces run"
 
@@ -675,7 +677,6 @@ class FileElement(FilesElement):
 
     @property
     def file(self) -> Path:
-        print("FileElement.file called, artifacts:", self.artifacts)
         if "primary" in self.artifacts:
             return self.artifacts["primary"].resolve()
         else:

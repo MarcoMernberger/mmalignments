@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, replace
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
@@ -25,13 +25,92 @@ from mmalignments.services.io import read_frame, read_schema
 ArtifactType = Literal["file", "value"]
 ArtifactLifeTime = Literal["persistent", "transient", "ephemeral"]
 
+@dataclass(frozen=True)
+class FileSpec:
+    name: str
+    ext: str
 
 @dataclass(frozen=True)
 class OutputSpec:
-    filename: str | None = None
+    name: str | None = None
     outdir: Path | None = None
-    additional_extensions: tuple[str] | None = ("tsv",)
-    ext: str | None = "parquet"  # e.g. parquet
+    prefix: str = ""
+    suffix: str = ""
+    ext: str = "parquet"
+    additional_extensions: tuple[str, ...] | None = None
+    additional_output: dict[str, FileSpec] = field(default_factory=dict)
+
+    def _make_path(self, filename: str) -> Path:
+        if self.outdir is None:
+            return Path(filename)
+
+        return self.outdir / filename
+
+    def _make_file_name(self, name: str, ext: str) -> str:
+        return f"{self.prefix}{name}{self.suffix}.{ext}"
+
+    def files(self, default_name: str | None = None) -> Iterator[tuple[str, Path]]:
+        name = self.name or default_name
+        if name is None:
+            return
+
+        # primary
+        yield (
+            "primary",
+            self._make_path(self._make_file_name(name, self.ext)),
+        )
+        # primary additional extensions
+        for ext in self.additional_extensions or ():
+            yield (
+                f"primary_{ext}",
+                self._make_path(self._make_file_name(name, ext)),
+            )
+        # additional named files
+        for key, extra in self.additional_output.items():
+            yield (
+                key,
+                self._make_path(self._make_file_name(extra.name, extra.ext)),
+            )
+
+    def filename(self, default_name: str | None = None) -> str | None:
+        name = self.name or default_name
+        if name is None:
+            return None
+        return self._make_file_name(name, self.ext)
+
+    def path(self, default_name: str | None = None) -> Path | None:
+        filename = self.filename(default_name=default_name)
+        return self._make_path(filename) if filename is not None else None
+
+    def merge(self, other: "OutputSpec | None") -> "OutputSpec":
+        if other is None:
+            return self
+
+        values = {}
+
+        for f in fields(self):
+            old = getattr(self, f.name)
+            new = getattr(other, f.name)
+
+            # keep old value if new is None
+            if new is None:
+                values[f.name] = old
+
+            # merge dictionaries
+            elif isinstance(old, dict) and isinstance(new, dict):
+                values[f.name] = {**old, **new}
+
+            # overwrite normal values
+            else:
+                values[f.name] = new
+
+        return replace(self, **values)
+
+
+@dataclass(frozen=True)
+class ArtifactDef:
+    cls: type[Artifact]
+    kwargs: Mapping[str, Any] = field(default_factory=dict)
 
 
 class ArtifactSet(Mapping):
@@ -134,60 +213,57 @@ class ArtifactSet(Mapping):
     def generate_file_artifacts(
         cls,
         tag: ElementTag,
-        infile: Path | None,
         spec: OutputSpec | None = None,
         default_dir: Path | None = None,
         index_column: str | None = None,
     ) -> tuple[ArtifactSet, list[Path]]:
-        default_dir = default_dir or Path("results")
-        spec = spec or OutputSpec()
-        out_dir = Path(spec.outdir or infile.parent if infile else default_dir)
-        filename = spec.filename or tag.default_name
-        if spec.ext:
-            filename = f"{filename}.{spec.ext}"
-        output_file = out_dir / filename
-        extensions = spec.additional_extensions or []
-        additional_artifacts = {}
-        for extension in extensions:
-            additional_artifacts[extension] = output_file.with_suffix(
-                f".{extension}"
-            )  # noqa: E501
-        artifacts = ArtifactSet(
-            TableArtifact(
-                output_file, index_column=index_column
-            ),  # , column_schema=column_schema
-            **additional_artifacts,
+
+        definitions = {
+            "primary": ArtifactDef(
+                TableArtifact,
+                {"index_column": index_column}
+            )
+        }
+        artifacts = cls.generate(
+            tag,
+            default_dir,
+            spec,
+            definitions=definitions
         )
-        return artifacts, [
-            a.resolve() for a in artifacts.values() if hasattr(a, "resolve")
-        ]
+        return artifacts, list(artifacts.output_files().values())
+
 
     @classmethod
-    def generate_from_outspec(
+    def generate(
         cls,
         tag: ElementTag,
-        infile: Path | None,
-        spec: OutputSpec | None = None,
         default_dir: Path | None = None,
-    ) -> ArtifactSet:
+        spec: OutputSpec | None = None,
+        definitions: Mapping[str, ArtifactDef] | None = None,
+    ):
+        # ensure we have a name and directory
+        default = ArtifactDef(TableArtifact)  # assuming we have mostly tables, should be paths
+        definitions = definitions or {}
         default_dir = default_dir or Path("results")
-        spec = spec or OutputSpec()
-        out_dir = Path(spec.outdir or infile.parent if infile else default_dir)
-        filename = spec.filename or tag.default_name
-        if spec.ext:
-            filename = f"{filename}.{spec.ext}"
-        output_file = out_dir / filename
-        extensions = spec.additional_extensions or []
-        additional_artifacts = {}
-        for extension in extensions:
-            additional_artifacts[extension] = output_file.with_suffix(
-                f".{extension}"
-            )  # an artifact with paths
-        artifacts = ArtifactSet(
-            output_file,
-            **additional_artifacts,
+        default_spec = OutputSpec(
+            name=tag.default_name,
+            outdir=default_dir
         )
-        return artifacts
+        spec = default_spec.merge(spec)
+        artifacts = {}
+        for key, path in spec.files(default_name=tag.default_name):
+
+            definition = definitions.get(key, default)
+            artifacts[key] = definition.cls(
+                path,
+                **definition.kwargs,
+            )
+        primary = artifacts.pop("primary")
+        return ArtifactSet(
+            primary,
+            **artifacts,
+        )
+
 
     def with_extras(self, extras: Mapping[str, Any]) -> "ArtifactSet":
         """

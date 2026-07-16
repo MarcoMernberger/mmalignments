@@ -129,7 +129,7 @@ class Gseapy:
 
     def default_output_spec(self, method: str, tag: ElementTag) -> OutputSpec:
         return OutputSpec(
-            filename=None,
+            name=None,
             outdir=self.default_outdir(method, tag),
             additional_extensions=("tsv",),
             ext="parquet",
@@ -199,9 +199,9 @@ class Gseapy:
             self.default_outdir("expression", tag),
             ext="parquet",
         )
-        artifacts = ArtifactSet.generate_from_outspec(
+        artifacts = ArtifactSet.generate(
             tag=tag,
-            infile=expression.primary.resolve(),
+            default_dir=expression.primary.resolve().parent,
             spec=output_spec,
         )
 
@@ -316,7 +316,7 @@ class Gseapy:
         output_spec = output_spec or self.default_output_spec("gsea", tag)
         artifacts, output = ArtifactSet.generate_file_artifacts(
             tag=tag,
-            infile=gct.primary.resolve(),
+            default_dir=gct.primary.resolve().parent,
             spec=output_spec,
         )
         outdir_path = output[0].parent
@@ -431,14 +431,10 @@ class Gseapy:
         output_spec = output_spec or self.default_output_spec("prerank", tag)
         artifacts, output = ArtifactSet.generate_file_artifacts(
             tag=tag,
-            infile=ranking.primary.resolve(),
+            default_dir=self.default_outdir("prerank", tag),
             spec=output_spec,
             index_column=None,
         )
-        # output_dir = Path(
-        #     outdir or self.default_outdir("prerank", ranking.root)
-        # )  # noqa: E501
-        # outfile = output_dir / "H6_vs_T47D_squareview_data.S01.dna.analysis.gsea.enrichment.prerank.tsv"
         determinants = (
             str(gene_col),
             str(stat_col),
@@ -452,7 +448,7 @@ class Gseapy:
         @depends(_run_prerank)
         def _run():
             return _run_prerank(
-                ranking_tsv=Path(ranking.tsv),
+                ranking_tsv=Path(ranking.primary.resolve()),
                 gene_sets_arg=gene_sets_arg,
                 gene_col=gene_col,
                 stat_col=stat_col,
@@ -476,7 +472,7 @@ class Gseapy:
             tag=tag,
             artifacts=artifacts,
             determinants=determinants,
-            inputs=(ranking.tsv,),
+            inputs=(ranking.primary.resolve(),),
             pres=tuple(pres),
             name=name,
         )
@@ -548,7 +544,7 @@ class Gseapy:
         output_spec = output_spec or self.default_output_spec("enrichr", tag)
         artifacts, output = ArtifactSet.generate_file_artifacts(
             tag=tag,
-            infile=gene_list.primary.resolve(),
+            default_dir=gene_list.primary.resolve().parent,
             spec=output_spec,
             index_column=None,
         )
@@ -558,8 +554,6 @@ class Gseapy:
             str(cutoff),
             str(gene_col or ""),
         )
-        inputs = (Path(gene_list.tsv),) if hasattr(gene_list, "tsv") else ()
-
         #@depends(_run_enrichr)
         def _run():
             return _run_enrichr(
@@ -582,7 +576,6 @@ class Gseapy:
             run=run,
             tag=tag,
             artifacts=artifacts,
-            inputs=inputs,
             determinants=determinants,
             pres=tuple(pres),
             name=name,
@@ -1250,8 +1243,8 @@ def _run_enrichr(
     exists(outdir)
 
     # Resolve gene list
-    if gene_col is not None and hasattr(gene_list_element, "tsv"):
-        df_src = pd.read_csv(Path(gene_list_element.tsv), sep="\t")
+    if gene_col is not None and hasattr(gene_list_element, "primary"):
+        df_src = read_frame(gene_list_element.primary.resolve())
         genes = df_src[gene_col].dropna().tolist()
     elif hasattr(gene_list_element, "path"):
         # plain FileElement — one gene per line
@@ -1262,7 +1255,8 @@ def _run_enrichr(
             "enrichr: could not resolve gene list from element "
             f"{gene_list_element.name!r}.  Pass gene_col if the element has a tsv."  # noqa: E501
         )
-
+    print(gene_list_element)
+    print(gene_sets_arg)
     res = gp.enrichr(
         gene_list=genes,
         gene_sets=gene_sets_arg,
