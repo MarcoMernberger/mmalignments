@@ -448,7 +448,7 @@ class Gseapy:
         @depends(_run_prerank)
         def _run():
             return _run_prerank(
-                ranking_tsv=Path(ranking.primary.resolve()),
+                ranking_file=Path(ranking.primary.resolve()),
                 gene_sets_arg=gene_sets_arg,
                 gene_col=gene_col,
                 stat_col=stat_col,
@@ -1193,7 +1193,7 @@ def _run_gsea(
 
 def _run_prerank(
     *,
-    ranking_tsv: Path,
+    ranking_file: Path,
     gene_sets_arg,
     gene_col: str,
     stat_col: str,
@@ -1207,7 +1207,7 @@ def _run_prerank(
     name: str,
 ) -> None:
 
-    rnk = pd.read_csv(ranking_tsv, sep="\t")
+    rnk = read_frame(ranking_file)
     rnk = rnk.sort_values(stat_col, ascending=False)
     rnk = rnk[[gene_col, stat_col]].dropna()
     res = gp.prerank(
@@ -1255,8 +1255,6 @@ def _run_enrichr(
             "enrichr: could not resolve gene list from element "
             f"{gene_list_element.name!r}.  Pass gene_col if the element has a tsv."  # noqa: E501
         )
-    print(gene_list_element)
-    print(gene_sets_arg)
     res = gp.enrichr(
         gene_list=genes,
         gene_sets=gene_sets_arg,
