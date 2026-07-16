@@ -7,28 +7,25 @@ back something with .panel() (live) and .export_html() (standalone).
 
 from __future__ import annotations
 
-from pathlib import Path
-from xml.sax import handler
+from typing import Mapping
 
-import pandas as pd
+import pandas as pd  # type: ignore[import]
 import panel as pn  # type: ignore[import]
 import param  # type: ignore[import]
 from param import Parameterized  # type: ignore[import]
 
-from typing import Mapping
-
-from .spec import PlotConfig, PlotLayer
-from .plots import PLOT_REGISTRY, TitleState, ExportState, resolve_coordinates
-from ...services.genomic import export_sgrna_bed_and_bigwig, export_sgrna_bed
 # fmt: off
 from .orchestration import (
-    build_combined_state_cls, 
-    CompositeRenderer, 
-    SelectiveRenderer, 
-    build_selection_state_cls, 
-    populate_dynamic_selectors, 
-    build_color_maps
+    CompositeRenderer,
+    SelectiveRenderer,
+    build_combined_state_cls,
+    build_selection_state_cls,
+    construct_layer_state_view,
+    populate_dynamic_selectors,
 )
+from .plots import PLOT_REGISTRY, TitleState
+from .spec import PlotConfig, PlotLayer
+
 # fmt: on
 pn.extension("plotly")
 
@@ -89,19 +86,36 @@ class InteractiveApp(Parameterized):
         # build combined class state
         self.state_cls = build_combined_state_cls(config.layers, extra_state)
         data_for_dynamic = self.data
+        def print_selector_params(cls, label=""):
+            print(f"\n--- {label} ---")
+            for name, p in cls.param.objects().items():
+                if isinstance(p, param.Selector):
+                    print(
+                        f"{name}: "
+                        f"default={p.default!r}, "
+                        f"objects={p.objects!r}, "
+                        f"names={getattr(p, 'names', None)!r}",
+                        type(p).__name__,
+                    )
+        # ── reactive figure ───────────────────────────────────────────────────────
+        # print_selector_params(self.state_cls, "BEFORE populate")
         populate_dynamic_selectors(
             self.state_cls,
             data_for_dynamic,
             result=None,
             shared_roles=config.shared_roles,
         )
+        # print_selector_params(self.state_cls, "AFTER populate")
         self.state = self.state_cls()
+        self.layer_state_views = {
+            layer.alias: construct_layer_state_view(self.state, layer)
+            for layer in config.layers
+        }
         self._last_fig = None
         self._last_result = None
         self._result_populated_from_analysis = False
         self._bind_actions()
 
-    # ── reactive figure ───────────────────────────────────────────────────────
 
     @property
     def _figure_pane(self):
@@ -130,8 +144,8 @@ class InteractiveApp(Parameterized):
             )
             self._result_populated_from_analysis = True
 
-        # self.config.validate_output(result, PLOT_REGISTRY, self.state)
-        fig = self.renderer.render(result, self.state)
+        self.config.validate_output(result, PLOT_REGISTRY, self.layer_state_views)
+        fig = self.renderer.render(result, self.state, self.layer_state_views)
         self._last_fig = fig
         self._last_result = result
         return pn.pane.Plotly(fig, sizing_mode="stretch_both")
@@ -241,67 +255,68 @@ class InteractiveApp(Parameterized):
             None,
         )
 
-    def _export_genomic_tracks(self, export_bigwig: bool) -> None:
-        if self._last_result is None:
-            return
+    # this needs to be in an export state
+    # def _export_genomic_tracks(self, export_bigwig: bool) -> None:
+    #     if self._last_result is None:
+    #         return
 
-        layer = self._get_genetrack_layer()
-        if layer is None:
-            print("No genetracks layer configured. Nothing to export.")
-            return
+    #     layer = self._get_genetrack_layer()
+    #     if layer is None:
+    #         print("No genetracks layer configured. Nothing to export.")
+    #         return
 
-        df = self._last_result[layer.source].copy()
-        roles = layer.roles
-        chrom_col = roles.get("chrom", "Chromosome")
-        start_col = roles.get("start", "Start")
-        stop_col = roles.get("stop", "Stop")
-        name_col = roles.get("feature", "Feature")
-        strand_col = roles.get("dir", "Direction")
-        track_col = roles.get("track", "Type")
+    #     df = self._last_result[layer.source].copy()
+    #     roles = layer.roles
+    #     chrom_col = roles.get("chrom", "Chromosome")
+    #     start_col = roles.get("start", "Start")
+    #     stop_col = roles.get("stop", "Stop")
+    #     name_col = roles.get("feature", "Feature")
+    #     strand_col = roles.get("dir", "Direction")
+    #     track_col = roles.get("track", "Type")
 
-        required = [start_col, stop_col, name_col, strand_col]
-        missing = [col for col in required if col not in df.columns]
-        if missing:
-            print(f"Missing columns for genomic export: {missing}")
-            return
+    #     required = [start_col, stop_col, name_col, strand_col]
+    #     missing = [col for col in required if col not in df.columns]
+    #     if missing:
+    #         print(f"Missing columns for genomic export: {missing}")
+    #         return
 
-        coord_param = f"{layer.alias}_track_coordinates"
-        coord_str = getattr(self.state, coord_param, "")
-        window = resolve_coordinates(
-            coord_str,
-            df,
-            start_col=start_col,
-            end_col=stop_col,
-            feature_col=name_col,
-            type_col=track_col,
-        )
-        if window is not None:
-            xmin, xmax = sorted(window)
-            df = df[(df[start_col] <= xmax) & (df[stop_col] >= xmin)]
+    #     coord_param = f"{layer.alias}_track_coordinates"
+    #     coord_str = getattr(self.state, coord_param, "")
+    #     window = resolve_coordinates(
+    #         coord_str,
+    #         df,
+    #         start_col=start_col,
+    #         end_col=stop_col,
+    #         feature_col=name_col,
+    #         type_col=track_col,
+    #     )
+    #     if window is not None:
+    #         xmin, xmax = sorted(window)
+    #         df = df[(df[start_col] <= xmax) & (df[stop_col] >= xmin)]
 
-        metric_col = getattr(self.state, f"{layer.alias}_track_metric", "")
-        df = df[~df[metric_col].isna()]
-        if df.empty:
-            print("No features found in current coordinate window. Nothing exported.")
-            return
+    #     metric_col = getattr(self.state, f"{layer.alias}_track_metric", "")
+    #     df = df[~df[metric_col].isna()]
+    #     if df.empty:
+    #         print("No features found in current coordinate window. Nothing exported.")
+    #         return
 
-        for chrom_col in ["Chromosome", "chrom", "chr", "seqname", "seqid"]:
-            if chrom_col in df.columns and df[chrom_col].notna().any():
-                chrom = str(df[chrom_col].dropna().iloc[0])
-                break
+    #     for chrom_col in ["Chromosome", "chrom", "chr", "seqname", "seqid"]:
+    #         if chrom_col in df.columns and df[chrom_col].notna().any():
+    #             chrom = str(df[chrom_col].dropna().iloc[0])
+    #             break
 
-        folder = Path(getattr(self.state, "export_folder", "results"))
-        filename = getattr(self.state, "export_filename", "figure")
+    #     folder = Path(getattr(self.state, "export_folder", "results"))
+    #     filename = getattr(self.state, "export_filename", "figure")
 
-        score_cols = []
-        if export_bigwig:
-            if metric_col in df.columns:
-                score_cols = [metric_col]
-            else:
-                print(
-                    "No valid metric column selected for BigWig export. "
-                    "Exporting BED only."
-                )
+    #     score_cols = []
+    #     if export_bigwig:
+    #         if metric_col in df.columns:
+    #             score_cols = [metric_col]
+    #         else:
+    #             print(
+    #                 "No valid metric column selected for BigWig export. "
+    #                 "Exporting BED only."
+    #             )
         # export_sgrna_bed(
         #     df,
         #     output_path=folder / f"{filename}.combined.bed",
@@ -313,23 +328,23 @@ class InteractiveApp(Parameterized):
         #     strand_col=strand_col,
         # )
 
-        bed_path, bw_paths = export_sgrna_bed_and_bigwig(
-            df=df,
-            chrom_col=chrom_col,
-            start_col=start_col,
-            stop_col=stop_col,
-            name_col=name_col,
-            strand_col=strand_col,
-            score_cols=score_cols,
-            folder=folder,
-            out_prefix=filename,
-        )
+        # bed_path, bw_paths = export_sgrna_bed_and_bigwig(
+        #     df=df,
+        #     chrom_col=chrom_col,
+        #     start_col=start_col,
+        #     stop_col=stop_col,
+        #     name_col=name_col,
+        #     strand_col=strand_col,
+        #     score_cols=score_cols,
+        #     folder=folder,
+        #     out_prefix=filename,
+        # )
 
-        if bw_paths:
-            print(f"Saved BED to {bed_path}")
-            print(f"Saved BigWig files: {bw_paths}")
-        else:
-            print(f"Saved BED to {bed_path}")
+        # if bw_paths:
+        #     print(f"Saved BED to {bed_path}")
+        #     print(f"Saved BigWig files: {bw_paths}")
+        # else:
+        #     print(f"Saved BED to {bed_path}")
 
     # ── layout ───────────────────────────────────────────────────────────────
 

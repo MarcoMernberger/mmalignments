@@ -421,9 +421,8 @@ class Tables:
     """
 
     def __init__(self):
-        self.default_output_spec = OutputSpec(
-            ext="parquet", additional_extensions=["tsv"]
-        )
+        pass
+
 
     @property
     def default_dir(self) -> Path:
@@ -432,6 +431,14 @@ class Tables:
         """
         return Path("results/tables")
 
+    @cached_property
+    def default_output_spec(self) -> OutputSpec:
+        ret = OutputSpec(
+            outdir=self.default_dir,
+            ext="parquet",
+            additional_extensions=("tsv",),
+        )
+        return ret
     # def _finalize(
     #     self,
     #     *,
@@ -1259,3 +1266,22 @@ def to_long(
         return long
 
     return Morph.from_callable(__transform)
+
+
+def morph_rank_file() -> Morph:
+    def __transform(data: DataFrame) -> DataFrame:
+        data["id"] = data["id"].str.capitalize()
+        return data
+
+    return Morph.from_callable(__transform)
+
+
+def filter_to_group(
+    group: str, values: list[str], *, view: View | None = None
+) -> Morph:
+    def __filter(df: DataFrame) -> DataFrame:
+        if view is not None:
+            df = df[view]
+        return df[df[group].isin(values)]
+
+    return Morph.from_callable(__filter, params={"group": group, "view": view})

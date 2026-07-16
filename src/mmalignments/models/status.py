@@ -154,7 +154,7 @@ class ProgressReporter:
         self._lock = threading.Lock()
         self._live: Live | None = None
         self._renderable: _LiveLayout | None = None
-        self.log_width = self._console.size.width# // 2 - 2
+        self.log_width = self._console.size.width // 2 - 2
 
     ###########################################################################
     # Node Status handling
@@ -327,7 +327,8 @@ class ProgressReporter:
             if i:
                 log_text.append("\n")
             log_text.append(
-                line[: self.log_width], style=Style(color="bright_white", dim=True)
+                # line[: self.log_width], style=Style(color="bright_white", dim=True)
+                line, style=Style(color="bright_white", dim=True)
             )
 
         return Panel(

@@ -30,8 +30,8 @@ ArtifactLifeTime = Literal["persistent", "transient", "ephemeral"]
 class OutputSpec:
     filename: str | None = None
     outdir: Path | None = None
-    additional_extensions: list[str] | None = None
-    ext: str | None = None  # e.g. parquet
+    additional_extensions: tuple[str] | None = ("tsv",)
+    ext: str | None = "parquet"  # e.g. parquet
 
 
 class ArtifactSet(Mapping):

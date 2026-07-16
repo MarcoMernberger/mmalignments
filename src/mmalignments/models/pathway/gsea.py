@@ -124,10 +124,18 @@ class Gseapy:
     DEFAULT_PERMUTATIONS = 1000
     DEFAULT_SEED = 42
 
-    def default_outdir(self, method: str, root: str) -> Path:
-        return Path("results") / "gsea" / method / root
+    def default_outdir(self, method: str, tag: ElementTag) -> Path:
+        return Path("results") / "gsea" / method / tag.default_name
 
-    def default_params(self) -> Params:
+    def default_output_spec(self, method: str, tag: ElementTag) -> OutputSpec:
+        return OutputSpec(
+            filename=None,
+            outdir=self.default_outdir(method, tag),
+            additional_extensions=("tsv",),
+            ext="parquet",
+        )
+
+    def default_gsea_params(self) -> Params:
         return Params(
             permutation_type="phenotype",
             permutation_num=self.DEFAULT_PERMUTATIONS,
@@ -186,16 +194,15 @@ class Gseapy:
             state=State.ENRICHMENT,
             param="expression",
         )
-        output_spec = OutputSpec(
+        output_spec = output_spec or OutputSpec(
             tag.default_output,
-            self.default_outdir("expr", expression.name),
+            self.default_outdir("expression", tag),
             ext="parquet",
         )
         artifacts = ArtifactSet.generate_from_outspec(
             tag=tag,
             infile=expression.primary.resolve(),
-            spec=output_spec or self.default_output_spec(),
-            default_dir=self.default_outdir("expr", expression.root),
+            spec=output_spec,
         )
 
         @depends(_run_gsea)
@@ -248,8 +255,7 @@ class Gseapy:
         gene_sets: FileElement | str | Sequence[str],
         *,
         tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
+        output_spec: OutputSpec | None = None,
         params: Params | None = None,
     ) -> Element:
         """Classical GSEA with phenotype permutations.
@@ -271,8 +277,9 @@ class Gseapy:
             single Enrichr library name, or a list of library names.
         tag : PartialElementTag | ElementTag | None
             Optional tag override.
-        outdir : Path | str | None
-            Output directory.  Defaults to ``results/gsea/gsea/<root>``.
+        output_spec : OutputSpec | None
+            Output specification. Defaults to
+            ``self.default_output_spec("gsea", gct.root)``.
         permutation_type : str
             ``"phenotype"`` (recommended) or ``"gene_set"``.
         permutation_num : int
@@ -292,11 +299,11 @@ class Gseapy:
         Element
             ``tsv`` → summary results TSV; ``parquet`` → Parquet version.
         """
-        params = params or self.default_params()
+        params = params or self.default_gsea_params()
         pres: list[Element] = [gct]
         gene_sets_arg, pres = _resolve_gene_sets(gene_sets, pres)
         classes_arg, pres = _resolve_cls(classes, pres)
-        params = self.default_params().update(params)
+        params = self.default_gsea_params().update(params)
         tag = from_prior(
             gct.tag,
             tag,
@@ -306,23 +313,14 @@ class Gseapy:
             ext="tsv",
             param="gsea",
         )
-
-        outdir_path = Path(
-            outdir or self.default_outdir("gsea", gct.root)
-        )  # noqa: E501
-
-        # determinants = (
-        #     str(permutation_type),
-        #     str(permutation_num),
-        #     str(min_size),
-        #     str(max_size),
-        #     str(weight),
-        #     str(gene_col),
-        #     str(seed),
-        # )
-
-        determinants = (str(classes_arg), str(gene_sets_arg))
-        determinants = determinants + params.determinants()
+        output_spec = output_spec or self.default_output_spec("gsea", tag)
+        artifacts, output = ArtifactSet.generate_file_artifacts(
+            tag=tag,
+            infile=gct.primary.resolve(),
+            spec=output_spec,
+        )
+        outdir_path = output[0].parent
+        determinants = (str(classes_arg), str(gene_sets_arg)) + params.determinants()
 
         @depends(_run_gsea)
         def _run():
@@ -373,8 +371,6 @@ class Gseapy:
         gene_sets: FileElement | str | Sequence[str],
         *,
         tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
         gene_col: str = "id",
         stat_col: str = "stat",
         permutation_num: int = DEFAULT_PERMUTATIONS,
@@ -382,6 +378,8 @@ class Gseapy:
         max_size: int = DEFAULT_MAX_SIZE,
         weight: float = 1.0,
         seed: int = DEFAULT_SEED,
+        name: str = "preranked",
+        output_spec: OutputSpec | None = None,
     ) -> Element:
         """Pre-ranked GSEA — the standard workflow after DESeq2/edgeR.
 
@@ -407,6 +405,8 @@ class Gseapy:
             Gene-set size filter.
         weight : float
             Enrichment score weighting exponent.
+        name : str
+            Name of the analysis (used in output filenames).
         seed : int
             Random seed.
 
@@ -425,15 +425,20 @@ class Gseapy:
             stage=Stage.ANALYSIS,
             method=Method.GSEA,
             state=State.ENRICHMENT,
-            ext="tsv",
             root=ranking.tag.root,
             param="prerank",
         )
-
-        output_dir = Path(
-            outdir or self.default_outdir("prerank", ranking.root)
-        )  # noqa: E501
-        outfile = output_dir / "check_real_outout"
+        output_spec = output_spec or self.default_output_spec("prerank", tag)
+        artifacts, output = ArtifactSet.generate_file_artifacts(
+            tag=tag,
+            infile=ranking.primary.resolve(),
+            spec=output_spec,
+            index_column=None,
+        )
+        # output_dir = Path(
+        #     outdir or self.default_outdir("prerank", ranking.root)
+        # )  # noqa: E501
+        # outfile = output_dir / "H6_vs_T47D_squareview_data.S01.dna.analysis.gsea.enrichment.prerank.tsv"
         determinants = (
             str(gene_col),
             str(stat_col),
@@ -442,8 +447,8 @@ class Gseapy:
             str(max_size),
             str(weight),
             str(seed),
+            str(name),
         )
-
         @depends(_run_prerank)
         def _run():
             return _run_prerank(
@@ -455,12 +460,13 @@ class Gseapy:
                 min_size=min_size,
                 max_size=max_size,
                 weight=weight,
-                outdir=output_dir,
+                outdir=output[0].parent,
                 seed=seed,
+                output_files=output,
+                name=name or tag.default_name,
             )
 
         runner = Runnable(_run, display=f"prerank({ranking.name})")
-        artifacts = ArtifactSet(outfile)
         key, name = generate_element_key_name(
             tag, "gseapy", subroutine="prerank"
         )  # noqa: E501
@@ -486,11 +492,10 @@ class Gseapy:
         gene_sets: FileElement | str | Sequence[str],
         *,
         tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
         gene_col: str | None = "id",
         organism: str = "Human",
         cutoff: float = 0.05,
+        output_spec: OutputSpec | None = None,
     ) -> Element:
         """Over-representation analysis (ORA) via Enrichr.
 
@@ -520,6 +525,8 @@ class Gseapy:
         cutoff : float
             Adjusted p-value cutoff written into the result file (does not
             filter the output table).
+        name : str
+            Name of the analysis (used in output filenames).
 
         Returns
         -------
@@ -529,7 +536,6 @@ class Gseapy:
         """
         pres: list[Element] = [gene_list]
         gene_sets_arg, pres = _resolve_gene_sets(gene_sets, pres)
-
         tag = from_prior(
             gene_list.tag,
             tag,
@@ -539,18 +545,22 @@ class Gseapy:
             ext="tsv",
             param="enrichr",
         )
-
-        outdir_path = Path(
-            outdir or self.default_outdir("enrichr", gene_list.root)
-        )  # noqa: E501
-
+        output_spec = output_spec or self.default_output_spec("enrichr", tag)
+        artifacts, output = ArtifactSet.generate_file_artifacts(
+            tag=tag,
+            infile=gene_list.primary.resolve(),
+            spec=output_spec,
+            index_column=None,
+        )
+        outdir_path = output[0].parent
         determinants = (
             str(organism),
             str(cutoff),
             str(gene_col or ""),
         )
+        inputs = (Path(gene_list.tsv),) if hasattr(gene_list, "tsv") else ()
 
-        @depends(_run_enrichr)
+        #@depends(_run_enrichr)
         def _run():
             return _run_enrichr(
                 gene_list_element=gene_list,
@@ -559,15 +569,14 @@ class Gseapy:
                 gene_col=gene_col,
                 organism=organism,
                 cutoff=cutoff,
+                output=output,
             )
 
         run = Runnable(_run, display=f"enrichr({gene_list.name})")
 
-        inputs = (Path(gene_list.tsv),) if hasattr(gene_list, "tsv") else ()
         key, name = generate_element_key_name(
             tag, "gseapy", subroutine="enrichr"
         )  # noqa: E501
-        artifacts = ArtifactSet(outdir_path / "check_real_outout")
         return Element(
             key=key,
             run=run,
@@ -797,7 +806,7 @@ class MSigDB:
         first_element = next(iter(gmts), None)
         if first_element is None:
             raise ValueError("No GMT files provided for merging.")
-        root = f"msigdb_{['_'.join(element.root for element in gmts)]}"
+        root = f"msigdb_{'_'.join(element.root for element in gmts)}"
         tag = from_prior(
             first_element.tag,
             tag,
@@ -875,10 +884,10 @@ class MSigDB:
         Returns
         -------
         Element
-            An Element of H, C2, C6, C7 geneset in a single gmt.
+            An Element of H, C2, C5, C6, C7 geneset in a single gmt.
         """
         return self.collections(
-            ["H", "C2", "C6", "C7"],
+            ["H", "C2", "C5", "C6", "C7"],
             tag=PTag(
                 stage=Stage.INPUT,
                 method=Method.MSIGDB,
@@ -1169,8 +1178,6 @@ def _run_gsea(
     if gene_col in expr_df.columns:
         expr_df = expr_df.set_index(gene_col)
 
-    print(gene_sets_arg)
-    print(cls_arg)
     res = gp.gsea(
         data=expr_df,
         gene_sets=gene_sets_arg,
@@ -1203,11 +1210,13 @@ def _run_prerank(
     weight: float,
     outdir: Path,
     seed: int,
+    output_files: Iterable[Path],
+    name: str,
 ) -> None:
 
     rnk = pd.read_csv(ranking_tsv, sep="\t")
     rnk = rnk.sort_values(stat_col, ascending=False)
-
+    rnk = rnk[[gene_col, stat_col]].dropna()
     res = gp.prerank(
         rnk=rnk,
         gene_sets=gene_sets_arg,
@@ -1218,10 +1227,12 @@ def _run_prerank(
         outdir=str(outdir),
         seed=seed,
         verbose=True,
+        name=name
     )
-    print(outdir)
     df = res.res2d
+    df["Name"] = name
     logger.info("prerank done — %d terms in %s", df.shape[0], outdir)
+    write_frames(df, output_files)
     return df
 
 
@@ -1233,6 +1244,7 @@ def _run_enrichr(
     gene_col: str | None,
     organism: str,
     cutoff: float,
+    output: Iterable[Path],
 ) -> DataFrame:
 
     exists(outdir)
@@ -1262,6 +1274,7 @@ def _run_enrichr(
 
     df = res.results
     logger.info("enrichr done — %d terms in %s", len(df), outdir)
+    write_frames(df, output)
     return df
     # df.to_csv(out_tsv, sep="\t", index=False)
     # df.to_parquet(out_parquet, index=False)

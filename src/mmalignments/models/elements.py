@@ -246,7 +246,7 @@ class Element:
     def sig_data(self) -> dict[str, Any]:
         sig_data = {
             "key": self.key,
-            "determinants": tuple(self.determinants),
+            "determinants": list(self.determinants),
             "inputs": [file_sig(p) for p in self.inputs],
             "artifacts": self._artifact_sig(),
             "pre_sigs": sorted([pre.signature for pre in self.pres]),
@@ -317,6 +317,8 @@ class Element:
         dicts share no keys the method falls back to a simple mismatch message.
         """
         current = self.sig_data()
+        print("current sig_data", current)
+        print("cached sig_data", cached_sig_data)
         if not cached_sig_data:
             return "Cached signature does not match (no cached sig_data available)"
         lines: list[str] = []

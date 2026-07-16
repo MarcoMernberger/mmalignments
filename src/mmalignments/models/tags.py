@@ -105,6 +105,7 @@ class Method(str, Enum):
     NGMERGE = "ngmerge"
     TABLES = "tables"
     SKLEARN = "sklearn"
+    CRISPRESSO = "crispresso"
 
 
 def level(level: int) -> str:
