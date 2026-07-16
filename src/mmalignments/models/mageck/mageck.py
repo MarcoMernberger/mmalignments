@@ -24,9 +24,10 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
-from pandas import DataFrame
-from statsmodels.stats.multitest import multipletests
+from pandas import DataFrame  # type: ignore[import]
+from statsmodels.stats.multitest import multipletests  # type: ignore[import]
 
+from mmalignments.models.artifacts import ArtifactSet, FileSpec, OutputSpec
 from mmalignments.models.elements import Element, TableElement, element
 from mmalignments.models.parameters import (
     ParamRegistry,
@@ -332,18 +333,24 @@ class Mageck(External):
         self,
         data: Element | Path | str,
         *,
-        preferred_keys: Sequence[str] = ("tsv", "count_table", "gene_summary", "path"),
+        preferred_keys: Sequence[str] | None = None
+        # ("tsv", "count_table", "gene_summary", "path"),
     ) -> Path:
         """Resolve an input path from an Element or plain path."""
+        print(data)
         if isinstance(data, Element):
-            for key in preferred_keys:
-                p = data.artifacts.get(key)
-                if p:
-                    return Path(p).absolute()
-            if data.artifacts:
-                return Path(next(iter(data.artifacts.values()))).absolute()
-            raise ValueError("Input element has no artifacts to resolve a path")
-        return Path(data).absolute()
+            if not data.artifacts:
+                raise ValueError("Input element has no artifacts to resolve a path")
+            if preferred_keys:
+                for key in preferred_keys:
+                    p = data.artifacts.get(key)
+                    if p:
+                        return Path(p).resolve()
+            return data.primary.resolve()
+        elif isinstance(data, (Path, str)):
+            return Path(data).resolve()
+        else:
+            raise ValueError(f"Cannot resolve path from {data!r}")
 
     def _resolve_pres(self, data: Element | Path | str) -> tuple[Element, ...]:
         return (data,) if isinstance(data, Element) else ()
@@ -351,18 +358,18 @@ class Mageck(External):
     @element
     def count(
         self,
-        list_seq: Element | Path | str,
+        list_seq: Element,
         *,
         fastq: Sequence[str | Path] | None = None,
         fastq_2: Sequence[str | Path] | None = None,
-        count_table: Element | Path | str | None = None,
+        count_table: Element | None = None,
         sample_label: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         outdir: Path | str | None = None,
         output_prefix: str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> TableElement:
+    ) -> Element:
         """Run ``mageck count`` and return the produced count table element."""
         if (fastq is None) == (count_table is None):
             raise ValueError("Provide exactly one of fastq or count_table")
@@ -386,7 +393,7 @@ class Mageck(External):
             )
         )
 
-        base_tag = (
+        tag = (
             from_prior(
                 list_seq.tag,
                 tag,
@@ -406,11 +413,8 @@ class Mageck(External):
             ).merge(tag)
         )
 
-        output_dir = Path(outdir or self.default_output_dir(base_tag.root)).absolute()
-        prefix = (
-            output_prefix
-            or f"{base_tag.root}.S{base_tag.level:02d}.{base_tag.stage}.{base_tag.method}.{base_tag.state}"
-        )
+        output_dir = Path(outdir or self.default_output_dir(tag.root)).absolute()
+        prefix = output_prefix or tag.default_name
         prefix_path = output_dir / prefix
         count_txt = prefix_path.with_suffix(".count.txt")
         summary_txt = prefix_path.with_suffix(".countsummary.txt")
@@ -429,7 +433,7 @@ class Mageck(External):
             cfg=cfg,
         )
 
-        key, name = self.build_element_name(base_tag, "count")
+        key, name = self.build_element_name(tag, "count")
         determinants = self.signature_determinants(merged_params, subroutine="count")
         inputs = [list_seq_path]
         if count_table_path is not None:
@@ -448,16 +452,15 @@ class Mageck(External):
         if merged_params.get("unmapped_to_file"):
             artifacts["unmapped"] = prefix_path.with_suffix(".unmapped.txt")
 
-        return TableElement(
+        return Element(
             key,
             runner,
-            tag=base_tag,
-            tsv=count_txt,
+            tag=tag,
             artifacts=artifacts,
             determinants=determinants,
             inputs=tuple(inputs),
-            pres=self._resolve_pres(list_seq)
-            + ((count_table,) if isinstance(count_table, Element) else ()),
+            pres=(list_seq,)
+            + ((count_table,) if count_table is not None else ()),
             name=name,
         )
 
@@ -529,23 +532,23 @@ class Mageck(External):
         self,
         counts: Element,
         *,
-        treatment_id: str,
-        control_id: str | None = None,
+        treatment_ids: list[str],
+        control_ids: list[str] | None = None,
         day0_label: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
+        output_spec: OutputSpec | None = None,
         prefix: str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> Element:
         """Run ``mageck test`` and return gene-summary as primary table."""
-        if not treatment_id:
-            raise ValueError("treatment_id is required")
-        if bool(control_id) == bool(day0_label):
-            raise ValueError("Provide exactly one of control_id or day0_label")
+        if not treatment_ids:
+            raise ValueError("treatment_ids is required")
+        if bool(control_ids) == bool(day0_label):
+            raise ValueError("Provide exactly one of control_ids or day0_label")
 
         count_table_path = self._resolve_path(
-            counts, preferred_keys=("count_table", "tsv", "path")
+            counts#, preferred_keys=("count_table", "tsv", "path")
         )
 
         tag = from_prior(
@@ -556,29 +559,35 @@ class Mageck(External):
             state=State.STAT,
             ext="txt",
         )
+        outspec = OutputSpec(
+            name="gene_summary",
+            prefix=tag.root,
+            ext="txt",
+            outdir=self.default_output_dir(tag.root),
+            additional_output={
+                "sgrna_summary": FileSpec("sgrna_summary", "txt"),
+            }
+        ).merge(output_spec)
 
-        output_dir = Path(outdir or self.default_output_dir(tag.root)).absolute()
-        prefix = prefix or tag.default_output[:-4]  # remove .txt
-
-        prefix_path = output_dir / prefix
-        gene_summary = output_dir / f"{prefix}.gene_summary.txt"
-        sgrna_summary = output_dir / f"{prefix}.sgrna_summary.txt"
+        prefix_path = outspec.outdir / outspec.prefix   # type: ignore[union-attr]
+        gene_summary = outspec.outdir / f"{outspec.prefix}.gene_summary.txt"    # type: ignore[union-attr]
+        sgrna_summary = outspec.outdir / f"{outspec.prefix}.sgrna_summary.txt"  # type: ignore[union-attr]
 
         runner = self.run_test(
             count_table=count_table_path,
-            treatment_id=treatment_id,
-            control_id=control_id,
+            treatment_ids=treatment_ids,
+            control_ids=control_ids,
             day0_label=day0_label,
             output_prefix=prefix_path,
             params=params,
             cfg=cfg,
         )
-
-        key, name = self.build_element_name(tag, "test", treatment=treatment_id)
+        treatment=",".join(treatment_ids)
+        key, name = self.build_element_name(tag, "test", treatment=treatment)
         determinants = self.signature_determinants(params, subroutine="test")
-        determinants += (f"treatment_id={treatment_id}",)
-        if control_id:
-            determinants += (f"control_id={control_id}",)
+        determinants += (f"treatment_id={treatment}",)
+        if control_ids:
+            determinants += (f"control_id={','.join(control_ids)}",)
         if day0_label:
             determinants += (f"day0_label={day0_label}",)
 
@@ -606,17 +615,17 @@ class Mageck(External):
     def run_test(
         self,
         count_table: Path | str,
-        treatment_id: str,
+        treatment_ids: list[str],
         output_prefix: Path | str,
         *,
-        control_id: str | None = None,
+        control_ids: list[str] | None = None,
         day0_label: str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
     ) -> SubroutineIn:
         """Low-level wrapper for ``mageck test``."""
-        if bool(control_id) == bool(day0_label):
-            raise ValueError("Provide exactly one of control_id or day0_label")
+        if bool(control_ids) and bool(day0_label):
+            raise ValueError("Provide exactly one of control_ids or day0_label")
 
         count_table_path = Path(count_table).absolute()
         prefix = Path(output_prefix).absolute()
@@ -626,12 +635,12 @@ class Mageck(External):
             "--count-table",
             str(count_table_path),
             "--treatment-id",
-            treatment_id,
+            ",".join(treatment_ids),
             "--output-prefix",
             str(prefix),
         ]
-        if control_id:
-            arguments.extend(["--control-id", control_id])
+        if control_ids:
+            arguments.extend(["--control-id", ",".join(control_ids)])
         if day0_label:
             arguments.extend(["--day0-label", day0_label])
 
@@ -675,7 +684,7 @@ class Mageck(External):
         )
         design_path = Path(design_matrix).absolute() if design_matrix else None
 
-        base_tag = (
+        tag = (
             from_prior(
                 count_table.tag,
                 tag,
@@ -695,11 +704,8 @@ class Mageck(External):
             ).merge(tag)
         )
 
-        output_dir = Path(outdir or self.default_output_dir(base_tag.root)).absolute()
-        prefix = (
-            output_prefix
-            or f"{base_tag.root}.S{base_tag.level:02d}.{base_tag.stage}.{base_tag.method}.{base_tag.state}"
-        )
+        output_dir = Path(outdir or self.default_output_dir(tag.root)).absolute()
+        prefix = output_prefix or tag.default_name
         prefix_path = output_dir / prefix
         gene_summary = prefix_path.with_suffix(".gene_summary.txt")
         sgrna_summary = prefix_path.with_suffix(".sgrna_summary.txt")
@@ -713,7 +719,7 @@ class Mageck(External):
             cfg=cfg,
         )
 
-        key, name = self.build_element_name(base_tag, "mle")
+        key, name = self.build_element_name(tag, "mle")
         determinants = self.signature_determinants(params, subroutine="mle")
         if design_path:
             determinants += (f"design_matrix={design_path}",)
@@ -734,7 +740,7 @@ class Mageck(External):
         return TableElement(
             key,
             runner,
-            tag=base_tag,
+            tag=tag,
             tsv=gene_summary,
             artifacts=artifacts,
             determinants=determinants,
@@ -907,18 +913,17 @@ class Mageck(External):
         gmt_file: Element | Path | str,
         *,
         tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        output_prefix: str | None = None,
+        output_spec: OutputSpec | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> TableElement:
+    ) -> Element:
         """Run ``mageck pathway`` and return pathway summary table."""
-        ranking_path = self._resolve_path(
-            gene_ranking, preferred_keys=("gene_summary", "tsv", "path")
-        )
-        gmt_path = self._resolve_path(gmt_file, preferred_keys=("gmt", "path", "tsv"))
+        ranking_path = self._resolve_path(gene_ranking)
+        #, preferred_keys=("gene_summary", "tsv", "path")
+        gmt_path = self._resolve_path(gmt_file)
+        # , preferred_keys=("gmt", "path", "tsv"))
 
-        base_tag = (
+        tag = (
             from_prior(
                 gene_ranking.tag,
                 tag,
@@ -934,18 +939,20 @@ class Mageck(External):
                 stage=Stage.ANALYSIS,
                 method=Method.MAGECK,
                 state=State.ENRICHMENT,
-                ext="txt",
             ).merge(tag)
         )
+        outspec = OutputSpec(
+            name="pathway_summary",
+            prefix=f"{tag.default_name}.",
+            ext="txt",
+            outdir=self.default_output_dir(tag.root),
+        ).merge(output_spec)
 
-        output_dir = Path(outdir or self.default_output_dir(base_tag.root)).absolute()
-        prefix = (
-            output_prefix
-            or f"{base_tag.root}.S{base_tag.level:02d}.{base_tag.stage}.{base_tag.method}.{base_tag.state}"
+        prefix_path = outspec.outdir / tag.default_name   # type: ignore[union-attr]
+        artifacts = ArtifactSet.generate(
+            tag=tag,
+            spec=outspec,
         )
-        prefix_path = output_dir / prefix
-        pathway_summary = prefix_path.with_suffix(".pathway_summary.txt")
-
         runner = self.run_pathway(
             gene_ranking=ranking_path,
             gmt_file=gmt_path,
@@ -954,19 +961,14 @@ class Mageck(External):
             cfg=cfg,
         )
 
-        key, name = self.build_element_name(base_tag, "pathway")
+        key, name = self.build_element_name(tag, "pathway")
         determinants = self.signature_determinants(params, subroutine="pathway")
 
-        return TableElement(
+        return Element(
             key,
             runner,
-            tag=base_tag,
-            tsv=pathway_summary,
-            artifacts={
-                "tsv": pathway_summary,
-                "pathway_summary": pathway_summary,
-                "output_prefix": prefix_path,
-            },
+            tag=tag,
+            artifacts=artifacts,
             determinants=determinants,
             inputs=(ranking_path, gmt_path),
             pres=self._resolve_pres(gene_ranking) + self._resolve_pres(gmt_file),
@@ -1019,12 +1021,13 @@ def calculate_onesided_fdr(
     method: str = "fdr_bh", p_column: str = "p.high", column_name: str = "FDR High"
 ) -> Callable[[DataFrame], DataFrame]:
     """
-    Calculate one-sided FDR from two-sided p-values using the Benjamini-Hochberg procedure.
+    Calculate one-sided FDR from two-sided p-values using the Benjamini-Hochberg
+    procedure.
     """
 
     def _calculate_fdr(df: DataFrame) -> DataFrame:
         df[column_name] = multipletests(df[p_column], method=method)[1]
-        return df[[column_name]]
+        return df[[column_name]]    # type: ignore[return-value]
 
     return _calculate_fdr
 

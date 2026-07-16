@@ -18,15 +18,20 @@ import bisect
 import heapq
 from typing import Any
 
-import numpy as np
-import pandas as pd
+import numpy as np  # type: ignore[import]
+import pandas as pd  # type: ignore[import]
 import param  # type: ignore[import]
-import plotly.colors
-import plotly.express as px
-import plotly.graph_objects as go
-from pandas import DataFrame, Series
+import plotly.colors  # type: ignore[import]
+import plotly.express as px  # type: ignore[import]
+import plotly.graph_objects as go  # type: ignore[import]
+from pandas import DataFrame, Series  # type: ignore[import]
 from param import Parameterized  # type: ignore[import]
-from textwrap import shorten
+
+from mmalignments.models.interactive.spec import (
+    LayerStateView,
+)
+
+from .actions import action_export_app, action_export_data, action_export_figure
 from .spec import (
     BasePlot,
     DynamicPlotState,
@@ -35,8 +40,6 @@ from .spec import (
     PlotState,
     RoleSpec,
 )
-
-from .actions import action_export_figure, action_export_data, action_export_app
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TraceProcessor — shared appearance logic, gated by trace_capabilities
@@ -892,6 +895,7 @@ class HeatmapPlot(BasePlot):
         self,
         df: pd.DataFrame,
         layer: PlotLayer,
+        view: LayerStateView,
         state: HeatmapPlotState,
         processor: TraceProcessor,
         fig=None,
@@ -962,11 +966,74 @@ class HeatmapPlot(BasePlot):
 ################################################################################
 
 
-class GSEADotplotState(PlotState):
+class GSEADotplotState(DynamicPlotState):
 
     sidebar_group = "Layer"
 
-    top_x = param.Integer(default=20, bounds=(1, None), label="Top X Terms")
+    DYNAMIC_SELECTORS = [
+        DynamicSelectorSpec(
+            param_name="select_on",
+            role="gsea_name",
+            source="gsea",
+            from_result=False,
+            objects=[None],
+            names=["All"],
+        ),
+        DynamicSelectorSpec(
+            param_name="data_select",
+            role="gsea_name",
+            source="gsea",
+            from_result=False,
+            objects=[],
+        ),
+    ]
+    data_select = param.ListSelector(
+        default=[],
+        objects=[],
+        label="Data Select",
+        doc="Select which gsea data to display.",
+    )
+    direction = param.Selector(
+        default="All",
+        objects=["All", "Up", "Down"],
+        label="Direction",
+    )
+    database = param.Selector(
+        default=None,
+        objects={
+            None: "All",
+            "KEGG_": "KEGG",
+            "REACTOME_": "REACTOME",
+            "HALLMARK_": "HALLMARK",
+            "GOBP_": "GOBP",
+            "BIOCARTA_": "BIOCARTA",
+        },
+        allow_None=True,
+        doc="Gene set database to filter by, e.g. KEGG, REACTOME, HALLMARK, GOBP, BIOCARTA",
+        label="Data Base",
+    )
+    select_on = param.Selector(
+        default=None,
+        objects={
+            None: "All",
+        },
+        allow_None=True,
+        doc="GSEA run to use for selecting the top X terms to display. If None, aggregate over all runs.",
+        label="Select on",
+    )
+
+
+    top_x = param.Integer(default=20, bounds=None, label="Top X Terms")
+    # fdr_metric = param.Selector(
+    #     default="FDR q-val",
+    #     objects=["FDR q-val", "FWER p-val", "NOM p-val"],
+    #     label="FDR Metric",
+    # )
+    # score = param.Selector(
+    #     default="NES",
+    #     objects=["NES", "ES"],
+    #     label="Score",
+    # )
     fdr_threshold = param.Number(
         default=1,
         bounds=(0.0, 1.0),
@@ -975,11 +1042,11 @@ class GSEADotplotState(PlotState):
     geneset_filter = param.String(
         default="",
         label="Filter Gene Sets",
-        doc="Filter gene sets by name. For multiple sets provide a comma-separated list.",
+        doc="Filter gene sets by name. For multiple sets provide a space-separated list.",
     )
     nes_range = param.Range(
-        default=(-5.0, 5.0),
-        bounds=(-5.0, 5.0),
+        default=(-15.0, 15.0),
+        bounds=(-30.0, 30.0),
         doc="Range of normalized enrichment scores (NES) to display",
         label="NES threshold",
     )
@@ -989,7 +1056,7 @@ class GSEADotplotState(PlotState):
         label="Color by",
     )
     size = param.Selector(
-        default="Leading Edge %",
+        default="FDR q-val",
         objects=["Leading Edge %", "Size", "NES", "ES", "FDR q-val", "FWER p-val"],
         label="Size by",
     )
@@ -999,7 +1066,7 @@ class GSEADotplotState(PlotState):
         doc="Sort by which column in the GSEA results table.",
         label="Sort By",
     )
-    sort_by_ascending = param.Boolean(default=True, label="Sort Ascending")
+    sort_by_ascending = param.Boolean(default=False, label="Sort Ascending")
     color_scale = param.Selector(
         default="Viridis",
         objects=["Viridis", "Cividis", "Plasma", "Inferno", "Magma", "RdBu"],
@@ -1024,9 +1091,9 @@ class GSEADotplotState(PlotState):
 class GSEADotplotPlot(BasePlot):
 
     ROLE_SPECS = {
-        "x": RoleSpec(name="x", dtype="categorical", description="Gene set or term"),
+        "x": RoleSpec(name="x", dtype="categorical", description="Category (e.g. condition)"),
         "y": RoleSpec(
-            name="y", dtype="categorical", description="Category (e.g. condition)"
+            name="y", dtype="categorical", description="Gene set or term"
         ),
         "size": RoleSpec(
             name="size", dtype="continuous", description="Gene ratio or count"
@@ -1045,59 +1112,201 @@ class GSEADotplotPlot(BasePlot):
         "marker.showscale",
     }
 
-    def render(self, df, layer, state, processor, fig=None):
+    def render(
+        self,
+        df: DataFrame,
+        layer: PlotLayer,
+        view: LayerStateView,
+        state: Parameterized,
+        processor, fig=None
+    ) -> go.Figure:
 
         roles = layer.roles
-        x = self.get_param_from_roles(roles["x"], state)
-        y = self.get_param_from_roles(roles["y"], state)
-        size = self.get_param_from_roles(roles["size"], state)
-        color = self.get_param_from_roles(roles["color"], state)
+        # x = self.get_param_from_roles(roles["x"], state)
+        # y = self.get_param_from_roles(roles["y"], state)
+        # size = self.get_param_from_roles(roles["size"], state)
+        # color = self.get_param_from_roles(roles["color"], state)
+
+        x = view[roles["x"]]
+        y = view[roles["y"]]
+        size = view[roles["size"]]
+        color = view[roles["color"]]
+        color_continuous_scale = view["color_scale"].lower()
+        size_max = view["size_max"]
+        view_colorbar = view["show_colorbar"]
+        y_tickangle = view["y_tickangle"]
+
         kwargs = {}
         if layer.hover:
             kwargs["hover_data"] = layer.hover
+        analysis_order = (
+            df[x].cat.categories.tolist()
+            if pd.api.types.is_categorical_dtype(df[x])
+            else df[x].drop_duplicates().tolist()
+        )
+        if size in ["FDR q-val", "FWER p-val", "NOM p-val"]:
+            fp = [size_max, 0.01]
+            df["_size"] = 1 - df[size]
+        else:
+            fp = [0.01, 1]
+            df["_size"] = df[size]
         new_fig = px.scatter(
             df,
             x=x,
             y=y,
-            size=size,
+            size="_size",
             color=color,
-            color_continuous_scale=state.color_scale.lower(),
+            color_continuous_scale=color_continuous_scale,
             range_color=(df[color].min(), df[color].max()),
-            size_max=state.size_max,
+            size_max=size_max,
             title="GSEA",
+            category_orders={x:analysis_order},
             **kwargs,
         )
-        if not state.show_colorbar:
+        marker_x = [0.1, 0.25, 0.5, 1]
+        marker_y = np.interp(
+            marker_x,
+            [df[size].min(), df[size].max()],
+            fp,
+        )
+        marker_sizes = dict(zip(marker_x, marker_y))
+        for sx, sy in marker_sizes.items():
+            new_fig.add_trace(
+                go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode="markers",
+                    marker={
+                        "size": sy,
+                        "color": "black",
+                    },
+                    name=f"{sx:.1f}",
+                    legendgroup="size",
+                    legendgrouptitle_text=size,
+                )
+            )
+        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+        if not view["show_colorbar"]:
             new_fig.update_coloraxes(showscale=False)
+        new_fig.update_coloraxes(
+            colorbar={
+                "len": 0.6,
+                "y": 0.4,
+                "thickness": 18,
+                "yanchor": "middle",
+                "outlinewidth":0
+            },
+        )
+        new_fig.update_xaxes(
+            categoryorder="array",
+            categoryarray=analysis_order,
+            #   range=[-0.5, len(analysis_order)-0.5],
+        )
+
+        # colors = sample_colorscale(
+        #     "RdBu",
+        #     normalized_values
+        # )
+
         new_fig.update_traces(
             marker={
                 # size=df["_marker_size"],
-                "showscale": state.show_colorbar,
+                "showscale": view_colorbar,
+                # "line": {
+                #     "color": colors,
+                #     "width": 2,
+                # },
+            },
+            marker_colorbar={
+                "outlinewidth": 0,
+                "ticks": None,
+                "ticklen": 0,
+                "tickwidth": 0,
+                "tickcolor": "red",
+                "tickvals": [],
             },
             cliponaxis=False,
         )
         new_fig.update_layout(
             uniformtext_minsize=8,
             uniformtext_mode="hide",
-            showlegend=state.show_colorbar,
-            yaxis={"tickangle": state.y_tickangle},
+            showlegend=view_colorbar,
+            yaxis={"tickangle": y_tickangle},
+            margin={"r":180},
+            legend={'itemsizing': 'trace', 'groupclick': 'toggleitem'}
         )
 
-        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
 
         return _merge(fig, new_fig)
 
 
 ################################################################################
-# Barplot State
+# GSEA Scatterplot State
 ################################################################################
 
 
-class GSEABarplotState(PlotState):
+class GSEAScatterPlotState(DynamicPlotState):
 
     sidebar_group = "Layer"
 
-    top_x = param.Integer(default=20, bounds=(1, None), label="Top X Terms")
+    DYNAMIC_SELECTORS = [
+        DynamicSelectorSpec(
+            param_name="data_select",
+            role="gsea_name",
+            source="gsea",
+            from_result=False,
+            objects=[],
+            names=None,
+        ),
+    ]
+    data_select = param.Selector(
+        default=None,
+        objects=[],
+        allow_None=False,
+        label="Data Select",
+        doc="Select which gsea data to display.",
+    )
+
+    x_score = param.Selector(
+        default="FDR q-val",
+        objects=["FDR q-val", "NES", "ES", "FWER p-val", "NOM p-val"],
+        doc="X-axis score to display in the scatter plot.",
+        label="Score",
+    )
+    size = param.Selector(
+        default="NES",
+        objects=["NES", "ES", "FDR q-val", "FWER p-val", "NOM p-val", "Leading Edge %", "Size"],
+        doc="Size of the points in the scatter plot, based on the selected metric.",
+        label="Size by",
+    )
+    color = param.Selector(
+        default="NES",
+        objects=["NES", "ES", "FDR q-val", "FWER p-val", "NOM p-val", "Leading Edge %", "Size"],
+        doc="Color of the points in the scatter plot, based on the selected metric.",
+        label="Color by",
+    )
+    direction = param.Selector(
+        default="All",
+        objects=["All", "Up", "Down"],
+        label="Direction",
+    )
+    database = param.Selector(
+        default=None,
+        objects={
+            None: "All",
+            "KEGG_": "KEGG",
+            "REACTOME_": "REACTOME",
+            "HALLMARK_": "HALLMARK",
+            "GOBP_": "GOBP",
+            "BIOCARTA_": "BIOCARTA",
+        },
+        allow_None=True,
+        doc="Gene set database to filter by, e.g. KEGG, REACTOME, HALLMARK, GOBP, BIOCARTA",
+        label="Data Base",
+    )
+
+    top_x = param.Integer(default=20, bounds=None, label="Top X Terms")
+
     fdr_threshold = param.Number(
         default=1,
         bounds=(0.0, 1.0),
@@ -1109,11 +1318,230 @@ class GSEABarplotState(PlotState):
         doc="Filter gene sets by name. For multiple sets provide a comma-separated list.",
     )
     nes_range = param.Range(
-        default=(-5.0, 5.0),
-        bounds=(-5.0, 5.0),
+        default=(-15.0, 15.0),
+        bounds=(-30.0, 30.0),
         doc="Range of normalized enrichment scores (NES) to display",
         label="NES threshold",
     )
+    color = param.Selector(
+        default="NES",
+        objects=["NES", "ES", "FDR q-val", "FWER p-val"],
+        label="Color by",
+    )
+    size = param.Selector(
+        default="Leading Edge %",
+        objects=["Leading Edge %", "Size", "NES", "ES", "FDR q-val", "FWER p-val"],
+        label="Size by",
+    )
+    sort_by = param.Selector(
+        default="NES",
+        objects=["FDR q-val", "NES", "ES", "NOM p-val", "FWER p-val"],
+        doc="Sort by which column in the GSEA results table.",
+        label="Sort By",
+    )
+    sort_by_ascending = param.Boolean(default=False, label="Sort Ascending")
+    orientation = param.Selector(
+        default="h",
+        objects=["h", "v"],
+        label="Orientation",
+    )
+    color_scale = param.Selector(
+        default="Viridis",
+        objects=["Viridis", "Cividis", "Plasma", "Inferno", "Magma", "RdBu"],
+        label="Color Scale",
+    )
+    show_colorbar = param.Boolean(default=True, label="Show Colorbar")
+    size_max = param.Number(
+        default=15,
+        bounds=(1, 50),
+        label="Size Max",
+    )
+    y_tickangle = param.Integer(default=0, bounds=(-75, 75), label="Y Tick Angle")
+
+    section = None
+
+
+################################################################################
+# Scatter Plot
+################################################################################
+
+
+class GSEAScatterPlot(BasePlot):
+
+    ROLE_SPECS = {
+        "x": RoleSpec(name="x", dtype="categorical", description="Category (e.g. condition)"),
+        "y": RoleSpec(
+            name="y", dtype="categorical", description="Gene set or term"
+        ),
+        "size": RoleSpec(
+            name="size", dtype="continuous", description="Gene ratio or count"
+        ),
+        "color": RoleSpec(
+            name="color", dtype="continuous", description="Adjusted p-value or NES"
+        ),
+    }
+
+    state_cls = GSEAScatterPlotState
+
+    trace_capabilities = {
+        "marker.size",
+        "marker.color",
+        "marker.colorscale",
+        "marker.showscale",
+    }
+
+    def render(
+        self,
+        df: DataFrame,
+        layer: PlotLayer,
+        view: LayerStateView,
+        state: Parameterized,
+        processor, fig=None
+    ) -> go.Figure:
+
+        roles = layer.roles
+        selected_gsea = view["select_gsea"]
+        x = view[roles["x"]]
+        y = view[roles["y"]]
+        size = view[roles["size"]]
+        color = view[roles["color"]]
+        color_continuous_scale = view["color_scale"].lower()
+        size_max = view["size_max"]
+        view_colorbar = view["show_colorbar"]
+        y_tickangle = view["y_tickangle"]
+
+        kwargs = {}
+        if layer.hover:
+            kwargs["hover_data"] = layer.hover
+
+        new_fig = px.scatter(
+            df,
+            x=x,
+            y=y,
+            size=size,
+            color=color,
+            color_continuous_scale=color_continuous_scale,
+            range_color=(df[color].min(), df[color].max()),
+            size_max=size_max,
+            title=selected_gsea,
+            **kwargs,
+        )
+        new_fig = processor.apply(new_fig, state, self.trace_capabilities)
+        if not view["show_colorbar"]:
+            new_fig.update_coloraxes(showscale=False)
+
+        new_fig.update_traces(
+            marker={
+                # size=df["_marker_size"],
+                "showscale": view_colorbar,
+            },
+        )
+        new_fig.update_layout(
+            uniformtext_minsize=8,
+            uniformtext_mode="hide",
+            showlegend=view_colorbar,
+            yaxis={"tickangle": y_tickangle},
+        )
+
+
+        return _merge(fig, new_fig)
+
+################################################################################
+# Barplot State
+################################################################################
+
+
+class GSEABarplotState(DynamicPlotState):
+
+    sidebar_group = "Layer"
+
+    DYNAMIC_SELECTORS = [
+        DynamicSelectorSpec(
+            param_name="select_on",
+            role="gsea_name",
+            source="gsea",
+            from_result=False,
+            objects=[None],
+            names=["All"],
+        ),
+        DynamicSelectorSpec(
+            param_name="data_select",
+            role="gsea_name",
+            source="gsea",
+            from_result=False,
+            objects=[],
+        ),
+
+    ]
+    data_select = param.ListSelector(
+        default=[],
+        objects=[],
+        label="Data Select",
+        doc="Select which gsea data to display.",
+    )
+    direction = param.Selector(
+        default="All",
+        objects=["All", "Up", "Down"],
+        label="Direction",
+    )
+    database = param.Selector(
+        default=None,
+        objects={
+            None: "All",
+            "KEGG_": "KEGG",
+            "REACTOME_": "REACTOME",
+            "HALLMARK_": "HALLMARK",
+            "GOBP_": "GOBP",
+            "BIOCARTA_": "BIOCARTA",
+        },
+        allow_None=True,
+        doc="Gene set database to filter by, e.g. KEGG, REACTOME, HALLMARK, GOBP, BIOCARTA",
+        label="Data Base",
+    )
+    select_on = param.Selector(
+        default=None,
+        objects={
+            None: "All",
+        },
+        allow_None=True,
+        doc="GSEA run to use for selecting the top X terms to display. If None, aggregate over all runs.",
+        label="Select on",
+    )
+
+    top_x = param.Integer(default=20, bounds=(1, None), label="Top X Terms")
+    fdr_threshold = param.Number(
+        default=1,
+        bounds=(0.0, 1.0),
+        label="FDR Threshold",
+    )
+    fdr_metric = param.Selector(
+        default="FDR q-val",
+        objects=["FDR q-val", "FWER p-val", "NOM p-val"],
+        label="FDR Metric",
+    )
+    geneset_filter = param.String(
+        default="",
+        label="Filter Gene Sets",
+        doc="Filter gene sets by name. For multiple sets provide a comma-separated list.",
+    )
+    nes_range = param.Range(
+        default=(-15.0, 15.0),
+        bounds=(-30.0, 30.0),
+        doc="Range of normalized enrichment scores (NES or ES) to display",
+        label="Score threshold (NES or ES)",
+    )
+    size = param.Selector(
+        default="Leading Edge %",
+        objects=["Leading Edge %", "Size", "NES", "ES", "FDR q-val", "FWER p-val"],
+        label="Size by",
+    )
+    sort_by = param.Selector(
+        default="NES",
+        objects=["FDR q-val", "NES", "ES", "NOM p-val", "FWER p-val"],
+        doc="Sort by which column in the GSEA results table.",
+        label="Sort By",
+    )
+    sort_by_ascending = param.Boolean(default=False, label="Sort Ascending")
     score = param.Selector(
         default="NES",
         objects=["NES", "ES", "FDR q-val", "FWER p-val"],
@@ -1121,8 +1549,8 @@ class GSEABarplotState(PlotState):
     )
 
     bar_color = param.Selector(
-        default="Leading Edge %",
-        objects=["Leading Edge %", "Size", "NES", "ES", "FDR q-val", "FWER p-val"],
+        default="Analysis",
+        objects=["Analysis", "Leading Edge %", "Size", "NES", "ES", "FDR q-val", "FWER p-val"],
         label="Color by",
     )
     orientation = param.Selector(
@@ -1136,7 +1564,7 @@ class GSEABarplotState(PlotState):
         doc="Sort by which column in the GSEA results table.",
         label="Sort By",
     )
-    sort_by_ascending = param.Boolean(default=True, label="Sort Ascending")
+    sort_by_ascending = param.Boolean(default=False, label="Sort Ascending")
     y_tickangle = param.Integer(default=0, bounds=(-75, 75), label="Y Tick Angle")
     show_values = param.Boolean(default=True, label="Show Values")
     color_scale = param.Selector(
@@ -1165,9 +1593,9 @@ class GSEABarplotState(PlotState):
 class GSEABarplotPlot(BasePlot):
 
     ROLE_SPECS = {
-        "x": RoleSpec(name="x", dtype="categorical", description="Gene set"),
+        "x": RoleSpec(name="x", dtype="categorical", description="NES or enrichment score"),
         "y": RoleSpec(
-            name="y", dtype="continuous", description="NES or enrichment score"
+            name="y", dtype="continuous", description="Gene set"
         ),
         "color": RoleSpec(name="color", dtype="categorical", required=False),
     }
@@ -1180,23 +1608,32 @@ class GSEABarplotPlot(BasePlot):
         "marker.line.color",
     }
 
-    def render(self, df, layer, state, processor, fig=None):
+    def render(
+        self,
+        df: DataFrame,
+        layer: PlotLayer,
+        view: LayerStateView,
+        state: Parameterized,
+        processor, fig=None
+    ) -> go.Figure:
 
         roles = layer.roles
 
-        orientation = state.orientation
-        x = self.get_param_from_roles(roles["x"], state)
-        y = self.get_param_from_roles(roles["y"], state)
-        color = self.get_param_from_roles(roles["color"], state)
+        orientation = view["orientation"]
+        x = view[roles["x"]]
+        y = view[roles["y"]]
+        color = view[roles["color"]]
+
         kwargs = {}
         if layer.hover:
             kwargs["hover_data"] = layer.hover
-        if state.show_values:
+
+        if view["show_values"]:
             kwargs["text"] = x
 
         color_continuous_midpoint = None
         if color in ["FDR q-val", "FWER p-val"]:
-            color_continuous_midpoint = state.fdr_threshold
+            color_continuous_midpoint = view["fdr_threshold"]
 
         new_fig = px.bar(
             df,
@@ -1204,24 +1641,25 @@ class GSEABarplotPlot(BasePlot):
             y=y if orientation == "h" else x,
             orientation=orientation,
             color=color,
-            color_continuous_scale=state.color_scale.lower(),
+            color_continuous_scale=view["color_scale"].lower(),
             color_continuous_midpoint=color_continuous_midpoint,
+            barmode="group",
             title="GSEA Bar",
             **kwargs,
         )
         new_fig = processor.apply(new_fig, state, self.trace_capabilities)
-        if not state.show_colorbar:
+        if not view["show_colorbar"]:
             new_fig.update_coloraxes(showscale=False)
-        if state.show_values:
+        if view["show_values"]:
             new_fig.update_traces(
                 texttemplate="%{text:.2f}",
                 textposition="inside",
                 cliponaxis=False,
             )
-        show_text = "show" if state.show_values else "hide"
+        show_text = "show" if view["show_values"] else "hide"
         new_fig.update_layout(
             showlegend=False,  # state.show_colorbar,
-            yaxis={"tickangle": state.y_tickangle},
+            yaxis={"tickangle": view["y_tickangle"]},
         )
         new_fig.update_yaxes(
             tickmode="array",
@@ -1658,6 +2096,7 @@ PLOT_REGISTRY: dict[str, type[BasePlot]] = {
     "gsea_enrich": GSEAGseaPlot,
     "pca": PCAPlot,
     "scree": ScreePlot,
+    "gsea_scatter": GSEAScatterPlot,
 }
 
 

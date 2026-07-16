@@ -21,8 +21,13 @@ class DynamicValue:
 
 def depends(*deps):
     def decorator(fn):
-        fn.__dependencies__ = set(getattr(fn, "__dependencies__", set()))
-        fn.__dependencies__.update(deps)
+        existing = list(getattr(fn, "__dependencies__", []))
+
+        for dep in deps:
+            if dep not in existing:
+                existing.append(dep)
+
+        fn.__dependencies__ = existing
         return fn
 
     return decorator

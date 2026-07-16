@@ -54,7 +54,7 @@ from mmalignments.services.errors import (
 from mmalignments.services.io import parents
 from mmalignments.services.logging import ExternalLogger
 
-from .elements import ElementTag, generate_element_key_name, Runnable
+from .elements import ElementTag, Runnable, generate_element_key_name
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,6 @@ class External:
             parameters = (
                 Path(__file__).parent / f"{self.name}.json"
             )  # default path  TODO: put it somewhere else
-
         self.__init_parameters(parameters)
 
     def __init_parameters(

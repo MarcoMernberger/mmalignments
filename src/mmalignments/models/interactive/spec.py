@@ -15,13 +15,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Mapping
-from unicodedata import name
 
-import plotly.graph_objects as go
 import pandas as pd  # type: ignore[import]
-import param  # type: ignore[import]
-from param import Parameterized  # type: ignore[import]
+import plotly.graph_objects as go
 from pandas import DataFrame  # type: ignore[import]
+from param import Parameterized  # type: ignore[import]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AnalysisResult — fixed fields (raw/agg), but subscriptable by name too
@@ -141,13 +139,13 @@ class PlotConfig:
         self,
         result: AnalysisResult,
         registry: dict[str, type],
-        state: Parameterized | None = None,
+        layer_state_views: dict[str, LayerStateView],
     ) -> None:
         """After Analysis.run(): check the promised columns actually exist."""
         for layer in self.layers:
             df = result[layer.source]
             plot_cls = registry[layer.plot_type]
-            plot_cls.validate_roles(df, layer.roles, state)
+            plot_cls.validate_roles(df, layer.roles, layer_state_views[layer.alias])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,7 +204,8 @@ class DynamicSelectorSpec:
     source: str = "raw"
     from_result: bool = False
     include_none: bool = True
-
+    objects: list[Any] = field(default_factory=lambda: [])
+    names: list[str] | None = None
 
 class DynamicPlotState(PlotState):
     """
@@ -224,6 +223,30 @@ class DynamicPlotState(PlotState):
 
     DYNAMIC_SELECTORS: list[DynamicSelectorSpec] = []
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LayerStateView — a namespaced view of the combined app state for one layer
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LayerStateView:
+    def __init__(self, combined, mapping):
+        object.__setattr__(self, "_combined", combined)
+        object.__setattr__(self, "_mapping", mapping)
+
+    def resolve(self, name: str) -> str:
+        """
+        Resolve a plot parameter name:
+        - layer parameter -> current state value
+        - otherwise -> dataframe column name
+        """
+        if name in self._mapping:
+            return getattr(self._combined, self._mapping[name])
+        return name
+
+    def __getitem__(self, name: str) -> str:
+        return self.resolve(name)
+
+    def __getattr__(self, name):
+        return self.resolve(name)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BasePlot — the plot class contract
@@ -235,12 +258,15 @@ class BasePlot:
     state_cls: type[PlotState] = PlotState
     trace_capabilities: set[str] = set()
 
-    @classmethod
-    def get_param_from_roles(cls, name: str, state: PlotState | None = None) -> str:
-        if state is not None:
-            return getattr(state, name, name)
-        else:
-            return getattr(cls.state_cls, name, name)
+    # @classmethod
+    # def get_param_from_roles(cls, name: str, state: PlotState | None = None, layer_alias: str | None = None) -> str:
+    #     print("get_param_from_roles called with name:", name, "state:", state, "layer_alias:", layer_alias)
+    #     param_name = name if layer_alias is None else f"{layer_alias}_{name}"
+    #     if state is not None:
+    #         col = getattr(state, param_name, name)
+    #     else:
+    #         col = getattr(cls.state_cls, param_name, name)
+    #     return col
 
     @classmethod
     def required_roles(cls) -> set[str]:
@@ -252,8 +278,12 @@ class BasePlot:
 
     @classmethod
     def validate_roles(
-        cls, df: pd.DataFrame, roles: dict[str, str], state: PlotState | None = None
+        cls,
+        df: pd.DataFrame,
+        roles: dict[str, str],
+        view: LayerStateView,
     ) -> None:
+
         for role_name, spec in cls.ROLE_SPECS.items():
             if role_name not in roles:
                 if spec.required:
@@ -261,19 +291,21 @@ class BasePlot:
                         f"{cls.__name__}: missing required role '{role_name}'"
                     )
                 continue
-            col = cls.get_param_from_roles(roles[role_name], state=state)
+
+            col = view[roles[role_name]]
+
             if col not in df.columns:
                 raise ValueError(
-                    f"{cls.__name__}: role '{role_name}' maps to column "
-                    f"'{col}', which is not in the DataFrame "
-                    f"(columns: {list(df.columns)}) or the PlotState: {dir(state)}"
+                    f"{cls.__name__}: role '{role_name}' maps to '{col}', "
+                    f"not found in dataframe columns {list(df.columns)}"
                 )
 
     def render(
         self,
         df: pd.DataFrame,
         layer: PlotLayer,
-        state: PlotState,
+        layer_state_view: LayerStateView,
+        state: PlotState,   # now the combined plot state
         processor: "TraceProcessor",
         fig=None,
     ) -> go.Figure:

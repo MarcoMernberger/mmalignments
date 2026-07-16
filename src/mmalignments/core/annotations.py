@@ -286,6 +286,25 @@ class ColumnTag:
     def select_from_view(
         cls, columns: list[str], view: View | None = None
     ) -> list[str]:
+        """
+        Select columns from a list based on a View.
+
+        This method filters the given list of column names, returning only those
+        that match the criteria specified in the provided View. To be used to select
+        DataFrame columns.
+
+        Parameters
+        ----------
+        columns : list[str]
+            The list of column names to filter.
+        view : View | None, optional
+            The View containing filtering criteria. If None, all columns are returned.
+
+        Returns
+        -------
+        list[str]
+            A list of column names that match the specified filtering criteria.
+        """
         selected = []
         if view is None:
             return columns

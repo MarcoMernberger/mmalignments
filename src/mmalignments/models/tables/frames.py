@@ -117,7 +117,7 @@ class Morph:
         fn: Callable,
         *,
         view: View | None = None,
-        params: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> Morph:  # noqa: E501
         return cls(fn=fn, view_in=view, params=params or {})
 
@@ -217,12 +217,12 @@ def filter_to_threshold(
 
     return Morph.from_callable(
         filter_func,
+        view=view,
         params={
             "threshold": threshold,
             "how": how,
             "atleast": atleast,
             "columns": columns,
-            "view": view,
             "greater_than": greater_than,
         },
     )
@@ -421,9 +421,8 @@ class Tables:
     """
 
     def __init__(self):
-        self.default_output_spec = OutputSpec(
-            ext="parquet", additional_extensions=["tsv"]
-        )
+        pass
+
 
     @property
     def default_dir(self) -> Path:
@@ -432,6 +431,14 @@ class Tables:
         """
         return Path("results/tables")
 
+    @cached_property
+    def default_output_spec(self) -> OutputSpec:
+        ret = OutputSpec(
+            outdir=self.default_dir,
+            ext="parquet",
+            additional_extensions=("tsv",),
+        )
+        return ret
     # def _finalize(
     #     self,
     #     *,
@@ -506,7 +513,7 @@ class Tables:
         output_spec = output_spec or self.default_output_spec
         artifacts, output = ArtifactSet.generate_file_artifacts(
             tag=tag,
-            infile=infile,
+            default_dir=infile.parent,
             spec=output_spec,
             # column_schema=None,  # column_schema or running_schema,
             index_column=index_column or table_source.index_column,
@@ -562,7 +569,7 @@ class Tables:
         infile = source.primary.resolve()
         artifacts, output = ArtifactSet.generate_file_artifacts(
             tag=tag,
-            infile=infile,
+            default_dir=infile.parent,
             spec=output_spec or self.default_output_spec,
             # column_schema=source.primary.column_schema,
             index_column=source.primary.index_column,
@@ -663,7 +670,7 @@ class Tables:
         output_spec = output_spec or self.default_output_spec
         artifacts, _ = ArtifactSet.generate_file_artifacts(
             tag=tag,
-            infile=infile,
+            default_dir=infile.parent,
             spec=output_spec,
             index_column=index_column or first_element.primary.index_column,
         )  # in another function
@@ -787,7 +794,7 @@ class Tables:
 
         artifacts, output = ArtifactSet.generate_file_artifacts(
             tag=tag,
-            infile=first_element.artifacts[fkey].resolve(),
+            default_dir=first_element.artifacts[fkey].resolve().parent,
             spec=output_spec,
             index_column=first_element.artifacts[fkey].index_column,
         )  # in another function
@@ -974,7 +981,8 @@ class Tables:
         ]
 
         def __rename_legacy(df: DataFrame) -> DataFrame:
-            df = df[df["gene_stable_id"].str.startswith("ENS")]  # filter for gene rows
+            mask = df["gene_stable_id"].str.startswith("ENS")
+            df = df.loc[mask, :]  # type: ignore[return-value]
             for col in gene_cols:
                 df[col] = df[col].astype("str")
             if rename:
@@ -1259,3 +1267,24 @@ def to_long(
         return long
 
     return Morph.from_callable(__transform)
+
+
+def morph_rank_file(id_column: str = "id") -> Morph:
+    def __transform(data: DataFrame) -> DataFrame:
+        data[id_column] = data[id_column].str.capitalize()
+        return data
+
+    return Morph.from_callable(__transform)
+
+
+def filter_to_group(
+    group: str, values: list[str], *, view: View | None = None
+) -> Morph:
+    def __filter(df: DataFrame) -> DataFrame:
+        if view is not None:
+            selected_columns= ColumnTag.select_from_view(df.columns.to_list(), view)
+            if selected_columns:
+                df = df[selected_columns]   # type: ignore[assignment]
+        return df[df[group].isin(values)]   # type: ignore[return-value]
+
+    return Morph.from_callable(__filter, view=view, params={"group": group})
