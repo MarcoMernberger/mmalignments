@@ -18,7 +18,9 @@ from typing import (
     TypeVar,
     cast,
     overload,
+    Protocol,
 )
+from wsgiref.validate import validator
 
 import pandas as pd
 from numpy import ndarray
@@ -31,18 +33,11 @@ from mmalignments.services.dependencies import (
     function_hash,
     stable_hash,
 )
-from mmalignments.services.io import parents, paths_exists
+from mmalignments.services.io import parents, paths_exists, concat_fastq
 
 from .artifacts import Artifact, ArtifactSet, TableArtifact, TransientArtifact
 from .registry import current_element_registry
-from .tags import (
-    ElementTag,
-    Method,
-    Omics,
-    PartialElementTag,
-    Stage,
-    State,
-)
+from .tags import ElementTag, Method, Omics, PartialElementTag, Stage, State, from_prior
 
 
 class Runnable:
@@ -197,6 +192,10 @@ class Element:
             key=str,
         )
         return files if files else None
+
+    @cached_property
+    def outputs(self):
+        return self.output_files
 
     def _init_store_attributes(self):
         reserved = {
@@ -686,41 +685,139 @@ class FileElement(FilesElement):
         return path.resolve()
 
 
-class Sample(FilesElement):
-    #
+class Source(Protocol):  # can be an Element, Path, str or path mapping
+    @cached_property
+    def name(self) -> str: ...
+
+    @cached_property
+    def artifacts(self) -> Mapping[str, list[Path]]: ...
+
+    @cached_property
+    def determinants(self) -> tuple[str, ...]: ...
+
+    @cached_property
+    def outputs(self) -> tuple[Path]: ...
+
+    def run(self) -> Runnable: ...
+
+    @cached_property
+    def tag(self) -> ElementTag: ...
+
+
+class FileSource(Source):  # can be an Element, Path, str or path mapping
 
     def __init__(
         self,
-        path: Path | str | Mapping[str, Path | str],
-        *,
-        root: str | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
+        name: str,
+        input: Path | str | Mapping[str, Path | str | list[Path]],
+        tag: ElementTag | None = None,
         is_prefix: bool = False,
-        pres: tuple[Element, ...] | None = None,
     ):
-        super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
+        self._name = name
+        self.normalized = FileSource.normalize(input, is_prefix=is_prefix)
+        self._tag = tag or ElementTag(
+            root=self.name,
+            level=0,
+            omics=None,
+            stage=Stage.INPUT,
+            method=Method.CHECK,
+            state=State.RAW,
+        )
 
+    @classmethod
+    def from_prefix(cls, path: Path) -> Mapping[str, tuple[Path, ...]]:
+        artifacts = {}
+        p = Path(path)
+        file_dir = p.parent
+        file_prefix = p.stem
+        for p in file_dir.iterdir():
+            if p.stem.startswith(file_prefix):
+                artifacts[p.stem] = (p.resolve(),)
+        return artifacts
 
-class NextGenSampleElement(Sample):
-
-    def __init__(
-        self,
-        path: Path | str | Mapping[str, Path | str],
-        *,
-        root: str | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
-        read_group: str | None = None,
-        reverse_reads: bool = False,
-        cache_dir: Path | None = None,
-        result_dir: Path | None = None,
+    @classmethod
+    def normalize(
+        cls,
+        input: Path | str | Mapping[str, Path | str | list[Path]],
         is_prefix: bool = False,
-        pres: tuple[Element, ...] | None = None,
-    ):
-        if isinstance(path, (str, Path)):
-            root = root or Path(path).stem
+    ) -> Mapping[str, tuple[Path, ...]]:
+        if isinstance(input, (str, Path)):
+            if is_prefix:
+                return cls.from_prefix(Path(input))
+            return {"primary": (Path(input),)}
+        elif isinstance(input, Mapping):
+            normalized: dict[str, tuple[Path, ...]] = {}
+            for k, v in input.items():
+                if isinstance(v, (str, Path)):
+                    normalized[k] = (Path(v),)
+                elif isinstance(v, list):
+                    normalized[k] = tuple(Path(p) for p in v)
+                else:
+                    raise TypeError(f"Invalid type for path mapping value: {type(v)}")
+            return normalized
         else:
-            first = next(iter(path.values()))
-            root = root or Path(first).stem
+            raise TypeError(f"Invalid type for input: {type(input)}")
+
+    @cached_property
+    def name(self) -> str:
+        return self._name
+
+    @cached_property
+    def artifacts(self) -> ArtifactSet:
+        return ArtifactSet.from_any(self.normalized)
+
+    @cached_property
+    def determinants(self) -> tuple[str, ...]:
+        return ()
+
+    @cached_property
+    def outputs(self) -> tuple[Path, ...]:
+        return tuple(p for paths in self.artifacts.values() for p in paths)
+
+    def run(self) -> Runnable:
+        pass
+
+    @cached_property
+    def tag(self) -> ElementTag:
+        return self._tag
+
+
+class SampleSource(FileSource):
+
+    def __init__(
+        self,
+        name: str,
+        input: Path | str | Mapping[str, Path | str | list[Path]],
+        tag: ElementTag | None = None,
+        is_prefix: bool = False,
+    ):
+        super().__init__(name, input, tag=tag, is_prefix=is_prefix)
+
+    @cached_property
+    def artifacts(self) -> ArtifactSet:
+        to_artifact = {}
+        for name, filepaths in self.normalized.items():
+            if len(filepaths) > 1:
+                raise NotImplementedError("Implement gerning of fastqs")
+            elif len(filepaths) == 1:
+                to_artifact[name] = filepaths[0]
+            else:
+                raise ValueError(f"No filepaths found for artifact name: {name}")
+        return ArtifactSet.from_any(to_artifact)
+
+
+class Sample(Element):
+
+    def __init__(
+        self,
+        source: Source,
+        *,
+        root: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        pres: tuple[Element, ...] | None = None,
+    ):
+        self.source = source
+        root = root or source.name
         tag = ElementTag(
             root=root,
             level=0,
@@ -729,11 +826,48 @@ class NextGenSampleElement(Sample):
             method=Method.CHECK,
             state=State.RAW,
         ).merge(tag)
-        super().__init__(path, root=root, tag=tag, is_prefix=is_prefix, pres=pres)
+        key = f"{tag.default_name}"
+        super().__init__(
+            key,
+            source.run,
+            tag=tag,
+            determinants=source.determinants,
+            inputs=source.outputs,
+            artifacts=source.artifacts,
+            pres=pres,
+            name=key,
+        )
+
+
+class NextGenSampleElement(Sample):
+
+    def __init__(
+        self,
+        # path: Path | str | Mapping[str, Path | str],
+        source: Source,
+        *,
+        root: str | None = None,
+        tag: PartialElementTag | ElementTag | None = None,
+        read_group: str | None = None,
+        reverse_reads: bool = False,
+        cache_dir: Path | None = None,
+        result_dir: Path | None = None,
+        pres: tuple[Element, ...] | None = None,
+    ):
+        tag = from_prior(
+            source.tag,
+            tag,
+            root=source.tag.root,
+            level=source.tag.level,
+            state=State.RAW,
+            stage=Stage.INPUT,
+        )
+        super().__init__(source, root=root, tag=tag, pres=pres)
+
         self.reverse_reads = reverse_reads
         self.read_group = read_group
-        self.cache_dir = cache_dir or Path("cache") / "samples" / self.name
-        self.result_dir = result_dir or Path("results") / "samples" / self.name
+        self.cache_dir = cache_dir or Path("cache") / "samples" / source.tag.root
+        self.result_dir = result_dir or Path("results") / "samples" / source.tag.root
         self.pairing: Pairing = (
             Pairing.PAIRED if len(self.artifacts) > 1 else Pairing.SINGLE
         )

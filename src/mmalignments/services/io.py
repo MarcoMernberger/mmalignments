@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import subprocess
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
@@ -421,3 +422,27 @@ def get_paths_from_prefix_path(path: str | Path) -> Mapping[str, Path]:
         if p.stem.startswith(prefix):
             paths[p.stem] = p.absolute()
     return paths
+
+
+def concat_fastq(inputs: tuple[Path, ...], output: Path) -> None:
+    """
+    Concatenate multiple FASTQ files into a single output FASTQ file.
+
+    Parameters
+    ----------
+    inputs : tuple[Path, ...]
+        The input FASTQ files to concatenate.
+    output : Path
+        The output FASTQ file.
+
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    files = [str(p) for p in inputs]
+
+    with output.open("wb") as out:
+        subprocess.run(
+            ["cat", *files],
+            stdout=out,
+            check=True,
+        )

@@ -430,7 +430,7 @@ class NGmerge(External):
 
         fastq_r1 = sample.fastq_r1
         fastq_r2 = sample.fastq_r2
-
+        print(fastq_r1)
         tag = from_prior(
             sample.tag,
             tag,

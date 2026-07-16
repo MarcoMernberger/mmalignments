@@ -19,6 +19,8 @@ from mmalignments.models.elements import (
     TableElement,
     element,
     sample_fastqs,
+    FileSource,
+    SampleSource,
 )
 from mmalignments.models.tags import (
     ElementTag,
@@ -986,8 +988,9 @@ class FastGrab(External):
                 omics=Omics.DNA,
                 ext="fq",
             )
+            source = SampleSource(sample_name, paths, consolidate_el.tag)
             sample_elements[sample_name] = NextGenSampleElement(
-                paths,
+                source,
                 tag=tag,
                 pres=(consolidate_el,),
             )
@@ -1002,9 +1005,14 @@ class FastGrab(External):
             logger.warning("Undetermined FASTQ files are missing; returning None")
             return None
         root = f"{consolidate_el.root}_Undetermined"
+        source = SampleSource(
+            "Undetermined",
+            {"fastq_r1": undetermined_r1, "fastq_r2": undetermined_r2},
+            consolidate_el.tag,
+        )
 
         return NextGenSampleElement(
-            {"fastq_r1": undetermined_r1, "fastq_r2": undetermined_r2},
+            source,
             root=root,
             tag=from_prior(
                 consolidate_el.tag,
