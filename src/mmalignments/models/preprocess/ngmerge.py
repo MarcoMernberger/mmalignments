@@ -28,12 +28,10 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import Mapping
+from typing import Literal, Mapping
 
-from mmalignments.models.elements import (
-    NextGenSampleElement,
-    element,
-)
+from mmalignments.models.artifacts import ArtifactSet, FastqArtifact, OutputSpec
+from mmalignments.models.elements import Element, NextGenSample, element
 from mmalignments.models.parameters import (
     ParamRegistry,
     Params,
@@ -55,7 +53,6 @@ from ..externals import (
     External,
     ExternalRunConfig,
     SubroutineIn,
-    ToolThreadSpec,
     subroutine,
 )
 
@@ -269,7 +266,7 @@ class NGmerge(External):
     def __init__(
         self,
         name: str = "ngmerge",
-        primary_binary: str = "ngmerge",
+        primary_binary: str = "NGmerge",
         version: str | None = None,
         source: str = "https://github.com/jsh58/NGmerge.git",
         parameters: Mapping[str, ParamSet] | ParamSet | None = None,
@@ -352,7 +349,16 @@ class NGmerge(External):
 
     def default_output_dir(self, sample_name: str) -> Path:
         """Return the default output directory for a given sample."""
-        return Path("results") / "counts" / self.version_name / sample_name
+        return Path("results") / self.version_name / sample_name
+
+    def default_output_spec(
+        self, sample_name: str, compression: Literal["Raw", "Gzip"] = "Gzip"
+    ) -> OutputSpec:
+        """Return the default output directory for a given sample."""
+        ext = "fq" if compression == "Raw" else "fq.gz"
+        return OutputSpec(
+            stem=sample_name, outdir=self.default_output_dir(sample_name), ext=ext
+        )
 
     # -----------------------------------------------------------------------
     # count — high-level @element
@@ -361,15 +367,15 @@ class NGmerge(External):
     @element
     def merge(
         self,
-        sample: NextGenSampleElement,
+        sample: NextGenSample,
         *,
         mode: str = "stitch",
+        compression: Literal["Raw", "Gzip"] = "Gzip",
         tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
+        outspec: OutputSpec | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> NextGenSampleElement:
+    ) -> Element:
         """Merge paired-end reads in a sample.
 
         Runs ``ngmerge`` on the FASTQ file(s) of *sample* and writes
@@ -390,18 +396,16 @@ class NGmerge(External):
 
         Parameters
         ----------
-        sample : NextGenSampleElement
+        sample : NextGenSample
             Input sample.  Both single-end and paired-end samples are handled
             automatically.
         mode : str
             Mode for merging reads. Options are "stitch" (default) or "adapter-removal".
         tag : PartialElementTag | ElementTag | None
             Optional tag override.
-        outdir : Path | str | None
-            Output directory; defaults to
-            ``results/counts/<version>/<sample.root>``.
-        filename : Path | str | None
-            Output file name; defaults to the tag's ``default_output``.
+        outspec: OutputSpec | None
+            Optional output specification.  If *None*, a default is derived from the
+            sample name.
         params : Params | None
             Trimming parameters.  Recognised keys:
 
@@ -421,16 +425,15 @@ class NGmerge(External):
         Element
             Element whose artifact ``"tsv"`` is the path to the counts TSV.
         """
-        if not hasattr(sample, "fastq_r1"):
-            raise ValueError("Sample element must have 'fastq_r1' attribute.")
-        if not hasattr(sample, "fastq_r2"):
+        if not hasattr(sample, "r1"):
+            raise ValueError("Sample element must have 'r1' attribute.")
+        if not hasattr(sample, "r2"):
             raise ValueError(
-                "Sample element must have 'fastq_r2' attribute (can be None)."
+                "Sample element must have 'r2' attribute (can be None)."
             )  # noqa: E501
 
-        fastq_r1 = sample.fastq_r1
-        fastq_r2 = sample.fastq_r2
-        print(fastq_r1)
+        fastq_r1 = sample.r1
+        fastq_r2 = sample.r2
         tag = from_prior(
             sample.tag,
             tag,
@@ -438,33 +441,34 @@ class NGmerge(External):
             method=Method.NGMERGE,
             state=State.MERGED,
         )
-
-        output_dir = Path(outdir or self.default_output_dir(sample.root))
-        out_filename = filename or tag.default_output
-        output_fastq = output_dir / out_filename
+        spec = self.default_output_spec(sample.root).merge(outspec)
+        output_fastq = spec.path()
 
         runner = self.run_ngmerge(
             fastq_r1=fastq_r1,
             fastq_r2=fastq_r2,
             output_fastq=output_fastq,
             mode=mode,
+            compression=compression,
             params=params,
             cfg=cfg,
         )
 
         key, name = self.build_element_name(tag)
         determinants = (mode,) + self.signature_determinants(params)
-        inputs = (fastq_r1, fastq_r2)
-
-        return NextGenSampleElement(
-            runner,
+        inputs = (fastq_r1, fastq_r2) if fastq_r2 is not None else (fastq_r1,)
+        artifacts = ArtifactSet(FastqArtifact(output_fastq), primary_name="fastq")
+        source = Element(
             key=key,
-            name=name,
+            run=runner,
+            tag=tag,
             determinants=determinants,
             inputs=inputs,
-            pres=(sample,),
-            artifacts={"fastq_r1": output_fastq},
+            artifacts=artifacts,
+            pres=sample.pres,
+            name=name,
         )
+        return source
 
     # -----------------------------------------------------------------------
     # count — low-level @subroutine
@@ -473,10 +477,11 @@ class NGmerge(External):
     @subroutine
     def run_ngmerge(
         self,
-        fastq_r1: Path | str,
-        fastq_r2: Path | str,
+        fastq_r1: Path,
+        fastq_r2: Path,
         output_fastq: Path | str,
         mode: str = "stitch",
+        compression: Literal["Raw", "Gzip"] = "Gzip",
         *,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
@@ -504,12 +509,9 @@ class NGmerge(External):
         SubroutineIn
             Tuple consumed by the ``@subroutine`` decorator.
         """
-        fastq_r1 = Path(fastq_r1).absolute()
-        fastq_r2 = Path(fastq_r2).absolute()
-        output_fastq = Path(output_fastq).absolute()
+        output_fastq = Path(output_fastq).resolve()
 
         arguments = [
-            self.primary_binary,
             "-1",
             str(fastq_r1),
             "-2",
@@ -517,6 +519,8 @@ class NGmerge(External):
             "-o",
             str(output_fastq),
         ]
+        if compression == "Gzip":
+            arguments.append("-z")
         if mode == "adapter-removal":
             arguments += ["-a", "-d"]
 

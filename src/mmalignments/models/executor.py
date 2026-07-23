@@ -19,7 +19,11 @@ from rich.console import Console  # type: ignore[import]
 from mmalignments.models.elements import Element, explain_signature_diff
 from mmalignments.models.externals import External
 from mmalignments.models.registry import ElementRegistry, element_build_context
-from mmalignments.models.resources import ResourceConfig, _current_resources, _current_tool_log_dir
+from mmalignments.models.resources import (
+    ResourceConfig,
+    _current_resources,
+    _current_tool_log_dir,
+)
 from mmalignments.models.status import (
     NodeState,  # type: ignore[import]
     ProgressReporter,
@@ -379,6 +383,7 @@ class Executor:
             return
         cache = self.load_cache(self.signature_store_path)
         nodes = self.collect(targets)
+
         order = self.toposort(nodes)
         self.registry.write_registry(self.elements_file)
         self.check_duplicate_outputs(nodes)
@@ -527,9 +532,13 @@ class Executor:
                 return True
         return False
 
-    def _evaluate_node(self, node, cache, cached_sig_data: dict | None = None) -> tuple[bool, str]:
+    def _evaluate_node(
+        self, node, cache, cached_sig_data: dict | None = None
+    ) -> tuple[bool, str]:
         cached_sig = cache.get(node.key)
-        skip, reason = node.skip(cached_signature=cached_sig, cached_sig_data=cached_sig_data)
+        skip, reason = node.skip(
+            cached_signature=cached_sig, cached_sig_data=cached_sig_data
+        )
         return skip, reason
 
     def _log_node(self, node, reporter, skip, reason, log_run_only, verbose) -> str:

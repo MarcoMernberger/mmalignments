@@ -21,69 +21,74 @@ except PackageNotFoundError:  # pragma: no cover
 #     jobify,
 #     write_lengths,  # noqa: F401
 # )
-from mmalignments.models.aligners import (
-    BCFtools,
-    Bedtools,  # noqa: F401
-    BWAMem2,
-    Samtools,
-)
-from mmalignments.models.callers.gatk import GATK  # noqa: F401
+# from mmalignments.models.aligners import (
+#     BCFtools,
+#     Bedtools,  # noqa: F401
+#     BWAMem2,
+#     Samtools,
+# )
+# from mmalignments.models.callers.gatk import GATK  # noqa: F401
 from mmalignments.models.data import Genome, Pairing, Sample  # noqa: F401
 from mmalignments.models.elements import (
     Element,
-    FileElement,  # noqa: F401
-    FilesElement,
-    NextGenSampleElement,  # noqa: F401
+    # FileElement,  # noqa: F401
+    # FilesElement,
+    # NextGenSampleElement,  # noqa: F401
+    FileSource,
+    FastqSource,
+    NextGenSample,
     ValidationPolicy,
 )
 from mmalignments.models.executor import Executor  # noqa: F401
 from mmalignments.models.externals import ExternalRunConfig  # noqa: F401
 from mmalignments.models.parameters import Params  # noqa: F401
-from mmalignments.models.qc import (
-    FastQC,
-    MultiQC,
-    post_mapping_qc_with_multiqc,
-    pre_alignment_qc,
-)
-from mmalignments.models.reports.report import MutationalLoadReport  # noqa: F401
-from mmalignments.services import ensure#, initlog  # noqa: F401
+
+# from mmalignments.models.qc import (
+#     FastQC,
+#     MultiQC,
+#     post_mapping_qc_with_multiqc,
+#     pre_alignment_qc,
+# )
+# from mmalignments.models.reports.report import MutationalLoadReport  # noqa: F401
+from mmalignments.services import ensure  # , initlog  # noqa: F401
 from mmalignments.models.reports import MutationalLoadReport
 from mmalignments.models.tags import ElementTag  # noqa: F401
+
 # from mmalignments.models.differential.deseq2 import DESeq2  # noqa: F401
 # from mmalignments.models.differential.edger import EdgeR  # noqa: F401
 
 # from .core import ensemblmap  # noqa: F401
 
 __all__ = [
-    "Bedtools",
-    "BCFtools",
-    "BWAMem2",
+    # "Bedtools",
+    # "BCFtools",
+    # "BWAMem2",
+    # "FileElement",
+    # "FilesElement",
+    "ensure",
+    "Executor",
     "Element",
     "ElementTag",
     "ExternalRunConfig",
-    "FilesElement",
-    "FileElement",
-    "ensure",
-    "Executor",
-    "FastQC",
-    "FilesElement",
-    "ensemblmap",
-    "GATK",
+    # "FastQC",
+    # "FilesElement",
+    # "ensemblmap",
+    # "GATK",
     "Genome",
-    "index_genome",
+    # "index_genome",
     # "initlog",
-    "jobify",
-    "MultiQC",
+    # "jobify",
+    # "MultiQC",
     "MutationalLoadReport",
-    "NextGenSampleElement",
+    # "NextGenSampleElement",
     "Params",
-    "pre_alignment_qc",
-    "post_mapping_qc_with_multiqc",
+    # "pre_alignment_qc",
+    # "post_mapping_qc_with_multiqc",
     "Sample",
-    "Samtools",
+    # "Samtools",
     "ValidationPolicy",
     "__version__",
-    "write_lengths",
+    # "write_lengths",
     # "DESeq2",
     # "EdgeR",
 ]

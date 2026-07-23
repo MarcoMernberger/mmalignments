@@ -25,20 +25,33 @@ from mmalignments.services.io import read_frame, read_schema
 ArtifactType = Literal["file", "value"]
 ArtifactLifeTime = Literal["persistent", "transient", "ephemeral"]
 
+
 @dataclass(frozen=True)
 class FileSpec:
     name: str
     ext: str
 
+
 @dataclass(frozen=True)
 class OutputSpec:
-    name: str | None = None
+    stem: str | None = None
     outdir: Path | None = None
     prefix: str = ""
     suffix: str = ""
     ext: str = "parquet"
-    additional_extensions: tuple[str, ...] | None = None
-    additional_output: dict[str, FileSpec] = field(default_factory=dict)
+    exts: tuple[str, ...] | None = None
+    additional_output: dict[str, FileSpec] = field(
+        default_factory=dict
+    )  # files in addition to primary output, e.g. {"tsv": FileSpec(name="results", ext="tsv")}
+
+    def __post_init__(self):
+        extensions = set((self.ext,) + (self.exts or ()))
+        keys = set(self.additional_output.keys())
+        duplicate = keys & extensions
+        if duplicate:
+            raise ValueError(
+                f"Duplicate keys in additional_output, conflicting with extensions: {duplicate}"
+            )
 
     def _make_path(self, filename: str) -> Path:
         if self.outdir is None:
@@ -49,20 +62,24 @@ class OutputSpec:
     def _make_file_name(self, name: str, ext: str) -> str:
         return f"{self.prefix}{name}{self.suffix}.{ext}"
 
-    def files(self, default_name: str | None = None) -> Iterator[tuple[str, Path]]:
-        name = self.name or default_name
+    @property
+    def files(self) -> dict[str, Path]:
+        return dict(self.iterfiles())
+
+    def iterfiles(self, default_name: str | None = None) -> Iterator[tuple[str, Path]]:
+        name = self.stem or default_name
         if name is None:
             return
 
         # primary
         yield (
-            "primary",
+            self.ext,
             self._make_path(self._make_file_name(name, self.ext)),
         )
         # primary additional extensions
-        for ext in self.additional_extensions or ():
+        for ext in self.exts or ():
             yield (
-                f"primary_{ext}",
+                ext,
                 self._make_path(self._make_file_name(name, ext)),
             )
         # additional named files
@@ -72,15 +89,17 @@ class OutputSpec:
                 self._make_path(self._make_file_name(extra.name, extra.ext)),
             )
 
-    def filename(self, default_name: str | None = None) -> str | None:
-        name = self.name or default_name
+    def filename(self, default_name: str | None = None) -> str:
+        name = self.stem or default_name
         if name is None:
-            return None
+            raise ValueError("No name provided for output file.")
         return self._make_file_name(name, self.ext)
 
-    def path(self, default_name: str | None = None) -> Path | None:
+    def path(self, default_name: str | None = None) -> Path:
         filename = self.filename(default_name=default_name)
-        return self._make_path(filename) if filename is not None else None
+        if filename is None:
+            raise ValueError("No name provided for output file.")
+        return self._make_path(filename)
 
     def merge(self, other: "OutputSpec | None") -> "OutputSpec":
         if other is None:
@@ -106,11 +125,24 @@ class OutputSpec:
 
         return replace(self, **values)
 
+    def add_output(self, key: str, spec: FileSpec) -> OutputSpec:
+        if key == self.ext or key in (self.exts or ()):
+            raise ValueError(f"Output key '{key}' conflicts with extension '{key}'.")
+        return replace(
+            self,
+            additional_output={
+                **self.additional_output,
+                key: spec,
+            },
+        )
+
 
 @dataclass(frozen=True)
 class ArtifactDef:
     cls: type[Artifact]
-    kwargs: Mapping[str, Any] = field(default_factory=dict)
+    kwargs: MappingProxyType[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 class ArtifactSet(Mapping):
@@ -147,6 +179,13 @@ class ArtifactSet(Mapping):
         )  # noqa: E501
         yield from self._extras
 
+    def iterfiles(self) -> Iterator[Path]:
+        for a in self.values():
+            if hasattr(a, "resolve"):
+                yield a.resolve()
+            elif isinstance(a, FastqArtifact):
+                yield from a
+
     def __len__(self) -> int:
         return 1 + len(self._extras)
 
@@ -157,6 +196,10 @@ class ArtifactSet(Mapping):
     @property
     def primary_name(self) -> str | None:
         return self._primary_name
+
+    @property
+    def outputs(self) -> tuple[Path, ...]:
+        return tuple(self.iterfiles())
 
     def with_extra(self, key: str, value: Any) -> ArtifactSet:
         if key == "primary" or key == self._primary_name or key in self._extras:
@@ -175,8 +218,8 @@ class ArtifactSet(Mapping):
 
     @classmethod
     def from_any(
-        cls, x: "ArtifactSet | Mapping[str, Any]", primary_key: str = "primary"
-    ) -> "ArtifactSet":
+        cls, x: ArtifactSet | Mapping[str, Any], primary_key: str = "primary"
+    ) -> ArtifactSet:
         """
         Convert a mapping to an ArtifactSet for backwards compatibility. If
         the mapping does not contain a key for the primary artifact, a fallback
@@ -219,19 +262,11 @@ class ArtifactSet(Mapping):
     ) -> tuple[ArtifactSet, list[Path]]:
 
         definitions = {
-            "primary": ArtifactDef(
-                TableArtifact,
-                {"index_column": index_column}
-            )
+            "primary": ArtifactDef(TableArtifact, {"index_column": index_column})
         }
-        artifacts = cls.generate(
-            tag,
-            default_dir,
-            spec,
-            definitions=definitions
-        )
-        return artifacts, list(artifacts.output_files().values())
-
+        artifacts = cls.generate(tag, default_dir, spec, definitions=definitions)
+        outputs = list(artifacts.output_files().values())
+        return artifacts, outputs  # backwards compatibility: remove soon
 
     @classmethod
     def generate(
@@ -240,30 +275,34 @@ class ArtifactSet(Mapping):
         default_dir: Path | None = None,
         spec: OutputSpec | None = None,
         definitions: Mapping[str, ArtifactDef] | None = None,
-    ):
+    ) -> ArtifactSet:
         # ensure we have a name and directory
-        default = ArtifactDef(TableArtifact)  # assuming we have mostly tables, should be paths
+        default = ArtifactDef(
+            TableArtifact
+        )  # assuming we have mostly tables, should be paths
         definitions = definitions or {}
         default_dir = default_dir or Path("results")
-        default_spec = OutputSpec(
-            name=tag.default_name,
-            outdir=default_dir
-        )
-        spec = default_spec.merge(spec)
-        artifacts = {}
-        for key, path in spec.files(default_name=tag.default_name):
-
+        spec = OutputSpec(stem=tag.default_name, outdir=default_dir).merge(spec)
+        additional_artifacts = {}
+        primary_name = spec.ext or "primary"
+        primary = None
+        for key, path in spec.iterfiles(default_name=tag.default_name):
             definition = definitions.get(key, default)
-            artifacts[key] = definition.cls(
-                path,
-                **definition.kwargs,
-            )
-        primary = artifacts.pop("primary")
+            if key == primary_name:
+                primary = definition.cls(
+                    path,
+                    **definition.kwargs,
+                )
+            else:
+                additional_artifacts[key] = definition.cls(
+                    path,
+                    **definition.kwargs,
+                )
         return ArtifactSet(
             primary,
-            **artifacts,
+            primary_name=primary_name,
+            **additional_artifacts,
         )
-
 
     def with_extras(self, extras: Mapping[str, Any]) -> "ArtifactSet":
         """
@@ -332,10 +371,13 @@ class ArtifactSet(Mapping):
             k: a.resolve() for k, a in self.items() if hasattr(a, "resolve")
         }  # noqa: E501
 
+    def files(self) -> Iterator[Path]:
+        for a in self.values():
+            if hasattr(a, "resolve"):
+                yield a.resolve()
+
 
 class Artifact(ABC):
-    def resolve(self) -> Any:
-        raise NotImplementedError
 
     def signature(self) -> str:
         raise NotImplementedError
@@ -443,6 +485,48 @@ class Artifact(ABC):
 #     def schema(self) -> list[str]:
 #         """Return the list of column names in the table."""
 #         return read_schema(self.path)
+
+
+@dataclass(frozen=True)
+class FastqArtifact(Artifact):
+    r1: Path
+    r2: Path | None = None
+    FASTQ_SUFFIXES: tuple[str, ...] = ("fq", "fastq", "fq.gz", "fastq.gz")
+
+    @property
+    def stem(self) -> str:
+        stem = self.r1.name
+        for suffix in self.FASTQ_SUFFIXES:
+            if stem.endswith(suffix):
+                stem = stem.removesuffix(suffix)
+                break
+        return stem
+
+    def signature(self) -> str:
+        for_hash = (
+            (file_signature(self.r1), file_signature(self.r2))
+            if self.r2
+            else (file_signature(self.r1),)
+        )
+        return stable_hash(for_hash)
+
+    @property
+    def paired(self) -> bool:
+        return self.r2 is not None
+
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        if self.paired:
+            return (self.r1.resolve(), self.r2.resolve())  # type: ignore[return-value]
+        else:
+            return (self.r1.resolve(),)
+
+    def __iter__(self) -> Iterator[Path]:
+        for fqfile in self.paths:
+            yield fqfile
+
+    def __str__(self):
+        return f"FastqArtifact({self.r1}\n{self.r2}\n)"
 
 
 @dataclass(frozen=True)

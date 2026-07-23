@@ -12,7 +12,7 @@ from mmalignments.core.annotations import _VIEWS, ColumnSchema, ColumnTag, View
 from mmalignments.models.artifacts import ArtifactSet, OutputSpec, TableArtifact
 from mmalignments.models.elements import (
     Element,
-    FileElement,
+    FileSource,
     element,
     generate_element_key_name,
 )
@@ -303,7 +303,7 @@ def de_filter(
     ]
 
 
-def as_table_source(x: Element) -> TableSource:
+def as_table_source(x: Element | FileSource) -> TableSource:
     if isinstance(x.primary, TableArtifact):
         return x.primary
     return PathTableSource(x.primary.resolve())
@@ -409,6 +409,37 @@ def divide(
     return MultiMorph.from_callable(morph_divide, views=views)
 
 
+def concat(
+    key_column: str,
+    views: Mapping[str, View] | None = None,
+    *,
+    rename_fn: Callable[[list[str]], dict[str, str]] | None = None,
+) -> MultiMorph:
+
+    def morph_concat(
+        dataframes: Mapping[str, DataFrame],
+    ) -> Mapping[str, DataFrame]:  # noqa: E501
+        result = None
+        for key, frame in dataframes.items():
+            if not isinstance(frame, pd.DataFrame):
+                raise ValueError(
+                    f"Expected DataFrame for key '{key}', got {type(frame)}"
+                )
+            frame[key_column] = key
+            if result is None:
+                result = frame
+            else:
+                result = pd.concat([result, frame], axis=1)
+        if result is None:
+            raise ValueError("All input dataframes are empty or None.")
+        if rename_fn:
+            rename = rename_fn(result.columns.to_list())
+            result = result.rename(columns=rename)
+        return {"primary": result}
+
+    return MultiMorph.from_callable(morph_concat, views=views)
+
+
 ################################################################################
 # tables
 ################################################################################
@@ -423,7 +454,6 @@ class Tables:
     def __init__(self):
         pass
 
-
     @property
     def default_dir(self) -> Path:
         """
@@ -436,9 +466,10 @@ class Tables:
         ret = OutputSpec(
             outdir=self.default_dir,
             ext="parquet",
-            additional_extensions=("tsv",),
+            exts=("tsv",),
         )
         return ret
+
     # def _finalize(
     #     self,
     #     *,
@@ -469,7 +500,7 @@ class Tables:
     @element
     def transform(
         self,
-        source: Element,
+        source: FileSource | Element,
         *morphs: Morph,
         root: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
@@ -530,6 +561,7 @@ class Tables:
         key, name = generate_element_key_name(
             tag, "Tables", subroutine="transform"
         )  # noqa: E501
+        pres = (source,) if isinstance(source, Element) else source.pres
         return Element(
             key,
             __run,
@@ -537,7 +569,7 @@ class Tables:
             determinants=(str(params),) if params else None,
             inputs=(source.primary.resolve(),),
             artifacts=artifacts,
-            pres=(source,),
+            pres=pres,
             name=name,
         )
 
@@ -835,7 +867,7 @@ class Tables:
 
     def long(
         self,
-        source: FileElement,
+        source: FileSource | Element,
         *,
         sample_filter: Callable[[str | None], bool] | None = None,
         root: str | None = None,
@@ -848,8 +880,8 @@ class Tables:
 
         Parameters
         ----------
-        source : FileElement
-            The input FileElement containing the wide-format table.
+        source : FileSource
+            The input FileSource containing the wide-format table.
         sample_filter : Callable[[ColumnTag], bool] | None, optional
             A function to filter sample columns, by default None
         root : str | None, optional
@@ -899,8 +931,6 @@ class Tables:
 
             tags = {c: ColumnTag.decode(c) for c in df.columns}
             is_sample = sample_filter or sample_filter_default
-            for c, tag in tags.items():
-                print(tag.sample_id)
             # raise NotImplementedError("sample_filter is not implemented yet.")
             sample_cols = [
                 c for c, tag in tags.items() if is_sample(tag.sample_id)
@@ -954,7 +984,7 @@ class Tables:
 
     def fromgenes(
         self,
-        source: FileElement,
+        source: FileSource,
         sample_names: list[str],
         *,
         # column_schema: ColumnSchema | None = None,
@@ -1003,7 +1033,6 @@ class Tables:
             output_spec=output_spec,
         )
 
-    @element
     def fromfile(
         self,
         path: Path,
@@ -1011,7 +1040,7 @@ class Tables:
         index_column: str | None = None,
         root: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
-    ) -> Element:
+    ) -> FileSource:
         tag = PartialElementTag(
             root=root or Path(path).stem,
             state=State.INCOMING,
@@ -1022,10 +1051,9 @@ class Tables:
             path=Path(path),
             index_column=index_column,
         )  # column_schema=ecolumn_schema
-        return FileElement(
+        return FileSource(
             source,
             tag=tag,
-            root=root,
         )
 
 
@@ -1199,7 +1227,6 @@ def left_join(
     ] = "left",
 ) -> Morph:
     def __left_join(df: DataFrame) -> DataFrame:
-        print(other.artifacts[artifact].view())
         other_df = other.artifacts[artifact].view(view)
         return df.join(other_df, on=on, how=how)
 
@@ -1221,8 +1248,7 @@ def to_long(
 
         tags = {c: ColumnTag.decode(c) for c in df.columns}
         is_sample = sample_filter or sample_filter_default
-        for c, tag in tags.items():
-            print(tag.sample_id)
+
         # raise NotImplementedError("sample_filter is not implemented yet.")
         sample_cols = [
             c for c, tag in tags.items() if is_sample(tag.sample_id)
@@ -1282,9 +1308,9 @@ def filter_to_group(
 ) -> Morph:
     def __filter(df: DataFrame) -> DataFrame:
         if view is not None:
-            selected_columns= ColumnTag.select_from_view(df.columns.to_list(), view)
+            selected_columns = ColumnTag.select_from_view(df.columns.to_list(), view)
             if selected_columns:
-                df = df[selected_columns]   # type: ignore[assignment]
-        return df[df[group].isin(values)]   # type: ignore[return-value]
+                df = df[selected_columns]  # type: ignore[assignment]
+        return df[df[group].isin(values)]  # type: ignore[return-value]
 
     return Morph.from_callable(__filter, view=view, params={"group": group})

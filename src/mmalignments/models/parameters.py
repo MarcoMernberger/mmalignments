@@ -1,3 +1,4 @@
+from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
@@ -18,7 +19,7 @@ class Params(Mapping[str, Any]):
         object.__setattr__(self, "_override_params", dict(kwargs))
 
     @classmethod
-    def of(cls, **kwargs: Any) -> "Params":
+    def of(cls, **kwargs: Any) -> Params:
         return cls(**kwargs)
 
     def __getitem__(self, key: str) -> Any:
@@ -44,7 +45,7 @@ class Params(Mapping[str, Any]):
     def __contains__(self, key: str) -> bool:
         return key in self._override_params
 
-    def override(self, **kwargs: Any) -> "Params":
+    def override(self, **kwargs: Any) -> Params:
         return Params(**{**self._override_params, **kwargs})
 
     def __repr__(self) -> str:
@@ -59,7 +60,7 @@ class Params(Mapping[str, Any]):
         except KeyError:
             raise AttributeError(f"Params has no attribute '{key}'")
 
-    def update(self, partial_params: "Params") -> "Params":
+    def update(self, partial_params: Params | None) -> Params:
         if partial_params is None:
             return self
         return self.override(**partial_params.to_dict())

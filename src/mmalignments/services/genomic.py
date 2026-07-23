@@ -1,14 +1,39 @@
-import pyBigWig  # type: ignore[import]
-import pandas as pd
-from Bio.Seq import Seq  # type: ignore[import]
-from pathlib import Path
-from pandas import DataFrame
 import math
+from pathlib import Path
 from typing import Optional
+
+import numpy as np
+import pandas as pd  # type: ignore[import]
+import pyBigWig  # type: ignore[import]
+from Bio.Seq import Seq  # type: ignore[import]
+from pandas import DataFrame  # type: ignore[import]
+from scipy.spatial.distance import hamming
 
 
 def reverse_complement(seq: str) -> str:
     return str(Seq(seq).reverse_complement())
+
+
+def hamming_early_break(a: str, b: str, max_distance: Optional[int] = None) -> int:
+    if len(a) != len(b):
+        return np.inf
+
+    mismatches = 0
+
+    for x, y in zip(a, b):
+        if x != y:
+            mismatches += 1
+            if max_distance is not None and mismatches > max_distance:
+                return mismatches
+
+    return mismatches
+
+
+def hamming_scipy(a: str, b: str, relative: bool = False) -> int:
+    distance = hamming(a, b)
+    if not relative:
+        distance = distance * len(a)
+    return distance
 
 
 def export_sgrna_bed_and_bigwig(
