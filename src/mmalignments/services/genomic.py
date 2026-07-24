@@ -2,7 +2,6 @@ import math
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import pandas as pd  # type: ignore[import]
 import pyBigWig  # type: ignore[import]
 from Bio.Seq import Seq  # type: ignore[import]
@@ -14,13 +13,40 @@ def reverse_complement(seq: str) -> str:
     return str(Seq(seq).reverse_complement())
 
 
+def longest_common_prefix(a: str, b: str) -> int:
+    """
+    Return the number of identical bases at the beginning of two sequences.
+    """
+    length = 0
+
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        length += 1
+
+    return length
+
+
+def match_pattern(a: str, b: str) -> str:
+    """
+    Return a visual representation of matching positions.
+
+    Example:
+        ACTGAA
+        ACTCAA
+
+        |||.||
+    """
+    return "".join("|" if x == y else "." for x, y in zip(a, b))
+
+
 def hamming_early_break(a: str, b: str, max_distance: Optional[int] = None) -> int:
-    if len(a) != len(b):
-        return np.inf
+    if len(b) < len(a):
+        a, b = b, a
 
     mismatches = 0
 
-    for x, y in zip(a, b):
+    for x, y in zip(a, b[: len(a)]):
         if x != y:
             mismatches += 1
             if max_distance is not None and mismatches > max_distance:

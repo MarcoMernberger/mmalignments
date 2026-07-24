@@ -3,12 +3,18 @@ from __future__ import annotations
 import gzip
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
+import pandas as pd  # type: ignore[import]
 from Bio import SeqIO  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
 
-from mmalignments.models.artifacts import ArtifactSet, OutputSpec, TableArtifact
+from mmalignments.models.artifacts import (
+    ArtifactSet,
+    FileArtifact,
+    OutputSpec,
+    TableArtifact,
+)
 from mmalignments.models.elements import (
     CallSpec,
     Element,
@@ -29,6 +35,8 @@ from mmalignments.models.tags import (
 )
 from mmalignments.services.genomic import (
     hamming_early_break,
+    longest_common_prefix,
+    match_pattern,
     reverse_complement,
 )
 from mmalignments.services.io import read_frame, write_frame
@@ -111,7 +119,11 @@ def uniqueness(
         direction=direction,
     )
     key, name = generate_element_key_name(tag, "barcodes", subcommand="uniqueness")
-    artifacts = ArtifactSet(TableArtifact(outfile), primary_name=spec.ext)
+    artifacts = ArtifactSet(
+        TableArtifact(outfile),
+        primary_name=spec.ext,
+        html=FileArtifact(outfile.with_suffix(".html")),
+    )
     return Element(
         key,
         runner,
@@ -126,9 +138,16 @@ def uniqueness(
 @element
 def sampleadapters(
     source: Element | FastqSource,
+    barcodes: Element | FileSource | None = None,
     *,
-    start_length: int = 10,
-    sample_size: int = 10000,
+    start_length: int = 25,
+    sample_size: int = 50000,
+    forward_col: list[str] | None = ["start_barcode"],
+    reverse_col: list[str] | None = ["end_barcode"],
+    sample_col: str = "sample",
+    max_edit_distance: int = 8,
+    min_count: int = 1,
+    leven: bool = False,
     tag: PartialElementTag | ElementTag | None = None,
     outspec: OutputSpec | None = None,
 ) -> Element:
@@ -146,10 +165,22 @@ def sampleadapters(
     ----------
     source : Element | FastqSource
         Element or FastqSource containing the sequencing reads.
+    barcodes : Element | FileSource | None
+        Optional barcode table used to classify top start sequences.
     start_length : int
         Length of the starting sequences to consider.
     sample_size : int
         Number of reads to sample.
+    forward_col : list[str] | None
+        Barcode columns containing forward/start barcodes.
+    reverse_col : list[str] | None
+        Barcode columns containing reverse/end barcodes.
+    sample_col : str
+        Column in barcode table containing sample names.
+    max_edit_distance : int
+        Maximum distance for assigning a barcode match.
+    min_count : int
+        Minimum count required before a sequence is classified.
     tag : PartialElementTag | ElementTag | None
         Optional tag override.
     outspec : OutputSpec | None
@@ -183,13 +214,34 @@ def sampleadapters(
     )
     outfile = spec.path()
     pres = source.pres if isinstance(source, FastqSource) else (source,)
-    determinants = (str(start_length), str(sample_size))
+    barcode_path = None
+    if barcodes is not None:
+        barcode_path = barcodes.artifacts.primary.resolve()
+        pres += barcodes.pres if isinstance(barcodes, FileSource) else (barcodes,)
+
+    determinants = (
+        str(start_length),
+        str(sample_size),
+        str(forward_col),
+        str(reverse_col),
+        sample_col,
+        str(max_edit_distance),
+        str(min_count),
+        str(leven),
+    )
     runner = sample_start_reads(
         r1,
         r2,
         outfile,
         start_length=start_length,
         sample_size=sample_size,
+        barcode_path=barcode_path,
+        barcode_columns_r1=forward_col,
+        barcode_columns_r2=reverse_col,
+        barcode_sample_column=sample_col,
+        max_edit_distance=max_edit_distance,
+        min_count=min_count,
+        leven=leven,
     )
     key, name = generate_element_key_name(tag, "barcodes", subcommand="sampleadapters")
     artifacts = ArtifactSet(TableArtifact(outfile), primary_name=spec.ext)
@@ -293,6 +345,299 @@ def _paired_end_frame(
     )
 
 
+def _levenshtein_distance(
+    a: str,
+    b: str,
+    max_distance: int | None = None,
+) -> int:
+    if a == b:
+        return 0
+
+    if len(a) < len(b):
+        a, b = b, a
+
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        current = [i]
+        row_min = i
+
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            ins = current[j - 1] + 1
+            delete = previous[j] + 1
+            sub = previous[j - 1] + cost
+            value = min(ins, delete, sub)
+            current.append(value)
+            if value < row_min:
+                row_min = value
+
+        if max_distance is not None and row_min > max_distance:
+            return max_distance + 1
+
+        previous = current
+
+    return previous[-1]
+
+
+def _barcode_candidates(
+    barcodes: DataFrame,
+    sample_column: str,
+    barcode_columns: list[str],
+) -> list[tuple[str, str, str]]:
+    candidates: list[tuple[str, str, str]] = []
+
+    for _, row in barcodes.iterrows():
+        sample = row.get(sample_column)
+        if sample is None:
+            continue
+
+        sample_name = str(sample)
+        for col in barcode_columns:
+            value = row.get(col)
+            if value is None:
+                continue
+            barcode = str(value).strip().upper()
+            if barcode and barcode.lower() != "nan":
+                candidates.append((sample_name, col, barcode))
+
+    return candidates
+
+
+def _classify_sequence(
+    sequence: str,
+    candidates: list[tuple[str, str, str]],
+    max_edit_distance: int,
+    distance_func: Callable[[str, str, int | None], int],
+) -> tuple[str, int, str, str, int, str]:
+
+    if not candidates:
+        return (
+            "unknown",
+            -1,
+            "unknown",
+            "",
+            0,
+            "",
+        )
+
+    best_sample = "unknown"
+    best_col = "unknown"
+    best_barcode = ""
+    best_distance = max_edit_distance + 1
+
+    for sample_name, barcode_col, barcode in candidates:
+        distance = distance_func(
+            sequence,
+            barcode,
+            max_edit_distance,
+        )
+
+        if distance < best_distance:
+            best_distance = distance
+            best_sample = sample_name
+            best_col = barcode_col
+            best_barcode = barcode
+
+    if best_distance > max_edit_distance:
+        return (
+            "unknown",
+            -1,
+            "unknown",
+            "",
+            0,
+            "",
+        )
+
+    prefix_length = longest_common_prefix(
+        sequence,
+        best_barcode,
+    )
+
+    pattern = match_pattern(
+        sequence,
+        best_barcode,
+    )
+
+    return (
+        best_sample,
+        best_distance,
+        f"{best_col}:{best_sample}:{best_barcode}",
+        best_barcode,
+        prefix_length,
+        pattern,
+    )
+
+
+def _classify_row_with_threshold(
+    seq: str,
+    count: int,
+    candidates: list[tuple[str, str, str]],
+    max_edit_distance: int,
+    min_count: int,
+    distance_func: Callable[[str, str, int | None], int],
+) -> tuple[str, int, str, str, int, str]:
+    if count < min_count:
+        return "unknown", -1, "unknown", "", 0, ""
+
+    return _classify_sequence(
+        seq, candidates, max_edit_distance, distance_func=distance_func
+    )
+
+
+def _classify_column(
+    frame: DataFrame,
+    sequence_column: str,
+    count_column: str,
+    candidates: list[tuple[str, str, str]],
+    max_edit_distance: int,
+    min_count: int,
+    distance_func: Callable[[str, str, int | None], int],
+) -> tuple:
+    matches = frame.apply(
+        lambda row: _classify_row_with_threshold(
+            str(row[sequence_column]).upper(),
+            int(row[count_column]) if not pd.isna(row[count_column]) else 0,
+            candidates,
+            max_edit_distance,
+            min_count,
+            distance_func=distance_func,
+        ),
+        axis=1,
+    )
+    sample_series = matches.apply(lambda x: x[0])
+    distance_series = matches.apply(lambda x: x[1])
+    best_series = matches.apply(lambda x: x[2])
+    barcode_series = matches.apply(lambda x: x[3])
+    prefix_series = matches.apply(lambda x: x[4])
+    pattern_series = matches.apply(lambda x: x[5])
+
+    return (
+        sample_series,
+        distance_series,
+        best_series,
+        barcode_series,
+        prefix_series,
+        pattern_series,
+    )
+
+
+def _classification_weight(
+    count_series,
+    distance_series,
+) -> int:
+    valid = distance_series >= 0
+    weights = count_series.fillna(0)
+    return int(weights[valid].sum())
+
+
+def _classify_single_end_frame(
+    frame: DataFrame,
+    barcodes: DataFrame,
+    barcode_sample_column: str,
+    merged_columns: list[str],
+    max_edit_distance: int,
+    min_count: int,
+    distance_func: Callable[[str, str, int | None], int],
+) -> DataFrame:
+    candidates = _barcode_candidates(
+        barcodes,
+        barcode_sample_column,
+        merged_columns,
+    )
+    (
+        r1_sample,
+        r1_dist,
+        r1_best,
+        r1_barcode,
+        r1_prefix,
+        r1_pattern,
+    ) = _classify_column(
+        frame,
+        "Sequence (R1)",
+        "Count (R1)",
+        candidates=candidates,
+        max_edit_distance=max_edit_distance,
+        min_count=min_count,
+        distance_func=distance_func,
+    )
+    classified = frame.copy()
+    classified["Sample (R1)"] = r1_sample
+    classified["Edit distance (R1)"] = r1_dist
+    classified["Best (R1)"] = r1_best
+    classified["Matched barcode (R1)"] = r1_barcode
+    classified["Prefix match length (R1)"] = r1_prefix
+    classified["Match pattern (R1)"] = r1_pattern
+    return classified
+
+
+def _classify_paired_frame(
+    frame: DataFrame,
+    barcodes: DataFrame,
+    barcode_sample_column: str,
+    start_columns: list[str],
+    end_columns: list[str],
+    max_edit_distance: int,
+    min_count: int,
+    distance_func: Callable[[str, str, int | None], int],
+) -> DataFrame:
+    all_candidates = _barcode_candidates(
+        barcodes,
+        barcode_sample_column,
+        list(dict.fromkeys(start_columns + end_columns)),
+    )
+    (
+        r1_sample,
+        r1_dist,
+        r1_best,
+        r1_barcode,
+        r1_prefix,
+        r1_pattern,
+    ) = _classify_column(
+        frame,
+        "Sequence (R1)",
+        "Count (R1)",
+        all_candidates,
+        max_edit_distance,
+        min_count,
+        distance_func,
+    )
+
+    (
+        r2_sample,
+        r2_dist,
+        r2_best,
+        r2_barcode,
+        r2_prefix,
+        r2_pattern,
+    ) = _classify_column(
+        frame,
+        "Sequence (R2)",
+        "Count (R2)",
+        all_candidates,
+        max_edit_distance,
+        min_count,
+        distance_func,
+    )
+    classified = frame.copy()
+
+    classified["Sample (R1)"] = r1_sample
+    classified["Edit distance (R1)"] = r1_dist
+    classified["Best (R1)"] = r1_best
+    classified["Matched barcode (R1)"] = r1_barcode
+    classified["Prefix match length (R1)"] = r1_prefix
+    classified["Match pattern (R1)"] = r1_pattern
+
+    classified["Sample (R2)"] = r2_sample
+    classified["Edit distance (R2)"] = r2_dist
+    classified["Best (R2)"] = r2_best
+    classified["Matched barcode (R2)"] = r2_barcode
+    classified["Prefix match length (R2)"] = r2_prefix
+    classified["Match pattern (R2)"] = r2_pattern
+
+    return classified
+    return classified
+
+
 def _format_hit_example(
     label: str,
     position: int,
@@ -376,8 +721,16 @@ def sample_start_reads(
     *,
     start_length: int = 10,
     sample_size: int = 10000,
+    barcode_path: Path | None = None,
+    barcode_columns_r1: list[str] | None = None,
+    barcode_columns_r2: list[str] | None = None,
+    barcode_sample_column: str = "sample",
+    max_edit_distance: int = 5,
+    min_count: int = 1,
+    leven: bool = False,
 ) -> Runnable:
     def __call() -> DataFrame:
+        distance_func = _levenshtein_distance if leven else hamming_early_break
         input_name = _input_fastq_name(r1)
         r1_counts = _count_fastq_prefixes(
             r1,
@@ -395,7 +748,47 @@ def sample_start_reads(
             )
             frame = _paired_end_frame(input_name, r1_counts, r2_counts)
 
+        if barcode_path is not None:
+            barcodes = read_frame(barcode_path)
+
+            all_columns = []
+            if barcode_columns_r1:
+                all_columns.extend(barcode_columns_r1)
+            if barcode_columns_r2:
+                all_columns.extend(barcode_columns_r2)
+
+            merged_columns = list(dict.fromkeys(all_columns))
+
+            if r2 is None:
+                frame = _classify_single_end_frame(
+                    frame,
+                    barcodes,
+                    barcode_sample_column,
+                    merged_columns,
+                    max_edit_distance,
+                    min_count,
+                    distance_func=distance_func,
+                )
+            else:
+                start_columns = list(barcode_columns_r1 or ())
+                end_columns = list(barcode_columns_r2 or ())
+                if not start_columns and merged_columns:
+                    start_columns = merged_columns
+                if not end_columns:
+                    end_columns = start_columns
+                frame = _classify_paired_frame(
+                    frame,
+                    barcodes,
+                    barcode_sample_column,
+                    start_columns,
+                    end_columns,
+                    max_edit_distance,
+                    min_count,
+                    distance_func=distance_func,
+                )
+
         write_frame(frame, outfile, index=False)
+        # write_sampleadapters_report(outfile, outfile.with_suffix(".html"))
         return frame
 
     display = CallSpec(
@@ -406,6 +799,12 @@ def sample_start_reads(
             "outfile": outfile,
             "start_length": start_length,
             "sample_size": sample_size,
+            "barcode_path": barcode_path,
+            "barcode_columns_r1": barcode_columns_r1,
+            "barcode_columns_r2": barcode_columns_r2,
+            "barcode_sample_column": barcode_sample_column,
+            "max_edit_distance": max_edit_distance,
+            "min_count": min_count,
         },
     ).render()
     return Runnable(__call, display=display)

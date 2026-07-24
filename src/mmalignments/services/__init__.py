@@ -1,10 +1,10 @@
 """Services for IO operations and external tool integration."""
 
+from .environment import get_variable, hostname, prebuilt_path
 from .errors import handle_called_process_error
 from .io import absolutize, ensure, write_fasta
 from .logging import initlog
 from .time import str_to_timestamp, timestamp, timestamp_to_str
-from .environment import get_variable, hostname, prebuilt_path
 
 __all__ = [
     "ensure",
@@ -18,5 +18,4 @@ __all__ = [
     "get_variable",
     "hostname",
     "prebuilt_path",
-
 ]
