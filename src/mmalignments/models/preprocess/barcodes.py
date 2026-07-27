@@ -48,7 +48,7 @@ def uniqueness(
     genomic: Element | FileSource,
     *,
     max_hamming: int = 5,
-    barcode_columns: list[str] = ["barcode"],
+    barcode_columns: list[str] = ["start_barcode", "end_barcode"],
     direction: Literal["forward", "reverse", "both"] = "both",
     tag: PartialElementTag | ElementTag | None = None,
     outspec: OutputSpec | None = None,

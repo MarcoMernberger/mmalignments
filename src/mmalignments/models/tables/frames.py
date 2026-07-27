@@ -576,7 +576,7 @@ class Tables:
     @element
     def filter(
         self,
-        source: Element,
+        source: Element | FileSource,
         *morphs: Morph,
         root: str | None = None,
         view: View | None = None,
@@ -599,12 +599,18 @@ class Tables:
             morphs = (filter_to_threshold(**params.to_dict()),)
 
         infile = source.primary.resolve()
+        index_column = (
+            source.primary.index_column
+            if hasattr(source.primary, "index_column")
+            else None
+        )
+        pres = (source,) if isinstance(source, Element) else source.pres
         artifacts, output = ArtifactSet.generate_file_artifacts(
             tag=tag,
             default_dir=infile.parent,
             spec=output_spec or self.default_output_spec,
             # column_schema=source.primary.column_schema,
-            index_column=source.primary.index_column,
+            index_column=index_column,
         )
 
         # @depends(frame_callable, *(m.fn for m in morphs), bundle_morphs)
@@ -634,7 +640,7 @@ class Tables:
             determinants=(str(params),) if params else None,
             inputs=(source.primary.resolve(),),
             artifacts=artifacts,
-            pres=(source,),
+            pres=pres,
             name=name,
         )
 

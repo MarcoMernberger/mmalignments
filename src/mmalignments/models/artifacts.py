@@ -547,6 +547,9 @@ class TableArtifact(Artifact):
     ############################################################################
     # Loading
     ############################################################################
+    @cached_property
+    def stem(self) -> str:
+        return self.path.stem
 
     @cached_property
     def frame(self) -> DataFrame:

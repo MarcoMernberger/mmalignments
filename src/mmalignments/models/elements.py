@@ -689,7 +689,7 @@ class FastqSource(Source, Prerequisite):
         return self._tag  # a convenience tag for downstream Elements
 
     @property
-    def pres(self) -> tuple[Prerequisite, ...]:
+    def pres(self) -> tuple[Element, ...]:
         return () if self.producer is None else (self.producer,)
 
     @property
