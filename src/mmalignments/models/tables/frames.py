@@ -421,8 +421,6 @@ def concat(
     ) -> Mapping[str, DataFrame]:  # noqa: E501
         result = None
         for key, frame in dataframes.items():
-            print(key)
-            print(frame.head())
             frame = frame.reset_index(drop=True)
             if not isinstance(frame, pd.DataFrame):
                 raise ValueError(
@@ -430,12 +428,9 @@ def concat(
                 )
             frame.insert(loc=0, column=key_column, value=key)
             if result is None:
-                print("result was none")
                 result = frame
             else:
-                print("result was not None")
                 result = pd.concat([result, frame], axis=0)
-            print(result.shape)
         if result is None:
             raise ValueError("All input dataframes are empty or None.")
         if rename_fn:

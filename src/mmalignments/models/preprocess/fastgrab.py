@@ -24,12 +24,13 @@ from mmalignments.models.artifacts import ArtifactSet, FastqArtifact, OutputSpec
 from mmalignments.models.elements import (
     CallSpec,
     Element,
+    FastqConcat,
+    # sample_fastqs,
     FastqSource,
     FileSource,
     NextGenSample,
     TableElement,
     element,
-    # sample_fastqs,
 )
 from mmalignments.models.tags import (
     ElementTag,
@@ -55,6 +56,21 @@ from ..externals import (
 from ..parameters import Params, ParamSet
 
 logger = logging.getLogger(__name__)
+
+
+def collect_undetermined_fastqs(
+    folder: Path, prefix: str, ext: str, read: str = "read1"
+) -> list[Path]:
+    """Collect undetermined FASTQ files in a folder with a given prefix and extension."""
+    return list(folder.glob(f"{prefix}*_nobarcode*_{read}.{ext}"))
+
+
+def rename_files(files_to_rename: Mapping[Path, Path], log_fh: TextIOWrapper):
+    """Rename files according to the provided mapping."""
+    for old_path, new_path in files_to_rename.items():
+        if old_path.exists() and not new_path.exists():
+            log_fh.write(f"Renaming {old_path} to {new_path}\n")
+            old_path.rename(new_path)
 
 
 # ---------------------------------------------------------------------------
@@ -555,8 +571,8 @@ class FastGrab(External):
         process: Element,
         config: Element,
         *,
+        names: Iterator[str] | list[str],
         rename: Callable[[str], str] | None = None,
-        names: Iterator[str] | list[str] | None = None,
         tag: PartialElementTag | ElementTag | None = None,
     ) -> Element:
         """Create an Element that consolidates demultiplexed FASTQ files.
@@ -575,8 +591,8 @@ class FastGrab(External):
         ----------
         process : Element
             The process Element that produced the demultiplexed FASTQs.
-        sample_barcodes : Mapping[str, str]
-            Barcode → sample mapping (same as used in configure).
+        names : Iterator[str] | list[str]
+            Names of the samples to consolidate.
         tag : PartialElementTag | ElementTag | None
             Optional tag override.
 
@@ -593,28 +609,48 @@ class FastGrab(External):
             method=Method.FASTQGRAB,
             state=State.DEMULTIPLEX,
         )
-
+        names = list(names) if isinstance(names, Iterator) else names
+        if len(names) == 0:
+            raise ValueError("No sample names provided for consolidation.")
         key, name = self.build_element_name(tag, "consolidate")
         # Build artifacts: one per sample (R1 + R2) plus undetermined
         log_file = config.prefix / f"{config.prefix.name}_consolidation.log"
         artifacts = ArtifactSet(log_file, primary_name="log")
         fastqs = {}
 
-        def check_output(sample_name: str, paired: bool = True) -> FastqArtifact:
+        def check_output(
+            sample_name: str, paired: bool = True
+        ) -> tuple[FastqArtifact, dict[Path, Path]]:
             r1 = config.prefix / f"{sample_name}_R1.{config.suffix}"
             r2 = config.prefix / f"{sample_name}_R2.{config.suffix}" if paired else None
-            return FastqArtifact(r1, r2)
+            r1_in = config.prefix / f"{sample_name}_read1.{config.suffix}"
+            r2_in = (
+                config.prefix / f"{sample_name}_read2.{config.suffix}"
+                if paired
+                else None
+            )
+            files_to_rename = {r1_in: r1}
+            if paired:
+                files_to_rename[r2_in] = r2
+            return FastqArtifact(r1, r2), files_to_rename
 
+        paths = {}
         for sample_name in names:  # type: ignore
-            full_name = f"{config.library_name}_{sample_name}"
-            fastqs[full_name] = check_output(full_name)
+            artifact, files_to_rename = check_output(sample_name)
+            fastqs[sample_name] = artifact
+            paths.update(files_to_rename)
         undetermined_name = f"{config.library_name}_undetermined"
-        fastqs["Undetermined"] = check_output(undetermined_name)
+        undetermined, _ = check_output(undetermined_name)
+        fastqs["Undetermined"] = undetermined
+        undetermined_rename = (
+            {"read1": undetermined.r1, "read2": undetermined.r2}
+            if undetermined.paired
+            else {"read1": undetermined.r1}
+        )
         artifacts = artifacts.with_extras(fastqs)
-        # Input files (all the process-generated FASTQs)
-        # input_pattern = str(prefix / f"{prefix.name}_barcode_unambiguous=*")
         runner = self.run_consolidate(
-            paths=tuple(artifacts.iterfiles()),
+            paths=paths,
+            undetermined=undetermined_rename,
             prefix=config.prefix,
             rename=rename,
             ext=config.suffix,
@@ -630,9 +666,11 @@ class FastGrab(External):
             empty_ok=True,
         )
 
+    @depends(rename_files, collect_undetermined_fastqs, FastqConcat.concat)
     def run_consolidate(
         self,
-        paths: tuple[Path, ...],
+        paths: Mapping[Path, Path],
+        undetermined: Mapping[str, Path],
         prefix: Path,
         rename: Callable[[str], str] | None = None,
         ext: str = "fq",
@@ -652,24 +690,24 @@ class FastGrab(External):
             Runnable that performs the file consolidation.
         """
 
-        def default_rename(filename: str) -> str:
-            return (
-                filename.replace("barcode_unambiguous=true_", "")
-                .replace("_read2", "_R2")
-                .replace("_read1", "_R1")
-            )
+        # def default_rename(filename: str) -> str:
+        #     return (
+        #         filename.replace("barcode_unambiguous=true_", "")
+        #         .replace("_read2", "_R2")
+        #         .replace("_read1", "_R1")
+        #     )
 
-        rename = rename or default_rename
+        # rename = rename or default_rename
         return Runnable(
-            self.__consolidate(paths, rename, prefix, prefix.name, ext),
+            self.__consolidate(paths, undetermined, prefix, prefix.name, ext),
             cmd=[current_call_to_string()],
             display="consolidate",
         )
 
     def __consolidate(
         self,
-        paths: tuple[Path, ...],
-        rename: Callable[[str], str],
+        paths: Mapping[Path, Path],
+        undetermined: Mapping[str, Path],
         prefix_dir: Path,
         prefix_name: str,
         ext: str,
@@ -677,50 +715,80 @@ class FastGrab(External):
         """Consolidate FASTQ files after demultiplexing."""
 
         def __call():
-            all_fqs = list(prefix_dir.resolve().glob(f"{prefix_name}*.{ext}"))
-            is_paired = any(
-                (re.search(r"_R2\.", fq.name) or re.search(r"_read2\.", fq.name))
-                for fq in all_fqs
-            )
-            undetermined_r1 = prefix_dir / f"{prefix_name}_undetermined_R1.{ext}"
-            undetermined_r2 = (
-                prefix_dir / f"{prefix_name}_undetermined_R2.{ext}"
-                if is_paired
-                else None
-            )
-            remaining = [x for x in all_fqs if x not in paths]
-
             log_file = prefix_dir / f"{prefix_name}_consolidation.log"
-            # raise ValueError()
-            if remaining:
-                with open(log_file, "w") as log_fh:
+            with open(log_file, "w") as log_fh:
+                log_fh.write(f"Consolidating FASTQ files for prefix {prefix_name}\n")
+                # rename the demultiplexed FASTQ files to a consistent naming scheme
+                rename_files(paths, log_fh)  # will not rename if the files exist
+
+                # concatenate the undetermined FASTQ files into a single file
+                log_fh.write(
+                    f"Merging FASTQ files for undetermined reads for prefix {prefix_name}\n"
+                )
+                for read, outfile in undetermined.items():
+                    if outfile.exists():
+                        log_fh.write(f"{outfile} already exists, skipping.\n")
+                        continue
+
+                    files_to_combine = collect_undetermined_fastqs(
+                        prefix_dir, prefix_name, ext, read
+                    )
+                    if not files_to_combine:
+                        log_fh.write(
+                            f"No undetermined FASTQ files found for {read} in prefix {prefix_name}\n"
+                        )
+                        continue
+                    tmpoutfile = outfile.with_suffix(f".tmp.{ext}")
+                    FastqConcat.concat(files_to_combine, tmpoutfile)
                     log_fh.write(
-                        f"Consolidating FASTQ files for prefix {prefix_name}\n"
+                        f"Unlinking undetermined FASTQs for prefix {prefix_name}\n"
                     )
-                    log_fh.write(f"Found {len(all_fqs)} FASTQ files:\n")
+                    tmpoutfile.rename(outfile)
+                    for fq in files_to_combine:
+                        fq.unlink()
 
-                    for fq in all_fqs:
-                        log_fh.write(f"  {fq.name}\n")
+            # all_fqs = list(prefix_dir.resolve().glob(f"{prefix_name}*.{ext}"))
+            # # all_fqs = [fq for fq in all_fqs if fq not in paths]
+            # # print(all_fqs)
+            # is_paired = any(
+            #     (re.search(r"_R2\.", fq.name) or re.search(r"_read2\.", fq.name))
+            #     for fq in all_fqs
+            # )
+            # undetermined_r1 = prefix_dir / f"{prefix_name}_undetermined_R1.{ext}"
+            # undetermined_r2 = (
+            #     prefix_dir / f"{prefix_name}_undetermined_R2.{ext}"
+            #     if is_paired
+            #     else None
+            # )
+            # remaining = [x for x in all_fqs if x not in paths]
 
-                    successful, temporary = _merge_undetermined(
-                        remaining,
-                        undetermined_r1,
-                        undetermined_r2,
-                        log_fh,
-                    )
-                    # collect the old files
-                    ren = _rename_successful(
-                        successful,
-                        rename=rename,
-                        prefix_dir=prefix_dir,
-                        log_fh=log_fh,
-                    )
-                    temporary.extend(ren)
+            # # raise ValueError()
+            # if remaining:
+            #     with open(log_file, "w") as log_fh:
+            #         log_fh.write(f"Found {len(all_fqs)} FASTQ files:\n")
 
-                    _cleanup(
-                        temporary,
-                        log_fh,
-                    )
+            #         for fq in all_fqs:
+            #             log_fh.write(f"  {fq.name}\n")
+
+            #         successful, temporary = _merge_undetermined(
+            #             remaining,
+            #             undetermined_r1,
+            #             undetermined_r2,
+            #             log_fh,
+            #         )
+            #         # collect the old files
+            #         ren = _rename_successful(
+            #             successful,
+            #             rename=rename,
+            #             prefix_dir=prefix_dir,
+            #             log_fh=log_fh,
+            #         )
+            #         temporary.extend(ren)
+
+            #         _cleanup(
+            #             temporary,
+            #             log_fh,
+            #         )
 
         return __call
 
@@ -811,8 +879,8 @@ class FastGrab(External):
         template: FileSource | Sequence[FileSource],
         barcodes: Callable | Element | Mapping[str, Element],
         *,
+        names: Iterator[str] | list[str],
         rename: Callable[[str], str] | None = None,
-        names: Iterator[str] | list[str] | None = None,
         compression: Literal["Raw", "Gzip"] = "Gzip",
         tag: PartialElementTag | ElementTag | None = None,
         # outspec: OutputSpec | None = None,
@@ -837,13 +905,13 @@ class FastGrab(External):
             Mapping of barcode set name → Element with FASTA artifact or Callable
             returning such a mapping. If it's just a single demultiplexing step,
             this can be a single Element with FASTA artifact.
+        names : Iterator[str] | list[str] | None
+            Optional list of sample names to expect in the consolidated output. If
+            *None*, all samples found in the process output are included.
         rename : Callable[[str], str] | None
             Optional function to rename consolidated FASTQ files. If *None*, a default
             renaming scheme is applied that removes the "barcode_unambiguous=true_"
             prefix and replaces "_read1" and "_read2" with "_R1" and "_R2".
-        names : Iterator[str] | list[str] | None
-            Optional list of sample names to expect in the consolidated output. If
-            *None*, all samples found in the process output are included.
         tag : PartialElementTag | ElementTag | None
             Optional tag override for all created Elements.
         compression : Literal["Raw", "Gzip"]
@@ -902,8 +970,8 @@ class FastGrab(External):
         template: FileSource | Sequence[FileSource],
         barcodes: Callable | Element | Mapping[str, Element],
         *,
+        names: Iterator[str] | list[str],
         rename: Callable[[str], str] | None = None,
-        names: Iterator[str] | list[str] | None = None,
         compression: Literal["Raw", "Gzip"] = "Gzip",
         tag: PartialElementTag | ElementTag | None = None,
         demultiplex_dir: Path | None = None,
@@ -928,13 +996,12 @@ class FastGrab(External):
             Mapping of barcode set name → Element with FASTA artifact or Callable
             returning such a mapping. If it's just a single demultipolexing step,
             this can be a single Element with FASTA artifact.
+        names : Iterator[str] | list[str]
+            List of sample names to expect in the consolidated output. All samples found in the process output are included.
         rename : Callable[[str], str] | None
             Optional function to rename consolidated FASTQ files. If *None*, a default
             renaming scheme is applied that removes the "barcode_unambiguous=true_"
             prefix and replaces "_read1" and "_read2" with "_R1" and "_R2".
-        names : Iterator[str] | list[str] | None
-            Optional list of sample names to expect in the consolidated output. If
-            *None*, all samples found in the process output are included.
         compression : Literal["Raw", "Gzip"]
             Compression method for the consolidated FASTQ files.  If *Gzip*, the files
             are compressed with gzip; if *Raw*, they are left uncompressed.
@@ -1003,10 +1070,10 @@ class FastGrab(External):
             if not isinstance(artifact, FastqArtifact):
                 continue  # skip non-FASTQ artifacts
             samples[artifact_name] = artifact
-            if artifact.paired:
-                logger.warning(f"Sample {artifact_name} is paired")
-            else:
-                logger.warning(f"Sample {artifact_name} is single-end")
+            # if artifact.paired:
+            #     logger.warning(f"Sample {artifact_name} is paired")
+            # else:
+            #     logger.warning(f"Sample {artifact_name} is single-end")
 
             tag = from_prior(
                 consolidate_el.tag,

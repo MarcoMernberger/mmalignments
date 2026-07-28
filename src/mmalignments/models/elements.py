@@ -1085,12 +1085,9 @@ class FastqNormalize(Element):
         type: Literal["illumina", "novogene"] = "novogene",
     ):
         # Creates FastqArtifacts by concatenation
-        self.path = Path(folder)
+        self.path = Path(folder).resolve()
         self.type = type
         self.output_folder = output_folder
-        normalized, files_to_merge = self.setup_normalization()
-        self.normalized = normalized
-        self.files_to_merge = files_to_merge
         tag = ElementTag(
             root=name,
             level=0,
@@ -1098,17 +1095,21 @@ class FastqNormalize(Element):
             stage=Stage.INPUT,
             method=Method.CUSTOM,
             state=State.RAW,
-            param="normalized",
         ).merge(tag)
         key, name = generate_element_key_name(
             tag, "FastqSource", subcommand="normalized"
         )
+        self.name = name
+        normalized, files_to_merge = self.setup_normalization()
+        artifacts = ArtifactSet(FastqArtifact(normalized["R1"], normalized.get("R2")))
+        self.normalized = normalized
+        self.files_to_merge = files_to_merge
 
         super().__init__(
             key,
             self.normalize(),
             tag,
-            artifacts=normalized,
+            artifacts=artifacts,
             pres=(),
             name=name,
         )  # Element
@@ -1181,19 +1182,17 @@ class FastqNormalize(Element):
                 check=True,
             )
 
-    def __gather_illumina_files(self) -> Mapping[str, list[Path]]:
-        def is_sample(filepath: Path) -> bool:
-            return filepath.stem.startswith(self.name) and filepath.suffix in {
-                ".fastq",
-                ".fastq.gz",
-                ".fq.gz",
-                ".fq",
-            }
+    def remove_suffixes(self, path: Path) -> tuple[str, str]:
+        """Remove all suffixes from a file path to get the base name."""
+        suffixes = "".join(path.suffixes)
+        stem = path.name.removesuffix(suffixes)
+        return stem, suffixes
 
+    def __gather_illumina_files(self) -> Mapping[str, list[Path]]:
         files = {"R1": [], "R2": []}
         for filepath in self.path.iterdir():
-            if filepath.is_file() and is_sample(filepath):
-                stem = filepath.stem
+            stem, suffixes = self.remove_suffixes(filepath)
+            if filepath.is_file() and self.is_sample(suffixes):
                 if "_R1_" in stem:
                     files["R1"].append(filepath.resolve())
                 elif "_R2_" in stem:
@@ -1201,40 +1200,230 @@ class FastqNormalize(Element):
         # illumina files are all in a single folder, files are named with a specific
         return files
 
+    def is_sample(self, suffix: str) -> bool:
+        return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
+
     def __gather_novogene_files(self) -> Mapping[str, list[Path]]:
-        def is_sample(filepath: Path) -> bool:
-            return filepath.suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
 
         files = {"R1": [], "R2": []}
-        sample_path = self.path / self.name
+        sample_path = self.path
         if not sample_path.exists():
             raise FileNotFoundError(f"Sample path {sample_path} does not exist.")
         for filepath in sample_path.iterdir():
-            if filepath.is_file() and is_sample(filepath):
-                stem = filepath.stem
-                if stem.endswith("_1"):
-                    files["R1"] += (filepath.resolve(),)
-                elif stem.endswith("_2"):
-                    files["R2"] += (filepath.resolve(),)
+            if filepath.is_file():
+                stem, suffixes = self.remove_suffixes(filepath)
+                if self.is_sample(suffixes):
+                    if stem.endswith("_1"):
+                        files["R1"].append(filepath.resolve())
+                    elif stem.endswith("_2"):
+                        files["R2"].append(filepath.resolve())
         # novogene files may be nested in subdirectories, so we need to walk the directory tree
         return files
 
-    @property
-    def name(self) -> str: ...
 
-    @property
-    def tag(self) -> ElementTag: ...
+class FastqSelector(Protocol):
+    def __call__(self, folder: Path) -> Mapping[str, list[Path]]: ...
 
-    @property
-    def determinants(self) -> tuple[str, ...]: ...
 
-    @property
-    def outputs(self) -> tuple[Path, ...]: ...
+class NovogeneSelector(FastqSelector):
 
-    @property
-    def artifacts(self) -> Mapping[str, Any]: ...
+    def __call__(self, folder: Path) -> Mapping[str, list[Path]]:
+        files = {"R1": [], "R2": []}
+        for filepath in folder.iterdir():
+            if filepath.is_file():
+                stem, suffixes = self.remove_suffixes(filepath)
+                if self.is_sample(suffixes):
+                    if stem.endswith("_1"):
+                        files["R1"].append(filepath.resolve())
+                    elif stem.endswith("_2"):
+                        files["R2"].append(filepath.resolve())
+        return files
 
-    run: RunType
+    def is_sample(self, suffix: str) -> bool:
+        return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
+
+
+class IlluminaSelector(FastqSelector):
+
+    def __call__(self, folder: Path) -> Mapping[str, list[Path]]:
+        files = {"R1": [], "R2": []}
+        for filepath in folder.iterdir():
+            stem, suffixes = self.remove_suffixes(filepath)
+            if filepath.is_file() and self.is_sample(suffixes):
+                if "_R1_" in stem:
+                    files["R1"].append(filepath.resolve())
+                elif "_R2_" in stem:
+                    files["R2"].append(filepath.resolve())
+        return files
+
+    def is_sample(self, suffix: str) -> bool:
+        return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
+
+
+class UndeterminedSelector(FastqSelector):
+
+    def __call__(self, folder: Path) -> Mapping[str, list[Path]]:
+        # patch this
+        files = {"R1": [], "R2": []}
+        for filepath in folder.iterdir():
+            stem, suffixes = self.remove_suffixes(filepath)
+            if filepath.is_file() and self.is_sample(suffixes):
+                if "_R1_" in stem and "Undetermined" in stem:
+                    files["R1"].append(filepath.resolve())
+                elif "_R2_" in stem and "Undetermined" in stem:
+                    files["R2"].append(filepath.resolve())
+        return files
+
+    def is_sample(self, suffix: str) -> bool:
+        return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
+
+
+class FastqConcat(Element):
+
+    def __init__(
+        self,
+        name: str,
+        folder: Path | str,
+        output_folder: Path = Path("cache/fastq"),
+        *,
+        selector: FastqSelector = NovogeneSelector(),
+        pres: tuple[Element, ...] | None = None,
+        tag: ElementTag | PartialElementTag | None = None,
+    ):
+        # Creates FastqArtifacts by concatenation
+        self.path = Path(folder).resolve()
+        self.selector = selector
+        self.output_folder = output_folder
+        tag = ElementTag(
+            root=name,
+            level=0,
+            omics=Omics.DNA,
+            stage=Stage.INPUT,
+            method=Method.CUSTOM,
+            state=State.RAW,
+        ).merge(tag)
+        key, name = generate_element_key_name(tag, "FastqSource", subcommand="concat")
+        self.name = name
+        normalized, files_to_merge = self.setup_normalization()
+        artifacts = ArtifactSet(FastqArtifact(normalized["R1"], normalized.get("R2")))
+        self.normalized = normalized
+        self.files_to_merge = files_to_merge
+
+        super().__init__(
+            key,
+            self.concat(),
+            tag,
+            artifacts=artifacts,
+            pres=(),
+            name=name,
+        )  # Element
+
+    def resolve_output_filename(self, read: str, suffix: str) -> str:
+        if self.type == "illumina":
+            return f"{self.name}_{read}_001.{suffix}"
+        elif self.type == "novogene":
+            return f"{self.name}_{read}.{suffix}"
+        else:
+            raise ValueError(f"Unsupported type: {self.type}")
+
+    def r1(self) -> Path:
+        return self.artifacts["r1"]
+
+    def r2(self) -> Path | None:
+        return self.artifacts.get("r2", None)
+
+    def normalize(self) -> Runnable:
+        def __run():
+            for output_path, input_files in self.files_to_merge.items():
+                self.normalize_lane(input_files, output_path)
+            return True
+
+        display = CallSpec(
+            path=("FastqSource", "normalize", "__run"),
+            kwargs={"name": self.name, "folder": self.path, "type": self.type},
+        ).render()
+
+        return Runnable(__run, display=display)
+
+    def setup_normalization(self):
+        files_to_merge = {}
+        normalized: dict[str, Path] = {}
+        if self.type == "illumina":
+            input_files_dict = self.__gather_illumina_files()
+        elif self.type == "novogene":
+            input_files_dict = self.__gather_novogene_files()
+        else:
+            raise ValueError(f"Unsupported type: {self.type}")
+
+        if not input_files_dict:
+            raise FileNotFoundError(
+                f"No {self.type.capitalize()} files found for sample '{self.name}' in folder '{self.path}'"
+            )
+        for key, tuple_of_files in input_files_dict.items():
+            if not tuple_of_files:
+                raise FileNotFoundError(
+                    f"No files found for key '{key}' in sample '{self.name}'"
+                )
+            if len(tuple_of_files) == 1:
+                normalized[key] = tuple_of_files[0]
+            else:
+                output_filename = self.resolve_output_filename(
+                    read=key, suffix=tuple_of_files[0].suffix.lstrip(".")
+                )
+                output_path = self.output_folder / output_filename
+                files_to_merge[output_path] = list(tuple_of_files)
+                normalized[key] = output_path
+        return normalized, files_to_merge
+
+    @classmethod
+    def concat(cls, input_files: Iterable[Path], output: Path):
+
+        command = ["cat", *map(str, input_files)]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("wb") as out:
+            subprocess.run(
+                command,
+                stdout=out,
+                check=True,
+            )
+
+    def remove_suffixes(self, path: Path) -> tuple[str, str]:
+        """Remove all suffixes from a file path to get the base name."""
+        suffixes = "".join(path.suffixes)
+        stem = path.name.removesuffix(suffixes)
+        return stem, suffixes
+
+    def __gather_illumina_files(self) -> Mapping[str, list[Path]]:
+        files = {"R1": [], "R2": []}
+        for filepath in self.path.iterdir():
+            stem, suffixes = self.remove_suffixes(filepath)
+            if filepath.is_file() and self.is_sample(suffixes):
+                if "_R1_" in stem:
+                    files["R1"].append(filepath.resolve())
+                elif "_R2_" in stem:
+                    files["R2"].append(filepath.resolve())
+        # illumina files are all in a single folder, files are named with a specific
+        return files
+
+    def is_sample(self, suffix: str) -> bool:
+        return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
+
+    def __gather_novogene_files(self) -> Mapping[str, list[Path]]:
+
+        files = {"R1": [], "R2": []}
+        sample_path = self.path
+        if not sample_path.exists():
+            raise FileNotFoundError(f"Sample path {sample_path} does not exist.")
+        for filepath in sample_path.iterdir():
+            if filepath.is_file():
+                stem, suffixes = self.remove_suffixes(filepath)
+                if self.is_sample(suffixes):
+                    if stem.endswith("_1"):
+                        files["R1"].append(filepath.resolve())
+                    elif stem.endswith("_2"):
+                        files["R2"].append(filepath.resolve())
+        # novogene files may be nested in subdirectories, so we need to walk the directory tree
+        return files
 
 
 # class Sample(Element):
