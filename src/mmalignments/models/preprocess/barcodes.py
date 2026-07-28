@@ -11,6 +11,8 @@ from pandas import DataFrame  # type: ignore[import]
 
 from mmalignments.models.artifacts import (
     ArtifactSet,
+    FileArtifact,
+    FileSpec,
     OutputSpec,
     TableArtifact,
 )
@@ -23,6 +25,7 @@ from mmalignments.models.elements import (
     generate_element_key_name,
 )
 from mmalignments.models.externals import Runnable
+from mmalignments.models.reports import write_sampleadapters_report
 from mmalignments.models.tags import (
     ElementTag,
     Method,
@@ -102,9 +105,11 @@ def uniqueness(
         omics=Omics.DNA,
         param="uniqueness",
     )
-    spec = OutputSpec(tag.default_name, Path("cache/barcodes"), ext="tsv").merge(
-        outspec
-    )
+    spec = OutputSpec(
+        tag.default_name,
+        Path("cache/barcodes"),
+        ext="tsv",
+    ).merge(outspec)
     outfile = spec.path()
     pres = source.pres if isinstance(source, FileSource) else (source,)
     pres += genomic.pres if isinstance(genomic, FileSource) else (genomic,)
@@ -117,7 +122,11 @@ def uniqueness(
         barcode_columns,
         direction=direction,
     )
-    key, name = generate_element_key_name(tag, "barcodes", subcommand="uniqueness")
+    key, name = generate_element_key_name(
+        tag,
+        "barcodes",
+        subcommand="uniqueness",
+    )
     artifacts = ArtifactSet(
         TableArtifact(outfile),
         primary_name=spec.ext,
@@ -208,15 +217,19 @@ def sampleadapters(
     )
     r1 = fastq.r1
     r2 = fastq.r2  # may be None
-    spec = OutputSpec(tag.default_name, Path("cache/barcodes"), ext="tsv").merge(
-        outspec
-    )
+    spec = OutputSpec(
+        tag.default_name,
+        Path("cache/barcodes"),
+        ext="tsv",
+    ).merge(outspec)
     outfile = spec.path()
     pres = source.pres if isinstance(source, FastqSource) else (source,)
     barcode_path = None
     if barcodes is not None:
         barcode_path = barcodes.artifacts.primary.resolve()
-        pres += barcodes.pres if isinstance(barcodes, FileSource) else (barcodes,)
+        pres += (
+            barcodes.pres if isinstance(barcodes, FileSource) else (barcodes,)
+        )
 
     determinants = (
         str(start_length),
@@ -242,7 +255,11 @@ def sampleadapters(
         min_count=min_count,
         leven=leven,
     )
-    key, name = generate_element_key_name(tag, "barcodes", subcommand="sampleadapters")
+    key, name = generate_element_key_name(
+        tag,
+        "barcodes",
+        subcommand="sampleadapters",
+    )
     artifacts = ArtifactSet(TableArtifact(outfile), primary_name=spec.ext)
     return Element(
         key,
@@ -250,6 +267,79 @@ def sampleadapters(
         tag=tag,
         artifacts=artifacts,
         determinants=determinants,
+        pres=pres,
+        name=name,
+    )
+
+
+@element
+def sampleadapters_report(
+    source: Element | FileSource,
+    *,
+    tag: PartialElementTag | ElementTag | None = None,
+    outspec: OutputSpec | None = None,
+) -> Element:
+    """
+    Builds a QC report from the TSV output of ``sampleadapters``.
+
+    The report stays downstream of the table-producing element, so the DAG
+    keeps the detailed assignments and the report as separate nodes.
+    """
+    table_path = source.artifacts.primary.resolve()
+    tag = from_prior(
+        source.tag,
+        tag,
+        root=source.root,
+        stage=Stage.SUMMARY,
+        method=Method.CUSTOM,
+        state=State.REPORT,
+        omics=Omics.DNA,
+        param="sampleadapters_report",
+    )
+    spec = OutputSpec(
+        tag.default_name,
+        Path("cache/barcodes"),
+        ext="html",
+    ).merge(outspec)
+    spec = spec.add_output(
+        "tsv",
+        FileSpec(spec.stem or tag.default_name, "tsv"),
+    )
+    report_path = spec.path()
+    summary_path = spec.files["tsv"]
+
+    pres = source.pres if isinstance(source, FileSource) else (source,)
+    def __call() -> Path:
+        return write_sampleadapters_report(
+            table_path,
+            report_path,
+            summary_path,
+        )
+
+    display = CallSpec(
+        path=("sampleadapters_report",),
+        kwargs={
+            "table_path": table_path,
+            "report_path": report_path,
+            "summary_path": summary_path,
+        },
+    ).render()
+    key, name = generate_element_key_name(
+        tag,
+        "barcodes",
+        subcommand="sampleadapters_report",
+    )
+    artifacts = ArtifactSet(
+        FileArtifact(report_path),
+        primary_name=spec.ext,
+        tsv=TableArtifact(summary_path),
+    )
+    return Element(
+        key,
+        Runnable(__call, display=display),
+        tag=tag,
+        artifacts=artifacts,
+        determinants=(),
         pres=pres,
         name=name,
     )
@@ -384,7 +474,6 @@ def _barcode_candidates(
     barcode_columns: list[str],
 ) -> list[tuple[str, str, str]]:
     candidates: list[tuple[str, str, str]] = []
-
     for _, row in barcodes.iterrows():
         sample = row.get(sample_column)
         if sample is None:
@@ -398,7 +487,6 @@ def _barcode_candidates(
             barcode = str(value).strip().upper()
             if barcode and barcode.lower() != "nan":
                 candidates.append((sample_name, col, barcode))
-
     return candidates
 
 
@@ -477,7 +565,6 @@ def _classify_row_with_threshold(
 ) -> tuple[str, int, str, str, int, str]:
     if count < min_count:
         return "unknown", -1, "unknown", "", 0, ""
-
     return _classify_sequence(
         seq, candidates, max_edit_distance, distance_func=distance_func
     )
@@ -518,15 +605,6 @@ def _classify_column(
         prefix_series,
         pattern_series,
     )
-
-
-def _classification_weight(
-    count_series,
-    distance_series,
-) -> int:
-    valid = distance_series >= 0
-    weights = count_series.fillna(0)
-    return int(weights[valid].sum())
 
 
 def _classify_single_end_frame(
@@ -633,7 +711,6 @@ def _classify_paired_frame(
     classified["Prefix match length (R2)"] = r2_prefix
     classified["Match pattern (R2)"] = r2_pattern
 
-    return classified
     return classified
 
 
@@ -949,7 +1026,8 @@ def check_flank_code(
 
     Returns:
         hits:
-            dict mapping genomic position -> (matched sequence, hamming distance)
+            dict mapping genomic position -> tuple of matched sequence and
+            hamming distance
 
         unique:
             True if exactly one genomic position matches within the allowed
