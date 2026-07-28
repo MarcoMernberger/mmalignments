@@ -11,7 +11,6 @@ from pandas import DataFrame  # type: ignore[import]
 
 from mmalignments.models.artifacts import (
     ArtifactSet,
-    FileArtifact,
     OutputSpec,
     TableArtifact,
 )
@@ -122,7 +121,7 @@ def uniqueness(
     artifacts = ArtifactSet(
         TableArtifact(outfile),
         primary_name=spec.ext,
-        html=FileArtifact(outfile.with_suffix(".html")),
+        # html=FileArtifact(outfile.with_suffix(".html")),
     )
     return Element(
         key,

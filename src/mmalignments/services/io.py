@@ -319,7 +319,7 @@ def write_frame(df: DataFrame, path: Path, **kwargs) -> None:
         raise ValueError(f"Unsupported file format: {ext}")
 
 
-def read_frame(path: Path, **kwargs) -> DataFrame:
+def read_frame(path: Path, drop_unnamed_columns: bool = True, **kwargs) -> DataFrame:
     """
     Read a DataFrame from a file.
 
@@ -338,6 +338,8 @@ def read_frame(path: Path, **kwargs) -> DataFrame:
     ValueError
         If the file format is unsupported.
     """
+    if drop_unnamed_columns:
+        kwargs.setdefault("usecols", lambda c: not c.startswith("Unnamed"))
     if path.suffix in (".tsv", ".txt"):
         return pd.read_csv(path, sep="\t", **kwargs)
     elif path.suffix == ".parquet":
