@@ -1387,7 +1387,8 @@ class FastqConcat(Element):
                 check=True,
             )
 
-    def remove_suffixes(self, path: Path) -> tuple[str, str]:
+    @classmethod
+    def remove_suffixes(cls, path: Path) -> tuple[str, str]:
         """Remove all suffixes from a file path to get the base name."""
         suffixes = "".join(path.suffixes)
         stem = path.name.removesuffix(suffixes)
