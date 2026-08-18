@@ -425,6 +425,7 @@ class NGmerge(External):
         Element
             Element whose artifact ``"tsv"`` is the path to the counts TSV.
         """
+        params = Params().update(params)
         if not hasattr(sample, "r1"):
             raise ValueError("Sample element must have 'r1' attribute.")
         if not hasattr(sample, "r2"):
@@ -458,6 +459,8 @@ class NGmerge(External):
         determinants = (mode,) + self.signature_determinants(params)
         inputs = (fastq_r1, fastq_r2) if fastq_r2 is not None else (fastq_r1,)
         artifacts = ArtifactSet(FastqArtifact(output_fastq), primary_name="fastq")
+        if "l" in params:
+            artifacts = artifacts.with_extra("log", params["l"])
         source = Element(
             key=key,
             run=runner,

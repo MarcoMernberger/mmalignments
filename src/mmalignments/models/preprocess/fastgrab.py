@@ -42,6 +42,9 @@ from mmalignments.models.tags import (
     from_prior,
 )
 from mmalignments.services.dependencies import depends
+from mmalignments.services.genomic import (  # type: ignore[import]
+    reverse_complement,
+)
 from mmalignments.services.io import concat_fastq, parents, write_fasta
 from mmalignments.services.logging import current_call_to_string
 from mmalignments.services.toml import indent_regular_tables
@@ -305,6 +308,8 @@ class FastGrab(External):
         elif isinstance(barcodes, Element):
             # we assume the element has a Callable Artifact that returns the barcode map
             barcodes_map[barcodes.root] = barcodes.fasta
+            if hasattr(barcodes, "reverse_fasta"):
+                barcodes_map[f"{barcodes.root}_reverse"] = barcodes.reverse_fasta
             pres += (barcodes,)
         else:
             for name, elem in barcodes.items():
@@ -801,6 +806,7 @@ class FastGrab(External):
         self,
         barcodes: TableElement | FileSource,
         *,
+        include_reverse: bool = False,
         name_column: str = "sample",
         barcode_column: str = "barcode",
         outspec: OutputSpec | None = None,
@@ -821,16 +827,19 @@ class FastGrab(External):
         ).merge(outspec)
         barcodefile = barcodes.artifacts.primary.resolve()
         outfile = outspec.path(tag.default_name)
+        reverse_fasta = None
+        artifacts = ArtifactSet(outfile, primary_name="fasta")
+        if include_reverse:
+            reverse_fasta = outfile.with_name(outfile.stem + "_reverse.fasta")
+            artifacts = artifacts.with_extra("fasta_reverse", reverse_fasta)
         key = f"{tag.default_name}_flanks_fasta"
         runner = self.write_barcode_fasta(
             sensorfile=barcodefile,
             outfile=outfile,
             name_column=name_column,
             barcode_column=barcode_column,
+            reverse_fasta=reverse_fasta,
         )
-        artifacts = {
-            "fasta": outfile,
-        }
         return Element(
             key,
             runner,
@@ -842,21 +851,45 @@ class FastGrab(External):
         )
 
     def write_barcode_fasta(
-        self, sensorfile: Path, outfile: Path, name_column: str, barcode_column: str
+        self,
+        sensorfile: Path,
+        outfile: Path,
+        name_column: str,
+        barcode_column: str,
+        reverse_fasta: Path | None = None,
     ) -> Runnable:
 
         def __run():
             df_constructs = pd.read_csv(sensorfile, sep="\t")
+            df_constructs = df_constructs.drop_duplicates(
+                subset=barcode_column, keep="first"
+            )
             sample_barcodes = dict(
                 zip(df_constructs[name_column], df_constructs[barcode_column])
             )
             write_fasta(outfile, sample_barcodes)
+            if reverse_fasta is not None:
+                df_constructs_reverse = df_constructs.assign(
+                    **{
+                        barcode_column: df_constructs[barcode_column].apply(
+                            reverse_complement
+                        )
+                    }
+                )
+                sample_barcodes_reverse = dict(
+                    zip(
+                        df_constructs_reverse[name_column],
+                        df_constructs_reverse[barcode_column],
+                    )
+                )
+                write_fasta(reverse_fasta, sample_barcodes_reverse)
 
         callspec = CallSpec(
             path=("write_barcode_fasta",),
             kwargs={
                 "sensorfile": sensorfile,
                 "outfile": outfile,
+                "reverse_fasta": reverse_fasta,
                 "name_column": name_column,
                 "barcode_column": barcode_column,
             },
@@ -963,6 +996,91 @@ class FastGrab(External):
             process=process_el, config=config_el, rename=rename, names=names, tag=tag
         )
         return consolidate_el, process_el, config_el
+
+    def configprocess(
+        self,
+        sample: NextGenSample,
+        template: FileSource | Sequence[FileSource],
+        barcodes: Callable | Element | Mapping[str, Element],
+        *,
+        compression: Literal["Raw", "Gzip"] = "Gzip",
+        tag: PartialElementTag | ElementTag | None = None,
+        # outspec: OutputSpec | None = None,
+        demultiplex_dir: Path | None = None,
+        config_dir: Path | None = None,
+        params: Params | None = None,
+        cfg: ExternalRunConfig | None = None,
+    ) -> tuple[Element, Element]:
+        """Configure and process a demultiplexing run in one step.
+
+        This convenience method calls :meth:`configure` followed by
+        :meth:`process` and returns both Elements.
+
+        Parameters
+        ----------
+        sample : NextGenSample
+            Input sample with paired FASTQ files.
+        template : FileSource | Sequence[FileSource]
+            TOML template(s) with steps to be resolved by fastgrab.
+        barcodes : Callable | Element | Mapping[str, Element]
+            Mapping of barcode set name → Element with FASTA artifact or Callable
+            returning such a mapping. If it's just a single demultiplexing step,
+            this can be a single Element with FASTA artifact.
+        names : Iterator[str] | list[str] | None
+            Optional list of sample names to expect in the consolidated output. If
+            *None*, all samples found in the process output are included.
+        rename : Callable[[str], str] | None
+            Optional function to rename consolidated FASTQ files. If *None*, a default
+            renaming scheme is applied that removes the "barcode_unambiguous=true_"
+            prefix and replaces "_read1" and "_read2" with "_R1" and "_R2".
+        tag : PartialElementTag | ElementTag | None
+            Optional tag override for all created Elements.
+        compression : Literal["Raw", "Gzip"]
+            Compression method for the consolidated FASTQ files.  If *Gzip*, the files
+            are compressed with gzip; if *Raw*, they are left uncompressed.
+        demultiplex_dir : Path | None
+            Base output directory for the demultiplexed FASTQs.  If *None*, a default
+            directory is derived from the sample name.
+        config_dir : Path | None
+            Directory in which to write the configuration file.  If *None*, a default
+            directory is derived from the sample name.
+        filename : Path | str | None
+        outspec : OutputSpec | None
+            Output specification for the demultiplexed FASTQs.  If *None*, a default
+            specification is derived from the sample name.
+        outdir : Path | str | None
+            Base output directory for the demultiplexed FASTQs.  If *None*, a default
+            directory is derived from the sample name.
+        configdir : Path | None
+            Directory in which to write the configuration file.  If *None*, a default
+            directory is derived from the sample name.
+        filename : Path | str | None
+            Filename for the configuration file.  If *None*, a default name is derived
+            from the sample name.
+        params : Params | None
+            Parameter sets keyed by step name (``"configure"``,
+            ``"process"``).
+        cfg : ExternalRunConfig | None
+            Run configurations keyed by step name.
+
+        Returns
+        -------
+        tuple[Element, Element, Element]
+            ``(consolidate_element, process_element, config_element)``
+        """
+        config_el = self.configure(
+            sample=sample,
+            template=template,
+            barcodes=barcodes,
+            demultiplex_dir=demultiplex_dir,
+            config_dir=config_dir,
+            compression=compression,
+            tag=tag,
+            params=params,
+            cfg=cfg,
+        )
+        process_el = self.process(config=config_el, tag=tag)
+        return process_el, config_el
 
     def demultiplex(
         self,

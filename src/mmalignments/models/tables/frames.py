@@ -616,6 +616,7 @@ class Tables:
 
         # @depends(frame_callable, *(m.fn for m in morphs), bundle_morphs)
         def __run():
+            print("source", source.primary)
             filter_df = source.primary.view(view)
             df = source.primary.view()
             for morph in morphs:
@@ -1318,6 +1319,8 @@ def filter_to_group(
             selected_columns = ColumnTag.select_from_view(df.columns.to_list(), view)
             if selected_columns:
                 df = df[selected_columns]  # type: ignore[assignment]
+        print(df[group].unique())
+        print("group", group, "values", values)
         return df[df[group].isin(values)]  # type: ignore[return-value]
 
     return Morph.from_callable(__filter, view=view, params={"group": group})

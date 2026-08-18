@@ -74,6 +74,7 @@ class State(str, Enum):
     NORMALIZED = "normalized"
     RESHAPED = "reshaped"
     SELECTED = "selected"
+    PLOT = "plot"
 
 
 class Method(str, Enum):

@@ -50,7 +50,7 @@ def uniqueness(
     genomic: Element | FileSource,
     *,
     max_hamming: int = 5,
-    barcode_columns: list[str] = ["start_barcode", "end_barcode"],
+    barcode_columns: list[str] = ["used_start_barcode", "used_end_barcode"],
     direction: Literal["forward", "reverse", "both"] = "both",
     tag: PartialElementTag | ElementTag | None = None,
     outspec: OutputSpec | None = None,
@@ -148,10 +148,10 @@ def sampleadapters(
     source: Element | FastqSource,
     barcodes: Element | FileSource | None = None,
     *,
-    start_length: int = 25,
+    start_length: int = 18,
     sample_size: int = 50000,
-    forward_col: list[str] | None = ["start_barcode"],
-    reverse_col: list[str] | None = ["end_barcode"],
+    forward_col: list[str] | None = ["used_start_barcode"],
+    reverse_col: list[str] | None = ["used_end_barcode"],
     sample_col: str = "sample",
     max_edit_distance: int = 8,
     min_count: int = 1,
@@ -227,9 +227,7 @@ def sampleadapters(
     barcode_path = None
     if barcodes is not None:
         barcode_path = barcodes.artifacts.primary.resolve()
-        pres += (
-            barcodes.pres if isinstance(barcodes, FileSource) else (barcodes,)
-        )
+        pres += barcodes.pres if isinstance(barcodes, FileSource) else (barcodes,)
 
     determinants = (
         str(start_length),
@@ -309,6 +307,7 @@ def sampleadapters_report(
     summary_path = spec.files["tsv"]
 
     pres = source.pres if isinstance(source, FileSource) else (source,)
+
     def __call() -> Path:
         return write_sampleadapters_report(
             table_path,
@@ -383,6 +382,40 @@ def _count_fastq_prefixes(
     return sorted(counts.items(), key=lambda x: (-x[1], x[0]))
 
 
+def _count_fastq_prefix_pairs(
+    r1_path: Path,
+    r2_path: Path,
+    *,
+    start_length: int,
+    sample_size: int,
+) -> list[tuple[tuple[str, str], int]]:
+    counts: Counter[tuple[str, str]] = Counter()
+
+    r1_opener = gzip.open if r1_path.suffix == ".gz" else Path.open
+    r2_opener = gzip.open if r2_path.suffix == ".gz" else Path.open
+
+    with (
+        r1_opener(r1_path, "rt") as r1_handle,
+        r2_opener(r2_path, "rt") as r2_handle,
+    ):
+        r1_records = SeqIO.parse(r1_handle, "fastq")
+        r2_records = SeqIO.parse(r2_handle, "fastq")
+
+        for idx, (r1, r2) in enumerate(zip(r1_records, r2_records)):
+            if idx >= sample_size:
+                break
+
+            r1_prefix = str(r1.seq[:start_length]).upper()
+            r2_prefix = str(r2.seq[:start_length]).upper()
+
+            counts[(r1_prefix, r2_prefix)] += 1
+
+    return sorted(
+        counts.items(),
+        key=lambda x: (-x[1], x[0]),
+    )
+
+
 def _single_end_frame(
     input_name: str,
     counts: list[tuple[str, int]],
@@ -401,24 +434,55 @@ def _single_end_frame(
     )
 
 
+# def _paired_end_frame(
+#     input_name: str,
+#     r1_counts: list[tuple[str, int]],
+#     r2_counts: list[tuple[str, int]],
+# ) -> DataFrame:
+#     n_rows = max(len(r1_counts), len(r2_counts))
+#     rows = []
+
+#     for i in range(n_rows):
+#         seq_r1, count_r1 = r1_counts[i] if i < len(r1_counts) else (None, None)
+#         seq_r2, count_r2 = r2_counts[i] if i < len(r2_counts) else (None, None)
+#         rows.append(
+#             {
+#                 "input": input_name,
+#                 "Sequence (R1)": seq_r1,
+#                 "Count (R1)": count_r1,
+#                 "Sequence (R2)": seq_r2,
+#                 "Count (R2)": count_r2,
+#             }
+#         )
+
+#     return DataFrame(
+#         rows,
+#         columns=[
+#             "input",
+#             "Sequence (R1)",
+#             "Count (R1)",
+#             "Sequence (R2)",
+#             "Count (R2)",
+#         ],
+#     )
+
+
 def _paired_end_frame(
     input_name: str,
-    r1_counts: list[tuple[str, int]],
-    r2_counts: list[tuple[str, int]],
+    r1_r2_counts: list[tuple[tuple[str, str], int]],
 ) -> DataFrame:
-    n_rows = max(len(r1_counts), len(r2_counts))
+    n_rows = len(r1_r2_counts)
     rows = []
 
     for i in range(n_rows):
-        seq_r1, count_r1 = r1_counts[i] if i < len(r1_counts) else (None, None)
-        seq_r2, count_r2 = r2_counts[i] if i < len(r2_counts) else (None, None)
+        (seq_r1, seq_r2), count = r1_r2_counts[i]
         rows.append(
             {
                 "input": input_name,
                 "Sequence (R1)": seq_r1,
-                "Count (R1)": count_r1,
+                "Count (R1)": count,
                 "Sequence (R2)": seq_r2,
-                "Count (R2)": count_r2,
+                "Count (R2)": count,
             }
         )
 
@@ -723,20 +787,97 @@ def _format_hit_example(
     return f"{label}@{position}:d{distance}:{window}"
 
 
+# def _flank_queries(
+#     flank: str,
+#     direction: Literal["forward", "reverse", "both"],
+# ) -> dict[str, str]:
+#     reverse_flank = reverse_complement(flank).upper()
+
+#     if direction == "forward":
+#         return {"fwd": flank}
+
+#     if direction == "reverse":
+#         return {"rev": reverse_flank}
+
+#     if direction == "both":
+#         return {"fwd": flank, "rev": reverse_flank}
+
+#     raise ValueError("direction must be 'forward', 'reverse', or 'both'")
+
+
+# def _flank_uniqueness_radius_details(
+#     flank: str,
+#     genomic: str,
+#     max_distance: int | None = None,
+#     direction: Literal["forward", "reverse", "both"] = "both",
+#     *,
+#     example_limit: int = 3,
+# ) -> tuple[int, list[str]]:
+#     flank = flank.upper()
+#     genomic = genomic.upper()
+#     queries = _flank_queries(flank, direction)
+
+#     L = len(flank)
+
+#     distance_hits = defaultdict(int)
+#     distance_examples: dict[int, list[str]] = defaultdict(list)
+
+#     for i in range(len(genomic) - L + 1):
+#         window = genomic[i : i + L]
+
+#         for label, query in queries.items():
+#             d = hamming_early_break(query, window, max_distance)
+
+#             # If max_distance is exceeded, ignore this window
+#             if max_distance is not None and d > max_distance:
+#                 continue
+
+#             distance_hits[d] += 1
+
+#             if d > 0:
+#                 examples = distance_examples[d]
+#                 if len(examples) < example_limit:
+#                     examples.append(_format_hit_example(label, i, d, window))
+
+#     if not distance_hits:
+#         return -1, []
+
+#     cumulative_hits = 0
+
+#     for d in sorted(distance_hits):
+#         cumulative_hits += distance_hits[d]
+
+#         if cumulative_hits > 1:
+#             return d - 1, distance_examples.get(d, [])[:example_limit]
+
+#     radius = max(distance_hits)
+#     return radius, distance_examples.get(radius, [])[:example_limit]
+
+
 def _flank_queries(
     flank: str,
     direction: Literal["forward", "reverse", "both"],
-) -> dict[str, str]:
-    reverse_flank = reverse_complement(flank).upper()
+) -> tuple[tuple[str, str], ...]:
+    """
+    Return the query sequences for the requested direction(s).
+
+    For ``both``, forward and reverse-complement queries are returned.
+    """
+    flank = flank.upper()
 
     if direction == "forward":
-        return {"fwd": flank}
+        return (("fwd", flank),)
+
+    reverse_flank = reverse_complement(flank).upper()
 
     if direction == "reverse":
-        return {"rev": reverse_flank}
+        return (("rev", reverse_flank),)
 
     if direction == "both":
-        return {"fwd": flank, "rev": reverse_flank}
+        return (
+            ("fwd", flank),
+            ("rev", reverse_flank),
+        )
 
     raise ValueError("direction must be 'forward', 'reverse', or 'both'")
 
@@ -749,45 +890,197 @@ def _flank_uniqueness_radius_details(
     *,
     example_limit: int = 3,
 ) -> tuple[int, list[str]]:
+    """
+    Determine the uniqueness radius of a flank in a genomic sequence.
+
+    A genomic position counts as one hit, regardless of whether the
+    forward query, reverse-complement query, or both queries match there.
+
+    For ``direction="both"``, the best (smallest) Hamming distance of
+    the forward and reverse-complement query at each genomic position
+    is used.
+
+    The uniqueness radius is the largest Hamming distance for which
+    at most one distinct genomic position is matched.
+
+    If zero or one genomic positions match within ``max_distance``,
+    ``max_distance`` is returned.
+
+    Parameters
+    ----------
+    flank : str
+        Barcode/flank sequence to search for.
+    genomic : str
+        Genomic sequence to search.
+    max_distance : int | None
+        Maximum Hamming distance to consider. This is primarily a
+        performance limit, not a biological limit.
+    direction : Literal["forward", "reverse", "both"]
+        Which orientation(s) to search.
+    example_limit : int
+        Maximum number of non-exact collision examples to return.
+
+    Returns
+    -------
+    tuple[int, list[str]]
+        The uniqueness radius and examples of hits at the distance
+        where uniqueness is lost.
+    """
     flank = flank.upper()
     genomic = genomic.upper()
+
+    length = len(flank)
+
+    if length == 0:
+        raise ValueError("flank must not be empty")
+
+    if length > len(genomic):
+        return max_distance or 0, []
+
     queries = _flank_queries(flank, direction)
 
-    L = len(flank)
+    # Number of DISTINCT genomic positions hit at each distance.
+    distance_hits: defaultdict[int, int] = defaultdict(int)
 
-    distance_hits = defaultdict(int)
-    distance_examples: dict[int, list[str]] = defaultdict(list)
+    # Examples are only needed for distances at which multiple
+    # genomic positions exist.
+    distance_examples: defaultdict[int, list[str]] = defaultdict(list)
 
-    for i in range(len(genomic) - L + 1):
-        window = genomic[i : i + L]
+    for position in range(len(genomic) - length + 1):
+        window = genomic[position : position + length]
 
-        for label, query in queries.items():
-            d = hamming_early_break(query, window, max_distance)
+        # Find the best orientation for this genomic position.
+        #
+        # For "forward" / "reverse" this loop contains only one query.
+        # For "both", we use the smaller distance of the two orientations.
+        best_distance = None
+        best_label = None
 
-            # If max_distance is exceeded, ignore this window
-            if max_distance is not None and d > max_distance:
+        for label, query in queries:
+            distance = hamming_early_break(
+                query,
+                window,
+                max_distance,
+            )
+
+            # This orientation cannot produce a relevant hit.
+            if max_distance is not None and distance > max_distance:
                 continue
 
-            distance_hits[d] += 1
+            # Keep the best orientation for this genomic position.
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_label = label
 
-            if d > 0:
-                examples = distance_examples[d]
-                if len(examples) < example_limit:
-                    examples.append(_format_hit_example(label, i, d, window))
+                # Exact match is the theoretical minimum.
+                # There is no reason to test the other orientation.
+                if distance == 0:
+                    break
 
+        # No orientation matches within max_distance.
+        if best_distance is None:
+            continue
+
+        distance_hits[best_distance] += 1
+
+        if best_distance > 0:
+            examples = distance_examples[best_distance]
+
+            if len(examples) < example_limit:
+                examples.append(
+                    _format_hit_example(
+                        best_label,
+                        position,
+                        best_distance,
+                        window,
+                    )
+                )
+
+        # Two exact hits mean radius 0. Nothing can make the radius
+        # smaller, so we can stop immediately.
+        if best_distance == 0 and distance_hits[0] > 1:
+            return (
+                0,
+                distance_examples.get(0, [])[:example_limit],
+            )
+
+    # No genomic position matched within max_distance.
+    #
+    # This means the barcode is unique throughout the entire
+    # search radius.
     if not distance_hits:
-        return -1, []
+        return max_distance or 0, []
 
     cumulative_hits = 0
 
-    for d in sorted(distance_hits):
-        cumulative_hits += distance_hits[d]
+    for distance in sorted(distance_hits):
+        cumulative_hits += distance_hits[distance]
 
+        # The second DISTINCT genomic position appears at this
+        # Hamming distance. Therefore the previous distance was
+        # the last distance at which the barcode was unique.
         if cumulative_hits > 1:
-            return d - 1, distance_examples.get(d, [])[:example_limit]
+            return (
+                distance - 1,
+                distance_examples[distance][:example_limit],
+            )
 
-    radius = max(distance_hits)
-    return radius, distance_examples.get(radius, [])[:example_limit]
+    # There was at most one distinct genomic position within the
+    # entire search radius.
+    return (
+        max_distance if max_distance is not None else max(distance_hits),
+        distance_examples.get(
+            max(distance_hits),
+            [],
+        )[:example_limit],
+    )
+
+
+def barcode_check_uniqueness_radius(
+    barcode_path: Path,
+    genomic_path: Path,
+    outfile: Path,
+    max_hamming: int,
+    barcode_columns: list[str],
+    direction: Literal["forward", "reverse", "both"] = "both",
+) -> DataFrame:
+    """
+    Check barcode uniqueness in a genomic sequence.
+
+    For each barcode, determine the largest Hamming distance for
+    which at most one distinct genomic position matches.
+
+    ``max_hamming`` acts as a computational search limit. If zero
+    or one genomic positions match within this limit, the returned
+    uniqueness radius is ``max_hamming``.
+
+    Results are written to ``outfile`` and returned as a DataFrame.
+    """
+    if max_hamming < 0:
+        raise ValueError("max_hamming must be >= 0")
+
+    barcodes = read_frame(barcode_path)
+
+    record = SeqIO.read(genomic_path, "fasta")
+    genomic_sequence = str(record.seq).upper()
+
+    for column in barcode_columns:
+        results = barcodes[column].map(
+            lambda barcode: _flank_uniqueness_radius_details(
+                barcode,
+                genomic_sequence,
+                max_hamming,
+                direction,
+            )
+        )
+
+        barcodes[f"Unique radius ({column})"] = results.str[0]
+
+        barcodes[f"Non-exact hit examples ({column})"] = results.str[1].str.join("; ")
+
+    write_frame(barcodes, outfile)
+
+    return barcodes
 
 
 def sample_start_reads(
@@ -808,21 +1101,22 @@ def sample_start_reads(
     def __call() -> DataFrame:
         distance_func = _levenshtein_distance if leven else hamming_early_break
         input_name = _input_fastq_name(r1)
-        r1_counts = _count_fastq_prefixes(
-            r1,
-            start_length=start_length,
-            sample_size=sample_size,
-        )
 
         if r2 is None:
-            frame = _single_end_frame(input_name, r1_counts)
+            counts = _count_fastq_prefixes(
+                r1,
+                start_length=start_length,
+                sample_size=sample_size,
+            )
+            frame = _single_end_frame(input_name, counts)
         else:
-            r2_counts = _count_fastq_prefixes(
+            counts = _count_fastq_prefix_pairs(
+                r1,
                 r2,
                 start_length=start_length,
                 sample_size=sample_size,
             )
-            frame = _paired_end_frame(input_name, r1_counts, r2_counts)
+            frame = _paired_end_frame(input_name, counts)
 
         if barcode_path is not None:
             barcodes = read_frame(barcode_path)
@@ -923,67 +1217,61 @@ def flank_uniqueness_radius(
     return radius
 
 
-def barcode_check_uniqueness_radius(
-    barcode_path: Path,
-    genomic_path: Path,
-    outfile: Path,
-    max_hamming: int,
-    barcode_columns: list[str],
-    direction: Literal["forward", "reverse", "both"] = "both",
-) -> DataFrame:
-    """
-    Check if the barcodes are unique in the genomic sequence, allowing for a
-    specified number of mismatches. For each barcode, determine the maximum
-    Hamming distance for which it remains unique (Uniqueness radius).
+# def barcode_check_uniqueness_radius(
+#     barcode_path: Path,
+#     genomic_path: Path,
+#     outfile: Path,
+#     max_hamming: int,
+#     barcode_columns: list[str],
+#     direction: Literal["forward", "reverse", "both"] = "both",
+# ) -> DataFrame:
+#     """
+#     Check if the barcodes are unique in the genomic sequence, allowing for a
+#     specified number of mismatches. For each barcode, determine the maximum
+#     Hamming distance for which it remains unique (Uniqueness radius).
 
-    Parameters
-    ----------
-    barcode_path : Path
-        The path to the barcode file.
-    genomic_path : Path
-        The path to the genomic FASTA file.
-    outfile : Path
-        The path to the output file where results will be saved.
-    max_hamming : int
-        Maximum number of mismatches allowed for a barcode to be considered
-        a match in the genomic sequence.
-    barcode_columns : list[str]
-        List of column names in the barcode file that contain the barcodes.
-    direction : Literal["forward", "reverse", "both"]
-        Direction to check for uniqueness. "forward" checks the barcodes as-is,
-        "reverse" checks the reverse complement of the barcodes, and "both"
-        checks both directions.
+#     Parameters
+#     ----------
+#     barcode_path : Path
+#         The path to the barcode file.
+#     genomic_path : Path
+#         The path to the genomic FASTA file.
+#     outfile : Path
+#         The path to the output file where results will be saved.
+#     max_hamming : int
+#         Maximum number of mismatches allowed for a barcode to be considered
+#         a match in the genomic sequence.
+#     barcode_columns : list[str]
+#         List of column names in the barcode file that contain the barcodes.
+#     direction : Literal["forward", "reverse", "both"]
+#         Direction to check for uniqueness. "forward" checks the barcodes as-is,
+#         "reverse" checks the reverse complement of the barcodes, and "both"
+#         checks both directions.
 
-    Returns
-    -------
-    DataFrame
-        A DataFrame containing the barcodes and their uniqueness radius.
-    """
-    barcodes = read_frame(barcode_path)
-    record = SeqIO.read(genomic_path, "fasta")
-    genomic_sequence = str(record.seq)
+#     Returns
+#     -------
+#     DataFrame
+#         A DataFrame containing the barcodes and their uniqueness radius.
+#     """
+#     barcodes = read_frame(barcode_path)
+#     record = SeqIO.read(genomic_path, "fasta")
+#     genomic_sequence = str(record.seq)
 
-    for column in barcode_columns:
-        barcodes[f"Non-exact hit examples ({column})"] = barcodes[column].apply(
-            lambda x: "; ".join(
-                _flank_uniqueness_radius_details(
-                    x,
-                    genomic_sequence,
-                    max_hamming,
-                    direction,
-                )[1]
-            )
-        )
-        barcodes[f"Unique radius ({column})"] = barcodes[column].apply(
-            lambda x: _flank_uniqueness_radius_details(
-                x,
-                genomic_sequence,
-                max_hamming,
-                direction,
-            )[0]
-        )
-    write_frame(barcodes, outfile)
-    return barcodes
+#     for column in barcode_columns:
+#         results = barcodes[column].map(
+#             lambda barcode: _flank_uniqueness_radius_details(
+#                 barcode,
+#                 genomic_sequence,
+#                 max_hamming,
+#                 direction,
+#             )
+#         )
+
+#         barcodes[f"Unique radius ({column})"] = results.str[0]
+#         barcodes[f"Non-exact hit examples ({column})"] = results.str[1].str.join("; ")
+
+#     write_frame(barcodes, outfile)
+#     return barcodes
 
 
 def uniqueness_radius(

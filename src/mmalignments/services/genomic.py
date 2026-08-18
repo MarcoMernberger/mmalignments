@@ -40,17 +40,30 @@ def match_pattern(a: str, b: str) -> str:
     return "".join("|" if x == y else "." for x, y in zip(a, b))
 
 
-def hamming_early_break(a: str, b: str, max_distance: Optional[int] = None) -> int:
-    if len(b) < len(a):
-        a, b = b, a
+def hamming_early_break(
+    a: str,
+    b: str,
+    max_distance: int | None = None,
+) -> int:
+    """
+    Calculate the Hamming distance between two sequences.
+
+    If ``max_distance`` is given, stop as soon as the distance exceeds
+    it and return ``max_distance + 1``.
+
+    The function assumes that ``a`` and ``b`` have the same length.
+    """
+    if len(a) != len(b):
+        raise ValueError("Hamming distance requires sequences of equal length")
 
     mismatches = 0
 
-    for x, y in zip(a, b[: len(a)]):
+    for x, y in zip(a, b):
         if x != y:
             mismatches += 1
+
             if max_distance is not None and mismatches > max_distance:
-                return mismatches
+                return max_distance + 1
 
     return mismatches
 
