@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import subprocess
 import traceback
-from dataclasses import dataclass, field
-from enum import Enum
 from functools import cached_property, wraps
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -14,10 +10,8 @@ from typing import (
     Callable,
     Iterable,
     Iterator,
-    Literal,
     Mapping,
     ParamSpec,
-    Protocol,
     TypeAlias,
     TypeVar,
     cast,
@@ -25,15 +19,11 @@ from typing import (
     runtime_checkable,
 )
 
-import pandas as pd  # type: ignore[import]
-from numpy import ndarray  # type: ignore[import]
-from pandas import DataFrame, Series  # type: ignore[import]
-
 from mmalignments.models.data import Pairing
 from mmalignments.services.dependencies import (
-    collect_code_dependency,
-    file_sig,
-    function_hash,
+    Signifiable,
+    combined_signature,
+    file_signature,
     stable_hash,
 )
 from mmalignments.services.io import parents, paths_exists
@@ -43,148 +33,717 @@ from .artifacts import (
     ArtifactSet,
     FastqArtifact,
     TableArtifact,
-    TransientArtifact,
 )
 from .registry import current_element_registry
+from .specs import CallSpec, Runnable, ValidationPolicy  # type: ignore[import]
 from .tags import (
-    ElementTag,
     Method,
     Omics,
     PartialElementTag,
     Stage,
     State,
-    from_prior,
+)
+from mmalignments.models.overlay import (
+    ElementTag,
 )
 
 
-class Runnable:
-    def __init__(
-        self,
-        fn: Callable[[], Any],
-        cmd: list[str] | None = None,
-        display: str | None = None,
-    ):
-        self._fn = fn
-        self.command_display = display
-        self.command = cmd or [display]
-        self.last_result: CompletedProcess | None = None
-        self._fingerprint = self._compute_fingerprint()
-
-    @property
-    def fingerprint(self) -> str:
-        return self._fingerprint
-
-    def __call__(self) -> Any:
-        result = self._fn()
-        self.last_result = result
-        return result
-
-    def __name__(self) -> str:
-        return getattr(self._fn, "__name__", repr(self._fn))
-
-    def _compute_fingerprint(self) -> str:
-        all_fns = collect_code_dependency(self._fn)
-
-        safe_fns = (fn for fn in all_fns if fn is not None)
-
-        hashes = [function_hash(fn) for fn in safe_fns]
-
-        return hashlib.sha256("|".join(hashes).encode()).hexdigest()
-
-
-@dataclass(frozen=True)
-class CallSpec:
-    path: tuple[str, ...]
-    args: tuple[Any, ...] = field(default_factory=tuple)
-    kwargs: dict[str, Any] = field(default_factory=dict)
-
-    def render(self) -> str:
-        callargs = ", ".join(repr(a) for a in self.args)
-        callargs += ", ".join(f"{k}={repr(v)}" for k, v in self.kwargs.items())
-        return f"{'.'.join(self.path)}({callargs})"
+def generate_element_key_name(
+    tag: ElementTag | None,
+    tool_name: str,
+    tool_version: str | None = None,
+    subcommand: str | None = None,
+    suffix: str | None = None,
+    **params_str: Any,
+) -> tuple[str, str]:
+    """Generate deterministic element key/name fragments for caching and provenance."""
+    tag_name = getattr(tag, "default_name", "default") if tag is not None else "default"
+    parts = [tag_name, tool_name]
+    if subcommand:
+        parts.append(subcommand)
+    short = "_".join(parts)
+    if tool_version:
+        parts.append(tool_version)
+    if suffix:
+        parts.append(suffix)
+    for k, v in params_str.items():
+        if v is not None:
+            parts.append(f"{k}-{v}")
+    return "_".join(parts), short
 
 
 ################################################################################
 # Aliases
 ################################################################################
 
-RunType: TypeAlias = Callable[[], CompletedProcess | None | bool | Any] | Runnable
-FilesSourceType: TypeAlias = Path | str | Mapping[str, Path | str] | RunType
+RunType: TypeAlias = (
+    Callable[[], CompletedProcess | None | bool | Any] | Runnable
+)  # noqa: E501
+# FilesSourceType: TypeAlias = Path | str | Mapping[str, Path | str] | RunType
+
+
+################################################################################
+# Sources
+################################################################################
+
+
+@runtime_checkable
+class Prerequisite(Signifiable):
+    """Source for input files"""
+
+    @cached_property
+    def key(self) -> str: ...
+
+    """a unique key for this source."""
+
+    @cached_property
+    def provenance(self) -> str: ...
+
+    """the provenance string for this source: which steps came before?"""
+
+
+@runtime_checkable
+class Source(Prerequisite):
+    """Source for input files, not necessarily an Element."""
+
+    @property
+    def tag(self) -> ElementTag: ...
+
+    """A description tag used by downstream Elements."""
+
+    @property
+    def artifacts(self) -> ArtifactSet: ...
+
+    """The set of artifacts (files) associated with this source."""
+
+    @property
+    def primary(self) -> Artifact: ...
+
+    """The primary artifact (e.g. FastqArtifact) associated with this source."""
+
+
+class FileSource(Source):  # the new FileElement for existing files
+    """
+    A Source that represents a set of pre-existing files, typically used as
+    input for an Element.
+    """
+
+    def __init__(
+        self,
+        path: Path | str | TableArtifact | Mapping[str, Path | TableArtifact],
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        is_prefix: bool = False,
+    ):
+        """
+        Initialize a FileSource instance.
+
+        Parameters
+        ----------
+        path : Path | str | TableArtifact | Mapping[str, Path  |  TableArtifact]
+            The path to the file(s) or a mapping of artifact names to paths.
+        tag : PartialElementTag | ElementTag | None, optional
+            The tag associated with this FileSource, defaults to a standard tag
+            if not provided.
+        is_prefix : bool, optional
+            Whether the provided path is a prefix for multiple files, by default
+            False
+        """
+        self._artifacts = self.normalize(path, is_prefix)
+        self._tag = ElementTag(
+            root=self._artifacts.primary.stem,
+            level=0,
+            omics=Omics.DNA,
+            stage=Stage.INPUT,
+            method=Method.CHECK,
+            state=State.RAW,
+        ).patch(tag)
+        self._key = f"FileSource:{self._tag}" + "::".join(
+            sorted(self._artifacts.keys())
+        )
+
+    ############################################################################
+    # Properties
+    ############################################################################
+
+    @property
+    def root(self) -> str:
+        """The root name of this FileSource, derived from its tag."""
+        return self.tag.root
+
+    # Prerequisite protocol –––––––––––––––––––––––––––––––––––––––––––––––––––
+
+    @cached_property
+    def signature(self) -> str:
+        """The signature of the source used for invalidation."""
+        return self.artifacts.primary.signature()
+
+    @cached_property
+    def key(self) -> str:
+        """The unique key for this Source, used for registry identification."""
+        return self._key
+
+    @cached_property
+    def provenance(self) -> str:
+        """The provenance string for this Source, describing its lineage."""
+        return self.tag.default_name
+
+    # Source protocol ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+
+    @property
+    def tag(self) -> ElementTag:
+        """A description tag used by downstream Elements."""
+        return self._tag
+
+    @property
+    def primary(self) -> Artifact:
+        """The primary artifact associated with this Source."""
+        return self.artifacts.primary  # (e.g. FastqArtifact)
+
+    @property
+    def artifacts(self) -> ArtifactSet:
+        """The set of artifacts (files) associated with this Source."""
+        return self._artifacts
+
+    ############################################################################
+    # Initalization
+    ############################################################################
+
+    @classmethod
+    def artifacts_from_prefix(
+        cls, prefix: str | Path, primary_key: str | None = None
+    ) -> ArtifactSet:
+        """
+        Generate artifacts from a directory prefix.
+
+        This method scans the directory containing the given prefix and collects
+        all files whose names start with the prefix. It returns an ArtifactSet
+        containing these files.
+
+        Parameters
+        ----------
+        prefix : str | Path
+            The directory prefix to scan for files.
+        primary_key : str | None, optional
+            The key of the primary artifact, by default None.
+
+        Returns
+        -------
+        ArtifactSet
+            An ArtifactSet containing the files matching the prefix.
+
+        Raises
+        ------
+        ValueError
+            If no files are found with the given prefix.
+        """
+        artifacts = {}
+        p = Path(prefix)
+        file_dir = p.parent
+        file_prefix = p.stem
+        for p in file_dir.iterdir():
+            if p.stem.startswith(file_prefix):
+                artifacts[p.stem] = p.resolve()
+        if len(artifacts) == 0:
+            raise ValueError(f"No files found with prefix {prefix}")
+        primary_key = primary_key or next(iter(artifacts.keys()))
+        return ArtifactSet.from_any(artifacts, primary_key)
+
+    @classmethod
+    def normalize(
+        cls,
+        path: Path | str | TableArtifact | Mapping[str, Path | TableArtifact],
+        is_prefix: bool,
+        primary_key: str | None = None,
+    ) -> ArtifactSet:
+        """
+        Normalize a path into an ArtifactSet.
+
+        This method handles different types of input paths, including directory
+        prefixes, individual files, and mappings of artifact names to paths. It
+        returns an ArtifactSet containing the resolved artifacts.
+
+        Parameters
+        ----------
+        path : Path | str | TableArtifact | Mapping[str, Path  |  TableArtifact]
+            The path to normalize. Can be a directory prefix, individual file,
+            or a mapping of artifact names to paths.
+        is_prefix : bool
+            Whether the given path is a directory prefix.
+        primary_key : str | None, optional
+            The key of the primary artifact, by default None.
+
+        Returns
+        -------
+        ArtifactSet
+            An ArtifactSet containing the resolved artifacts.
+        """
+        if is_prefix and isinstance(path, (str, Path)):
+            artifacts = cls.artifacts_from_prefix(path, primary_key)
+        else:
+            if isinstance(path, Mapping):
+                primary_key = primary_key or next(iter(path.keys()))
+                artifacts = ArtifactSet.from_any(
+                    path,
+                    primary_key,
+                )
+            elif isinstance(path, Artifact):
+                artifacts = ArtifactSet(
+                    path,
+                    primary_name=primary_key
+                    or path.path.suffix.lstrip("."),  # noqa: E501
+                )
+            else:
+                path = Path(path).resolve()
+                primary_key = primary_key or path.suffix.lstrip(".")
+                artifacts = ArtifactSet.from_any(
+                    {primary_key: path}, primary_key
+                )  # noqa: E501
+
+        return artifacts
+
+    def __getattr__(self, name: str) -> Any:
+        """
+        Allow convenient access to artifacts by name.
+
+        Example:
+            source.toml
+            source.parquet
+
+        resolves to:
+            source.artifacts["toml"]
+            source.artifacts["parquet"]
+        """
+        artifacts = object.__getattribute__(self, "_artifacts")
+
+        if name in artifacts:
+            return artifacts[name]
+
+        raise AttributeError(
+            f"{type(self).__name__!s} has no attribute {name!r} "
+            f"and no artifact with that name exists"
+        )
+
+
+class FastqSource(Source):
+    """Source class for handling FASTQ files."""
+
+    def __init__(
+        self,
+        fastqs: FastqArtifact | Path | str | Mapping[str, Path],
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        is_prefix: bool = False,
+    ):
+        """
+        Initialize a FastqSource instance.
+
+        This constructor sets up the FastqSource with the given FASTQ files,
+        tag, and prefix information. It normalizes the input FASTQ files into
+        an ArtifactSet and constructs the element tag.
+
+        Parameters
+        ----------
+        fastqs : FastqArtifact | Path | str | Mapping[str, Path]
+            The FASTQ files to normalize. Can be a directory prefix, individual
+            file, or a mapping of artifact names to paths.
+        tag : PartialElementTag | ElementTag | None, optional
+            The element tag for the FastqSource, by default None.
+        is_prefix : bool, optional
+            Whether the given fastqs path is a directory prefix, by default
+            False.
+        """
+        self._artifacts = self.normalize(fastqs, is_prefix)
+        tag = ElementTag(
+            root=self._artifacts.primary.stem,
+            level=0,
+            omics=Omics.DNA,
+            stage=Stage.INPUT,
+            method=Method.CHECK,
+            state=State.RAW,
+        ).merge(tag)
+        self._tag = tag
+        self._key = f"FastqSource:{self._tag}" + "::".join(
+            ff for ff in self.artifacts.primary
+        )
+
+    ############################################################################
+    # Properties
+    ############################################################################
+
+    @property
+    def root(self) -> str:
+        """The root of the element tag. A short handle for the source."""
+        return self.tag.root
+
+    # Prerequisite protocol ––––––––––––––––––––––––––––––––––––––––––––––––––––
+
+    @cached_property
+    def key(self) -> str:
+        """The unique key for this Source, used for registry identification."""
+        return self._key
+
+    @cached_property
+    def provenance(self) -> str:
+        """The provenance string for this Source, describing its lineage."""
+        return self.key
+
+    @cached_property
+    def signature(self) -> str:
+        """The signature of the source used for invalidation."""
+        return self.artifacts.primary.signature()
+
+    # Source protocol ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+
+    @property
+    def tag(self) -> ElementTag:
+        """The description tag used by downstream Elements."""
+        return self._tag
+
+    @property
+    def primary(self) -> FastqArtifact:
+        """The primary artifact associated with this Source."""
+        return self._artifacts.primary  # (e.g. FastqArtifact)
+
+    @property
+    def artifacts(self) -> ArtifactSet:
+        """The set of artifacts (files) associated with this Source."""
+        return self._artifacts
+
+    ############################################################################
+    # Initalization
+    ############################################################################
+
+    def normalize(
+        self,
+        fastqs: FastqArtifact | Path | str | Mapping[str, Path],
+        is_prefix: bool,
+    ) -> ArtifactSet:
+        """
+        Normalize FASTQ files into an ArtifactSet.
+
+        This method takes various forms of FASTQ input (single files, directory
+        prefixes, or mappings) and normalizes them into a consistent ArtifactSet
+        structure.
+
+        Parameters
+        ----------
+        fastqs : FastqArtifact | Path | str | Mapping[str, Path]
+            The FASTQ input to normalize.
+        is_prefix : bool
+            Whether the input is a directory prefix.
+
+        Returns
+        -------
+        ArtifactSet
+            The normalized ArtifactSet containing the FASTQ files.
+
+        Raises
+        ------
+        ValueError
+            If no R1 files are found with the given prefix.
+        ValueError
+            If multiple FASTQ files per lane are found.
+        NotImplementedError
+            If the input type is not supported.
+        TypeError
+            If the input type is incorrect.
+        """
+
+        if isinstance(fastqs, FastqArtifact):
+            return ArtifactSet(
+                fastqs,
+                primary_name="fastq",
+            )
+
+        if is_prefix and isinstance(fastqs, (str, Path)):
+            r1 = []
+            r2 = []
+            p = Path(fastqs)
+            file_prefix = p.stem
+            file_dir = p.parent
+            file_prefix = p.stem
+            for p in file_dir.iterdir():
+                if p.stem.startswith(file_prefix):
+                    if "_R1_" in p.stem or "_1" in p.stem:
+                        r1.append(p.resolve())
+                    elif "_R2_" in p.stem or "_2" in p.stem:
+                        r2.append(p.resolve())
+                    else:
+                        raise ValueError(
+                            f"File {p} does not match expected R1/R2 naming convention"  # noqa: E501
+                        )
+            if len(r1) == 0:
+                raise ValueError(f"No files found with prefix {file_prefix}")
+            elif len(r1) > 1:
+                print("Found: ", r1)
+                raise NotImplementedError(
+                    "Multiple fastq files per lane are discouraged. Please use FastqNormalize first."  # noqa: E501
+                )
+            else:
+                fastq = FastqArtifact(r1[0], r2[0] if r2 else None)
+                primary_name = "fastq"
+            return ArtifactSet(fastq, primary_name=primary_name)
+
+        if isinstance(fastqs, (str, Path)):
+            return ArtifactSet(
+                FastqArtifact(Path(fastqs)),
+                primary_name="fastq",
+            )
+
+        raise TypeError(
+            f"Unsupported type for fastqs: {type(fastqs)}. Must be FastqArtifact, Path, str, or Mapping[str, Path]."  # noqa: E501
+        )
+
+
+class NextGenSample(Source):
+    """A Source that represents a next-generation sequencing sample."""
+
+    def __init__(
+        self,
+        root: str,  # short sample name
+        source: Source,  # An Element producing a FastqArtifact or a FastqSource
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        read_group: str | None = None,
+        reverse_reads: bool = False,
+        cache_dir: Path | None = None,
+        result_dir: Path | None = None,
+    ):
+        """
+        Initialize a NextGenSample instance.
+
+        This class represents a next-generation sequencing sample, encapsulating
+        the source of the sample, associated artifacts, and metadata such as
+        read group and pairing information.
+
+        Parameters
+        ----------
+        root : str
+            The short sample name, used as a handle for the source.
+        tag : PartialElementTag | ElementTag | None, optional
+            The tag associated with the sample, by default None
+        read_group : str | None, optional
+            The read group identifier for the sample, by default None
+        reverse_reads : bool, optional
+            Whether the reads are reversed, by default False
+        cache_dir : Path | None, optional
+            The directory to use for caching, by default None
+        result_dir : Path | None, optional
+            The directory to use for storing results, by default None
+        """
+        self.source = source
+        self._artifacts = source.artifacts
+        self._key = f"{self._tag.default_name}" + "::".join(
+            [str(filepath) for filepath in self._artifacts.primary]
+        )
+        self._tag = self.source.tag.merge(tag).merge(
+            PartialElementTag(root=root)
+        )  # noqa: E501
+        self.cache_dir = (
+            cache_dir or Path(f"cache/samples/{self._tag.root}").resolve()
+        )  # noqa: E501
+        self.result_dir = (
+            result_dir or Path(f"results/samples/{self._tag.root}").resolve()
+        )
+        self.read_group = read_group or self._tag.root
+        self.reverse_reads = reverse_reads
+
+    ############################################################################
+    # Properties
+    ############################################################################
+
+    @property
+    def pres(self) -> tuple[Prerequisite, ...]:
+        """
+        Return the prerequisites for this NextGenSample if there is one. If
+        the source is an Element, it is included as a prerequisite; otherwise,
+        an empty tuple is returned.
+        """
+        if isinstance(self.source, Element):
+            return (self.source,)
+        return ()
+
+    # Prerequisite protocol –––––––––––––––––––––––––––––––––––––––––––––––––––
+
+    @cached_property
+    def signature(self) -> str:
+        """The signature of the source used for invalidation."""
+        return self.source.signature
+
+    @cached_property
+    def key(self) -> str:
+        """The unique key for this Source, used for registry identification."""
+        return self._key
+
+    @cached_property
+    def provenance(self) -> str:
+        """
+        A human-readable provenance string that describes the lineage of this
+        Element.
+        """
+        return self.source.provenance + "->" + self.root
+
+    # Source protocol –––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+
+    @property
+    def tag(self) -> ElementTag:
+        """A description tag used by downstream Elements."""
+        return self._tag
+
+    @property
+    def primary(self) -> FastqArtifact:
+        """The primary artifact associated with this Source."""
+        return self.source.artifacts.primary
+
+    @property
+    def artifacts(self) -> ArtifactSet:
+        """The set of artifacts (files) associated with this Source."""
+        return self._artifacts
+
+    @cached_property
+    def root(self) -> str:
+        """The root name of this NextGenSample, derived from its tag."""
+        return self._tag.root
+
+    @property
+    def pairing(self) -> Pairing:
+        """The pairing type of the primary artifact."""
+        return Pairing.PAIRED if self.primary.paired else Pairing.SINGLE
+
+    @property
+    def r1(self) -> Path:
+        """The path to the R1 FASTQ file."""
+        return self.primary.r1
+
+    @property
+    def r2(self) -> Path | None:
+        """The path to the R2 FASTQ file, if it exists."""
+        return self.primary.r2
+
+    def fastqs(self) -> Iterator[Path]:
+        """An iterator over the FASTQ files associated with this Source."""
+        return iter(self.primary)
+
+    @cached_property
+    def files(self) -> tuple[Path, ...]:
+        """A tuple of all output files for this NextGenSample."""
+        return self.primary.files
+
 
 ###############################################################################
 # Elements
 ###############################################################################
 
 
-class ValidationPolicy(Enum):
-    CHECK = "check"  # default behaviour
-    FORCE_RUN = "force_run"
-    FORCE_SKIP = "force_skip"
+class Element(Prerequisite):
+    """
+    An Element represents a unit of work in a computational pipeline,
+    encapsulating its key, run, tag, artifacts, and other relevant metadata.
+    This is the key class for defining and managing computational steps in a
+    reproducible manner.
+    """
 
+    REQUIRED = ["key", "run", "tag"]
 
-class Prerequisite(Protocol):
-
-    @cached_property
-    def signature(self) -> str: ...
-
-    @cached_property
-    def provenance(self) -> str: ...
-
-    @property
-    def key(self) -> str: ...
-class Element:
     def __init__(
         self,
         key: str,
         run: RunType,
         tag: ElementTag,
-        artifacts: Mapping[str, Any] | ArtifactSet,
+        artifacts: ArtifactSet,
         *,
         determinants: tuple[str, ...] | None = None,
         inputs: tuple[Path, ...] | None = None,
         validator: Callable[[], tuple[bool, str]] | None = None,
-        pres: tuple[Element, ...] | None = None,
+        pres: tuple[Prerequisite, ...] | None = None,
         empty_ok: bool = False,
-        name: str | None = None,
     ):
-        self.key = key
+        """
+        Initialize an Element.
+
+        This method sets up the Element with its key, run, tag, artifacts, and
+        other optional parameters.
+
+        Parameters
+        ----------
+        key : str
+            A unique key to identify this Element in the registry. Identical
+            keys will raise Exceptions.
+        run : RunType
+            A parameterless callable function that executes the Element's work
+            and creates new artifacts, then returns them as a result.
+        tag : ElementTag
+            The description tag associated with this Element.
+        artifacts : ArtifactSet
+            The set of artifacts (files) associated with this Element.
+        determinants : tuple[str, ...] | None, optional
+            The determinants (key factors) for this Element, by default None.
+            This should be a list of parameters that may affect the output of
+            the Element. These determinants are used to compute the signature of
+            the Element and determine if it needs to be re-run.
+        inputs : tuple[Path, ...] | None, optional
+            The input files required by this Element, by default None. These
+            also contribute to the signature of the Element and are used to
+            determine if the Element needs to be re-run.
+        validator : Callable[[], tuple[bool, str]] | None, optional
+            A callable that validates the Element, returning a tuple of a
+            boolean indicating success and a string message, by default None.
+        pres : tuple[Element, ...] | None, optional
+            The prerequisite Elements that must be completed before this
+            Element, by default None. Only the immediate predecessors are
+            required, not the full transitive closure.
+        empty_ok : bool, optional
+            Whether it is acceptable for this Element to have no output files,
+            by default False.
+        """
+        self._key = key
         self.run = run
         self.tag = tag
-        self.threads = getattr(
-            run, "threads", None
-        )  # optional attribute for external runners
-        if tag is None:
-            raise ValueError("A tag must be provided, was None.")
+        self.name = tag.default_name
         self.artifacts = ArtifactSet.from_any(artifacts)
-        self.pres = tuple(pres or [])
+        self.pres = tuple(pres or ())
         self.validator = validator
         self.determinants = tuple(str(det) for det in (determinants or ()))
         if self.determinants:
-            self.key = f"{self.key}:" + self.determinants_as_str()
+            self._key = f"{self._key}:" + self.determinants_as_str()
         self.inputs = tuple(sorted(inputs or [], key=lambda p: str(p)))
         self._signature: str | None = None  # cache
-        # self._store_attributes = dict(store_attributes or {"multi_core": True})
-        # self._init_store_attributes()
         self._validation_policy = ValidationPolicy.CHECK
-        self.name = (
-            name or self.default_name
-        )  # supplied name overrided tag-based default name
-        self.build_provenance()
-        self.root = self.tag.root if self.tag else self.name
-        self.empty_ok = empty_ok
-        self.output_files  # trigger validation of output file paths
         self.validate_fields()
+        self.build_provenance()
+        self.empty_ok = empty_ok
+        # self.output_files  # trigger validation of output file paths
+        # for error stack traces, we keep the creation trace
         self.creation_trace = "".join(traceback.format_stack()[:-1])
+        # self.threads = getattr(
+        #     run, "threads", None
+        # )  # optional attribute for external runners
+        # self.name = (
+        #     name or self.default_name
+        # )  # supplied name overrided tag-based default name
 
     def validate_fields(self) -> None:
-        required_fields = ["key", "run", "tag"]
+        """
+        Validate that required fields are present and that output files exist.
+
+        Raises
+        ------
+        ValueError
+            If any required field is missing.
+        AssertionError
+            If any output file does not exist or is not a valid path.
+        AssertionError
+            If any input file does not exist or is not a valid path.
+        """
+        required_fields = ["key", "run", "tag", "artifacts"]
         for rfield in required_fields:
             if getattr(self, rfield) is None:
                 raise ValueError(
-                    f"Element '{self.name}' is missing required field: {rfield}."
+                    f"Element '{self.key}' is missing required field: {rfield}."
                 )
-        if self.output_files is not None:
-            for path in self.output_files:
+        if self.files is not None:
+            for path in self.files:
                 try:
                     assert isinstance(path, Path) or isinstance(path, str)
                 except AssertionError:
@@ -197,8 +756,38 @@ class Element:
                     assert isinstance(path, Path) or (isinstance(path, str))
                 except AssertionError:
                     raise AssertionError(
-                        f"Input file '{path}' does not exist or is not a valid path."
+                        f"Input file '{path}' does not exist or is not a valid path."  # noqa: E501
                     )
+
+    ############################################################################
+    # Properties
+    ############################################################################
+
+    @cached_property
+    def key(self) -> str:
+        """
+        The unique Key to identify this Element in the registry. Identical keys
+        will raise Exceptions.
+        """
+        return self._key
+
+    @cached_property
+    def provenance(self) -> str:
+        """
+        A human-readable provenance string that describes the lineage of this
+        Element.
+        """
+        return self.build_provenance()
+
+    @cached_property
+    def signature(self) -> str:
+        "The signature used to invalidate this Element and triggerr a re-run."
+        return combined_signature(*self.signature_data.values())
+
+    @cached_property
+    def signature_data(self) -> Mapping[str, Any]:
+        "The data used to compute the signature of this Element."
+        return self.collect_sig_data()
 
     @property
     def validation_policy(self) -> ValidationPolicy:
@@ -208,63 +797,125 @@ class Element:
     def validation_policy(self, value: ValidationPolicy) -> None:
         self._validation_policy = value
 
-    def force(self) -> Element:
-        self.validation_policy = ValidationPolicy.FORCE_RUN
-        return self
+    ############################################################################
+    # Convenience
+    ############################################################################
+    @property
+    def root(self) -> str:
+        """
+        The root name of this Element, derived from its tag. A short sample id,
+        for example.
+        """
+        return self.tag.root
 
     @cached_property
-    def output_files(self) -> Iterable[Path] | None:
-        files = []
-        for k, v in self.artifacts.items():
-            if hasattr(v, "resolve"):
-                resolved = v.resolve()
-                if isinstance(resolved, tuple):
-                    files.extend(resolved)
-                else:
-                    files.append(resolved)
-        files = sorted(
-            files,
-            key=str,
-        )
-        return files if files else None
+    def short_name(self) -> str:
+        """
+        Generate a short name from the Element's key by taking the tag and
+        tool_name from the key.
+
+        Returns
+        -------
+        str
+            The generated short name.
+        """
+        return "::".join(self.key.split("::")[:1])
+
+    @cached_property
+    def files(self) -> tuple[Path, ...]:
+        """
+        Return a tuple of all output files for this Element, or None if there
+        are no output files. This is a convenience method that collects all
+        files from the artifacts of this Element.
+
+        Returns
+        -------
+        tuple[Path, ...] | None
+            A tuple of all output files for this Element, or None if there are
+            no output files.
+        """
+        files: tuple[Path, ...] = ()
+        for _, v in sorted(self.artifacts.items()):
+            if hasattr(v, "files"):  # covers TableArtifact, FileArtifact
+                files += v.files
+            elif isinstance(v, Path):  # covers Path
+                files += (v.resolve(),)
+        return files if files else ()
+
+    @cached_property
+    def iterfiles(self) -> Iterable[Path]:
+        """
+        Return an iterator over all output files for this Element.
+
+        This is a convenience method that iterates over the files collected
+        from the artifacts of this Element.
+
+        Returns
+        -------
+        Iterable[Path]
+            An iterable of all output files for this Element.
+
+        Yields
+        ------
+        Iterator[Path]
+            An iterator over all output files for this Element.
+        """
+        for filepath in self.files or ():
+            yield filepath
 
     @property
-    def outputs(self) -> tuple[Path, ...]:
-        return tuple(self.output_files) if self.output_files is not None else ()
+    def file(self) -> Path | None:
+        "Short for the primary file path, assuming there is such a thing."
+        return self.artifacts["primary"].resolve()
 
-    def _init_store_attributes(self):
-        reserved = {
-            "name",
-            "key",
-            "run",
-            "validator",
-            "determinants",
-            "inputs",
-            "artifacts",
-            "pres",
-        }  # do not overwrite by accident
-        for attr, value in self._store_attributes.items():
-            if attr in reserved:
-                raise ValueError(
-                    f"store_attributes key '{attr}' collides with reserved attribute"
-                )
-            setattr(self, attr, value)
+    @property
+    def primary(self) -> Any:
+        "Short for the primary artifact, assuming there is such a thing."
+        return self.artifacts.primary
 
-    def __call__(self) -> Any:
-        return self.run()
+    def __getattr__(self, name: str) -> Any:
+        """
+        Convenient attribute lookup that allows access to artifacts as if they
+        were attributes of the Element.
 
-    def determinants_as_str(self) -> str:
-        return ",".join(str(d) for d in self.determinants)
+        Example: element.bam will return the artifact named "bam" if it exists.
 
-    @cached_property
-    def default_name(self) -> str:
-        return self.tag.default_name
+        Parameters
+        ----------
+        name : str
+            Name of the attribute to retrieve.
 
-    @cached_property
-    def default_output_file(self) -> str:
-        return self.tag.default_output
+        Returns
+        -------
+        Any
+            The artifact corresponding to the given name.
+
+        Raises
+        ------
+        AttributeError
+            Raised if the attribute is not found among the artifacts.
+        """
+        artifacts = self.__dict__.get("artifacts", {})
+        if name in artifacts:
+            return artifacts[name]
+        raise AttributeError(
+            f"{self.__class__.__name__} has no attribute '{name}'"
+        )  # noqa: E501
+
+    ############################################################################
+    # builder - run once
+    ############################################################################
 
     def build_provenance(self) -> str:
+        """
+        Build a human-readable provenance string for this Element.
+
+        Returns
+        -------
+        str
+            A string that describes the lineage of this Element, including its
+            name and the provenance of its prerequisites.
+        """
         if not self.pres:
             prefix = ""
         elif len(self.pres) == 1:
@@ -273,103 +924,124 @@ class Element:
             prefix = "(" + ",".join(p.provenance for p in self.pres) + ")->"
         return prefix + f"{self.name}"
 
-    @cached_property
-    def provenance(self) -> str:
-        return self.build_provenance()
+    def collect_sig_data(self) -> Mapping[str, Any]:
+        """
+        Collect the data used to compute the signature of this Element. This
+        includes the signature of the artifacts, the determinants, the inputs,
+        the key, and the signatures of the prerequisites.
 
-    def sig_data(self) -> dict[str, Any]:
+        As dicts preserve the insertion order, the returned dict is sorted by
+        key to ensure a consistent order.
+
+        Returns
+        -------
+        Mapping[str, Any]
+            A dictionary containing the data used to compute the signature of
+            this Element.
+        """
         sig_data = {
             "key": self.key,
-            "determinants": list(self.determinants),
-            "inputs": [file_sig(p) for p in self.inputs],
-            "artifacts": self._artifact_sig(),
-            "pre_sigs": sorted([pre.signature for pre in self.pres]),
+            "artifacts": self.artifacts.signature,
+            "determinants": self.determinants_as_str(),
+            "inputs": [file_signature(p) for p in self.inputs],
+            "pre_sigs": [
+                pre.signature for pre in sorted(self.pres, key=lambda p: p.key)
+            ],
         }
         if isinstance(self.run, Runnable):
-            sig_data["run_hash"] = self.run.fingerprint
+            sig_data["run_hash"] = self.run.signature
+        return dict(sorted(sig_data.items()))
 
-        return sig_data
-
-    def _compute_signature(self) -> str:
-        try:
-            return stable_hash(self.sig_data())
-        except Exception as e:
-            print(e)
-            print(self.sig_data())
-            raise RuntimeError(f"Failed to compute signature for {self.key!r}")
-
-    def print_sig_data(self) -> None:
-        sig_data = self.sig_data()
-        print(json.dumps(sig_data, indent=2))
-
-    # def invalidate(self) -> None:
-    #     self._signature = None
-
-    @cached_property
-    def signature(self) -> str:
-        return self._compute_signature()
-
-    def outputs_ok(self) -> tuple[bool, str]:
-        missing = []
-        empty = []
-        check = True
-        for p in self.output_files or ():
-            if not p.exists():
-                missing.append(str(p))
-                check = False
-        if not check:
-            return check, "Missing output files: " + ", ".join(missing)
-        elif not self.empty_ok:
-            for p in self.output_files or ():
-                if p.stat().st_size == 0 and not self.empty_ok:
-                    empty.append(str(p))
-                    check = False
-            if not check:
-                return check, "Empty output files: " + ", ".join(empty)
-        return True, "Output files are OK"
-
-    def _artifact_sig(self) -> dict[str, Any]:
-        sig: dict[str, Any] = {}
-        for k, v in sorted(self.artifacts.items()):
-            if isinstance(v, TransientArtifact):
-                continue
-            if isinstance(v, Path):
-                sig[k] = str(v)
-            elif isinstance(v, (str, int, float, bool)) or v is None:
-                sig[k] = v
-            elif isinstance(v, Artifact):
-                sig[k] = v.signature()
-            else:
-                raise TypeError(
-                    f"artifact '{k}' has unsupported type for signature: {type(v)}"
-                )
-        return sig
-
-    def _explain_signature_diff(self, cached_sig_data: dict[str, Any] | None) -> str:
-        """Compare current sig_data against a previously stored one and return
-        a human-readable diff.  When *cached_sig_data* is ``None`` or the two
-        dicts share no keys the method falls back to a simple mismatch message.
+    @classmethod
+    def generate_key(
+        cls,
+        tag: ElementTag,
+        tool_name: str,
+        subcommand: str | None = None,
+        tool_version: str | None = None,
+        suffix: str | None = None,
+        **params_str: Any,
+    ) -> str:
         """
-        current = self.sig_data()
-        if not cached_sig_data:
-            return "Cached signature does not match (no cached sig_data available)"
-        lines: list[str] = []
-        all_keys = sorted(set(current) | set(cached_sig_data))
-        for k in all_keys:
-            old_v = cached_sig_data.get(k, "<missing>")
-            new_v = current.get(k, "<missing>")
-            if stable_hash(old_v) != stable_hash(new_v):
-                lines.append(f"  {k}: {old_v!r} → {new_v!r}")
-        if lines:
-            return "Signature mismatch in:\n" + "\n".join(lines)
-        # hashes of individual keys matched but overall hash differs (ordering/encoding)
-        return "Cached signature does not match (unknown diff)"
+        generate_element_key generates a unique key for an Element based on its tag
+        and other parameters. We want the keys to be somewhat informative for
+        debugging and provenance, but also unique and stable for caching.
 
-    def skip(
+        Parameters
+        ----------
+        tag : ElementTag
+            The tag associated with the element.
+        tool_name : str
+            The name of the tool.
+        tool_version : str | None, optional
+            The version of the tool, by default None
+        subcommand : str | None, optional
+            The subcommand used, by default None
+        suffix : str | None, optional
+            The suffix to append to the key, by default None
+        params : str | None, optional
+            Additional parameters to include in the key, by default None
+
+        Returns
+        -------
+        str
+            The generated element key.
+        """
+        parts = [tag.default_name, tool_name]
+        if subcommand:
+            parts.append(subcommand)
+        if tool_version:
+            parts.append(tool_version)
+        if suffix:
+            parts.append(suffix)
+        for k, v in params_str.items():
+            if v is not None:
+                parts.append(f"{k}-{v}")
+        key = "::".join(parts)
+        return key
+
+    ############################################################################
+    # Pipeline integration
+    ############################################################################
+
+    def __call__(self) -> Any:
+        "Run the Element's run function and return the result."
+        return self.run()
+
+    def force(self) -> Element:
+        "Forces a re-run of this Element, regardless of signature."
+        self.validation_policy = ValidationPolicy.FORCE_RUN
+        return self
+
+    # add skip
+
+    def is_done(
         self,
         cached_signature: str | None = None,
         cached_sig_data: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
+        """
+        Determine if the Element is invalidated and triggers a (re-)run.
+        This is the main invalidation check that is used by the pipeline to
+        decide whether to skip or run.
+
+        This method checks the validation policy, cached signature, and output
+        files to determine if the Element can be skipped.
+
+        Parameters
+        ----------
+        cached_signature : str | None, optional
+            Cached signature from the previous run, by default None
+        cached_sig_data : dict[str, Any] | None, optional
+            Cached signature data from the previous run, by default None
+
+        Returns
+        -------
+        tuple[bool, str]
+            Tuple where the first element is a boolean indicating if the Element
+            is up-to-date, and the second element is a string explaining the
+            reason for invalidating.
+        """
         # TODO turn this into Validation Policy
         if self.validation_policy == ValidationPolicy.FORCE_RUN:
             return False, "Validation policy forces run"
@@ -377,31 +1049,118 @@ class Element:
         elif self.validation_policy == ValidationPolicy.FORCE_SKIP:
             return True, "Validation policy forces skip"
 
+        # Has the Element been run before?
         if cached_signature is None:
             return False, "First run"
 
+        # Check if the signature has changed
         if cached_signature != self.signature:
             return False, self._explain_signature_diff(cached_sig_data)
 
+        # Are the output files present and non-empty?
         check_output, reason = self.outputs_ok()
         if not check_output:
             return check_output, reason
+
+        # Is there a custom validator?
         if self.validator:
             return self.validator()
+
+        # if no-one complains, accept the result as valid
         return True, "No relevant changes detected"
 
-    def __repr__(self) -> str:
-        return (
-            f"{self.__class__.__name__}("
-            f"name='{self.name}', "
-            f"key='{self.key}', "
-            f"pres={len(self.pres)}, "
-            f"inputs={len(self.inputs)}, "
-            f"artifacts={list(self.artifacts.keys())}"
-            f")"
-        )
+    def _explain_signature_diff(self, cached: Mapping[str, Any] | None) -> str:
+        """Compare current sig_data against a previously stored one and return
+        a human-readable diff.  When *cached_sig_data* is ``None`` or the two
+        dicts share no keys the method falls back to a simple mismatch message.
+        """
+        current = self.signature_data
+
+        if not cached:
+            return "Cached signature does not match (no cached sig_data available)"  # noqa: E501
+        cached_keys = list(cached.keys())
+        current_keys = list(current.keys())
+        missing_common = [k for k in current_keys if k not in cached_keys]
+        missing_current = [k for k in cached_keys if k not in current_keys]
+        if missing_common:
+            return f"Cached signature does not match (missing keys in cached sig_data: {', '.join(sorted(missing_common))})"  # noqa: E501
+        if missing_current:
+            return f"Cached signature does not match (missing keys in current sig_data: {', '.join(sorted(missing_current))})"  # noqa: E501
+
+        lines: list[str] = []
+        for k in current_keys:
+            old_v = cached.get(k, "<missing>")
+            new_v = current.get(k, "<missing>")
+            if stable_hash(old_v) != stable_hash(new_v):
+                lines.append(f"  {k}: {old_v!r} → {new_v!r}")
+        if lines:
+            return "Signature mismatch in:\n" + "\n".join(lines)
+        # hashes of individual keys matched but hash differs (ordering/encoding)
+        return "Cached signature does not match (unknown diff)"
+
+    def outputs_ok(self) -> tuple[bool, str]:
+        """
+        Check if the output files have been generated correctly. If not, this
+        Element will be invalidated. This method checks for the existence and
+        non-emptiness of the output files.
+
+        Returns
+        -------
+        tuple[bool, str]
+            Tuple containing a boolean indicating if the outputs are OK and a
+            message.
+        """
+        missing = []
+        empty = []
+        check = True
+        for p in self.files or ():
+            if not p.exists():
+                missing.append(str(p))
+                check = False
+        if not check:
+            return check, "Missing output files: " + ", ".join(missing)
+        elif not self.empty_ok:
+            for p in self.files:
+                if p.stat().st_size == 0 and not self.empty_ok:
+                    empty.append(str(p))
+                    check = False
+            if not check:
+                return check, "Empty output files: " + ", ".join(empty)
+        return True, "Output files are OK"
+
+    ############################################################################
+    # Print
+    ############################################################################
+
+    def print_sig_data(self) -> None:
+        "Print the signature data for this Element."
+        print(self.signature_data)
+
+    def determinants_as_str(self) -> str:
+        """
+        Return a comma-separated string of determinants. This is useful for
+        creating a unique key for the Element based on its determinants and also
+        calculate signatures.
+
+        Returns
+        -------
+        str
+            Comma-separated string of determinants.
+        """
+        return ",".join(str(d) for d in self.determinants)
 
     def describe(self) -> str:
+        """
+        Return a string description of the Element.
+
+        The description includes key, threads, determinants, inputs,
+        artifacts, and pres.
+
+        Returns
+        -------
+        str
+            A string description of the Element.
+        """
         artifactlist = [f"{k}: {v}" for k, v in self.artifacts.items()]
         return (
             f"{self.__class__.__name__}:\n"
@@ -413,31 +1172,63 @@ class Element:
             f"  pres:         {[p.key for p in self.pres]}\n"
         )
 
-    def __getattr__(self, name: str) -> Any:
-        artifacts = self.__dict__.get("artifacts", {})
-        if name in artifacts:
-            return artifacts[name]
-        raise AttributeError(f"{self.__class__.__name__} has no attribute '{name}'")
+    def __repr__(self) -> str:
+        "Return a string representation of the Element."
+        return (
+            f"{self.__class__.__name__}("
+            f"key='{self.key}', "
+            f"provenience={self.provenience}, "
+            f"inputs={len(self.inputs)}, "
+            f"artifacts={list(self.artifacts.keys())}"
+            f")"
+        )
 
     def __hash__(self) -> int:
+        "Make it hashable."
         return hash(self.key)
 
     def __eq__(self, other: object) -> bool:
+        "Check equality based on the key."
         return isinstance(other, Element) and self.key == other.key
 
-    @property
-    def primary(self) -> Any:
-        return self.artifacts.primary
+    # def _init_store_attributes(self):
+    #     reserved = {
+    #         "name",
+    #         "key",
+    #         "run",
+    #         "validator",
+    #         "determinants",
+    #         "inputs",
+    #         "artifacts",
+    #         "pres",
+    #     }  # do not overwrite by accident
+    #     for attr, value in self._store_attributes.items():
+    #         if attr in reserved:
+    #             raise ValueError(
+    #                 f"store_attributes key '{attr}' collides with reserved attribute" # noqa: E501
+    #             )
+    #         setattr(self, attr, value)
 
-    @property
-    def file(self) -> Path | None:
-        if "primary" in self.artifacts:
-            return self.artifacts["primary"].resolve()
-        if "parquet" in self.artifacts:
-            return self.artifacts["parquet"]
-        elif "tsv" in self.artifacts:
-            return self.artifacts["tsv"]
-        return next(iter(self.output_files), None) if self.output_files else None
+    # def _artifact_sig(self) -> dict[str, Any]:
+    #     sig: dict[str, Any] = {}
+    #     for k, v in sorted(self.artifacts.items()):
+    #         if isinstance(v, TransientArtifact):
+    #             continue
+    #         if isinstance(v, Path):
+    #             sig[k] = str(v)
+    #         elif isinstance(v, (str, int, float, bool)) or v is None:
+    #             sig[k] = v
+    #         elif isinstance(v, Artifact):
+    #             sig[k] = v.signature()
+    #         else:
+    #             raise TypeError(
+    #                 f"artifact '{k}' has unsupported type for signature: {type(v)}" # noqa: E501
+    #             )
+    #     return sig
+
+
+class TableElement(Element):
+    """Compatibility alias for table-producing Elements used by downstream modules."""
 
 
 class MappedElement(Element):
@@ -476,809 +1267,223 @@ class VcfElement(Element):
     #     return Path(v) if v is not None else None
 
 
-@runtime_checkable
-class Source(Protocol):  # Source for input files
-
-    @property
-    def producer(self) -> Element | None: ...  #   An Element that produces the files
-
-    @property
-    def artifacts(self) -> ArtifactSet: ...  # the actual files as artifact set
-
-    @property
-    def tag(self) -> ElementTag: ...  # a convenience tag for downstream Elements
-
-    @cached_property
-    def signature(self) -> str: ...
-
-    # @property
-    # def name(self) -> str: ...
-
-    # @property
-    # def artifacts(self) -> Mapping[str, Any]: ...
-
-    # @property
-    # def determinants(self) -> tuple[str, ...]: ...
-
-    # @property
-    # def outputs(self) -> tuple[Path, ...]: ...
-
-    @property
-    def pres(self) -> tuple[Element, ...]: ...
+################################################################################
+# Fastq
+################################################################################
 
 
-class FileSource(Source, Prerequisite):  # the new FileElement for existing files
+class FastqSelector:
+    """
+    A class to select FASTQ files from a given folder based on sample names and
+    read identifiers.
+    """
 
-    def __init__(
-        self,
-        path: Path | str | TableArtifact | Mapping[str, Path | TableArtifact],
-        *,
-        tag: PartialElementTag | ElementTag | None = None,
-        is_prefix: bool = False,
-    ):
-        self._artifacts = self.normalize(path, is_prefix)
-        self._tag = ElementTag(
-            root=self._artifacts.primary.stem,
-            level=0,
-            omics=Omics.DNA,
-            stage=Stage.INPUT,
-            method=Method.CHECK,
-            state=State.RAW,
-        ).merge(tag)
+    def __init__(self, folder: Path | str):
+        """
+        Initialize the FastqSelector with the given folder.
 
-    @property
-    def root(self) -> str:
-        return self.tag.root
-
-    # Source protocol ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-
-    @property
-    def producer(self) -> Element | None:
-        return None
-
-    @property
-    def artifacts(self) -> ArtifactSet:
-        return self._artifacts
-
-    @property
-    def tag(self) -> ElementTag:
-        return self._tag  # a convenience tag for downstream Elements
-
-    @property
-    def pres(self) -> tuple[Element, ...]:
-        return ()
-
-    # Prerequisite protocol ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-
-    @cached_property
-    def key(self) -> str:
-        return f"FileSource:{self._tag}" + "::".join(sorted(self._artifacts.keys()))
-
-    @cached_property
-    def provenance(self) -> str:
-        return self.key
-
-    @cached_property
-    def signature(self) -> str:
-        return self.artifacts.primary.signature()
+        Parameters
+        ----------
+        folder : Path | str
+            The folder containing FASTQ files.
+        """
+        self.folder = Path(folder) if isinstance(folder, str) else folder
 
     @classmethod
-    def artifacts_from_prefix(
-        cls, prefix: str | Path, primary_key: str | None = None
-    ) -> ArtifactSet:
-        artifacts = {}
-        p = Path(prefix)
-        file_dir = p.parent
-        file_prefix = p.stem
-        for p in file_dir.iterdir():
-            if p.stem.startswith(file_prefix):
-                artifacts[p.stem] = p.resolve()
-        if len(artifacts) == 0:
-            raise ValueError(f"No files found with prefix {prefix}")
-        primary_key = primary_key or next(iter(artifacts.keys()))
-        return ArtifactSet.from_any(artifacts, primary_key)
-
-    @classmethod
-    def normalize(
-        cls,
-        path: Path | str | TableArtifact | Mapping[str, Path | TableArtifact],
-        is_prefix: bool,
-        primary_key: str | None = None,
-    ) -> ArtifactSet:
-        if is_prefix and isinstance(path, (str, Path)):
-            artifacts = cls.artifacts_from_prefix(path, primary_key)
-        else:
-            if isinstance(path, Mapping):
-                primary_key = primary_key or next(iter(path.keys()))
-                artifacts = ArtifactSet.from_any(
-                    path,
-                    primary_key,
-                )
-            elif isinstance(path, Artifact):
-                artifacts = ArtifactSet(
-                    path, primary_name=primary_key or path.path.suffix.lstrip(".")
-                )
-            else:
-                path = Path(path).resolve()
-                primary_key = primary_key or path.suffix.lstrip(".")
-                artifacts = ArtifactSet.from_any({primary_key: path}, primary_key)
-
-        return artifacts
-
-    def __getattr__(self, name: str) -> Any:
-        """
-        Allow convenient access to artifacts by name.
-
-        Example:
-            source.toml
-            source.parquet
-
-        resolves to:
-            source.artifacts["toml"]
-            source.artifacts["parquet"]
-        """
-        artifacts = object.__getattribute__(self, "_artifacts")
-
-        if name in artifacts:
-            return artifacts[name]
-
-        raise AttributeError(
-            f"{type(self).__name__!s} has no attribute {name!r} "
-            f"and no artifact with that name exists"
-        )
-
-
-class FastqSource(Source, Prerequisite):
-
-    def __init__(
-        self,
-        fastqs: FastqArtifact | Path | str | Mapping[str, Path],
-        producer: Element | None = None,
-        *,
-        tag: PartialElementTag | ElementTag | None = None,
-        is_prefix: bool = False,
-    ):
-        self._artifacts = self.normalize(fastqs, is_prefix)
-        self._producer = producer
-        if self._producer is not None:
-            tag = from_prior(
-                self._producer.tag,
-                tag,
-                stage=Stage.INPUT,
-                state=State.PROCESSED,
-            )
-        else:
-            tag = ElementTag(
-                root=self._artifacts.primary.stem,
-                level=0,
-                omics=Omics.DNA,
-                stage=Stage.INPUT,
-                method=Method.CHECK,
-                state=State.RAW,
-            ).merge(tag)
-        self._tag = tag
-
-    # Prerequisite protocol ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-
-    @cached_property
-    def key(self) -> str:
-        return f"FastqSource:{self._tag}" + "::".join(
-            ff for ff in self.artifacts.primary
-        )
-
-    @cached_property
-    def provenance(self) -> str:
-        return self.key
-
-    @cached_property
-    def signature(self) -> str:
-        return self.artifacts.primary.signature()
-
-    # Source protocol ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-
-    @property
-    def producer(self) -> Element | None:
-        return self._producer
-
-    @property
-    def artifacts(self) -> ArtifactSet:
-        return self._artifacts
-
-    @property
-    def tag(self) -> ElementTag:
-        return self._tag  # a convenience tag for downstream Elements
-
-    @property
-    def pres(self) -> tuple[Element, ...]:
-        return () if self.producer is None else (self.producer,)
-
-    @property
-    def root(self) -> str:
-        return self.tag.root
-
-    def normalize(
-        self,
-        fastqs: FastqArtifact | Path | str | Mapping[str, Path],
-        is_prefix: bool,
-    ) -> ArtifactSet:
-
-        if isinstance(fastqs, FastqArtifact):
-            return ArtifactSet(
-                fastqs,
-                primary_name="fastq",
-            )
-
-        if is_prefix and isinstance(fastqs, (str, Path)):
-            r1 = []
-            r2 = []
-            p = Path(fastqs)
-            file_prefix = p.stem
-            file_dir = p.parent
-            file_prefix = p.stem
-            for p in file_dir.iterdir():
-                if p.stem.startswith(file_prefix):
-                    if "_R1_" in p.stem or "_1" in p.stem:
-                        r1.append(p.resolve())
-                    elif "_R2_" in p.stem or "_2" in p.stem:
-                        r2.append(p.resolve())
-                    else:
-                        raise ValueError(
-                            f"File {p} does not match expected R1/R2 naming convention"
-                        )
-            if len(r1) == 0:
-                raise ValueError(f"No files found with prefix {file_prefix}")
-            elif len(r1) > 1:
-                print("Found: ", r1)
-                raise NotImplementedError(
-                    "Multiple fastq files per lane are discouraged. Please use FastqNormalize first."
-                )
-            else:
-                fastq = FastqArtifact(r1[0], r2[0] if r2 else None)
-                primary_name = "fastq"
-            return ArtifactSet(fastq, primary_name=primary_name)
-
-        if isinstance(fastqs, (str, Path)):
-            return ArtifactSet(
-                FastqArtifact(Path(fastqs)),
-                primary_name="fastq",
-            )
-
-        raise TypeError(
-            f"Unsupported type for fastqs: {type(fastqs)}. Must be FastqArtifact, Path, str, or Mapping[str, Path]."
-        )
-
-
-class NextGenSample(Prerequisite):
-
-    def __init__(
-        self,
-        root: str,
-        source: Source,  # Knows the producer and the input files as a FastqArtifact
-        *,
-        tag: PartialElementTag | ElementTag | None = None,
-        read_group: str | None = None,
-        reverse_reads: bool = False,
-        cache_dir: Path | None = None,
-        result_dir: Path | None = None,
-    ):
-        self.root = root
-        self.source = source
-        self.read_group = read_group or self.root
-        self.reverse_reads = reverse_reads
-        self.cache_dir = cache_dir or Path(f"cache/samples/{self.root}").resolve()
-        self.result_dir = result_dir or Path(f"results/samples/{self.root}").resolve()
-        self._tag = self.source.tag.merge(tag)
-
-    @property
-    def tag(self) -> ElementTag:
-        return self._tag
-
-    @property
-    def artifacts(self) -> ArtifactSet:
-        return self.source.artifacts
-
-    @property
-    def producer(self) -> Element | None:
-        return self.source.producer
-
-    @property
-    def pres(self) -> tuple[Element, ...]:
-        return self.source.pres
-
-    # Prerequisite protocol –––––––––––––––––––––––––––––––––––––––––––––––––––
-
-    @cached_property
-    def key(self) -> str:
-        return f"{self.root}.{self._tag}" + "::".join(
-            [str(filepath) for filepath in self.primary]
-        )
-
-    @cached_property
-    def provenance(self) -> str:
-        if self.producer is not None:
-            return self.producer.provenance + "->" + self.root
-        return self.root
-
-    @cached_property
-    def signature(self) -> str:
-        if self.producer is not None:
-            sig = stable_hash(
-                [self.producer.signature, self.artifacts.primary.signature()]
-            )
-            return sig
-        return self.artifacts.primary.signature()
-
-    @property
-    def primary(self) -> FastqArtifact:
-        return self.source.artifacts.primary
-
-    @property
-    def pairing(self) -> Pairing:
-        return Pairing.PAIRED if self.primary.paired else Pairing.SINGLE
-
-    def fastqs(self) -> Iterator[Path]:
-        return iter(self.primary)
-
-    @property
-    def r1(self) -> Path:
-        return self.primary.r1
-
-    @property
-    def r2(self) -> Path | None:
-        return self.primary.r2
-
-    @property
-    def input_files(self) -> tuple[Path, ...]:
-        return self.primary.paths
-
-
-# class FilesElement(Element):
-
-#     def __init__(
-#         self,
-#         path: Path | str | Mapping[str, Path | TableArtifact],
-#         *,
-#         # runner: Runnable | None = None,
-#         root: str | None = None,
-#         tag: PartialElementTag | ElementTag | None = None,
-#         ext: str | None = None,
-#         is_prefix: bool = False,
-#         pres: tuple[Element, ...] | None = None,
-#     ):
-
-#         if is_prefix and isinstance(path, (str, Path)):
-#             artifacts = self.artifacts_from_prefix(path)
-#         else:
-#             artifacts = (
-#                 path
-#                 if isinstance(path, Mapping)
-#                 else {Path(path).stem: Path(path).resolve()}
-#             )
-#         inputs = tuple(v.resolve() for v in artifacts.values() if hasattr(v, "resolve"))
-#         first = artifacts.values().__iter__().__next__().resolve()
-#         root = root or first.stem
-#         ext = ext or first.suffix.lstrip(".")
-#         tag = ElementTag(
-#             root=root,
-#             level=0,
-#             omics=None,
-#             stage=Stage.INPUT,
-#             method=Method.CHECK,
-#             state=State.RAW,
-#             ext=ext,
-#         ).merge(tag)
-#         runner = self.exist
-#         key = f"{tag.default_name}::{'::'.join(str(p) for p in artifacts.values())}"
-
-#         super().__init__(
-#             key=key,
-#             run=runner,
-#             tag=tag,
-#             validator=self.validate,
-#             inputs=inputs,
-#             artifacts=artifacts,
-#             pres=pres,
-#         )
-#         self.ext = tag.ext
-
-#     @classmethod
-#     def artifacts_from_prefix(cls, prefix: str | Path) -> dict[str, Path]:
-#         artifacts = {}
-#         p = Path(prefix)
-#         file_dir = p.parent
-#         file_prefix = p.stem
-#         for p in file_dir.iterdir():
-#             if p.stem.startswith(file_prefix):
-#                 artifacts[p.stem] = p.resolve()
-
-#         return artifacts
-
-#     @cached_property
-#     def files(self) -> tuple[Path, ...]:
-#         return tuple(
-#             sorted(
-#                 [v.resolve() for v in self.artifacts.values() if hasattr(v, "resolve")],
-#                 key=str,
-#             )
-#         )
-
-#     @cached_property
-#     def output_files(self) -> tuple[Path] | None:
-#         """
-#         overrides the Element output_files, the artifacts are not the output
-#         but the input files, so we return an empty tuple to avoid confusion
-#         """
-#         return None
-
-#     def validate(self) -> tuple[bool, str]:
-#         return True, "bypassed validation"
-#         md5sum = self.calc_md5sum()
-#         check = md5sum == self.md5sum
-#         return check, f"MD5 check {'passed' if check else 'failed'}"
-
-#     @cached_property
-#     def md5sum(self) -> str | None:
-#         return self.calc_md5sum()
-
-#     def calc_md5sum(self) -> str | None:
-#         md5 = ""
-#         for k, path in self.artifacts.items():
-#             if isinstance(path, Path) and path.exists():
-#                 md5 += f"{k}:{hashlib.md5(path.read_bytes()).hexdigest()};"
-#         return md5
-
-#     def exist(self):
-#         return Runnable(
-#             paths_exists(*self.artifacts.values()),
-#             display=CallSpec(
-#                 path=("io", "paths_exists"), args=tuple(self.artifacts.values())
-#             ).render(),
-#         )  # no-op runner, validation is done by skip logic
-
-
-# class FileElement(FilesElement):
-
-#     def __init__(
-#         self,
-#         source: Path | str | TableArtifact,
-#         *,
-#         tag: PartialElementTag | ElementTag | None = None,
-#         root: str | None = None,
-#         pres: tuple[Element, ...] | None = None,
-#     ):
-#         if isinstance(source, str):
-#             source = Path(source)
-
-#         self.ext = source.resolve().suffix.lstrip(".")
-#         by_suffix = {self.ext: source}
-#         super().__init__(by_suffix, root=root, tag=tag, pres=pres)
-
-#     @property
-#     def file(self) -> Path:
-#         if "primary" in self.artifacts:
-#             return self.artifacts["primary"].resolve()
-#         else:
-#             return self.artifacts[self.ext].resolve()
-
-#     @classmethod
-#     def resolve_path(cls, path: Path | str | TableArtifact) -> Path:
-#         if isinstance(path, str):
-#             path = Path(path)
-#         return path.resolve()
-
-
-# class FileSource(Source):  # can be an Element, Path, str or path mapping
-
-#     def __init__(
-#         self,
-#         name: str,
-#         input: Path | str | Mapping[str, Path | str | list[Path]],
-#         tag: ElementTag | None = None,
-#         is_prefix: bool = False,
-#     ):
-#         self._name = name
-#         self.normalized = FileSource.normalize(input, is_prefix=is_prefix)
-#         self._tag = tag or ElementTag(
-#             root=self.name,
-#             level=0,
-#             omics=None,
-#             stage=Stage.INPUT,
-#             method=Method.CHECK,
-#             state=State.RAW,
-#         )
-#         self.run = exists(self.outputs)
-
-#     @classmethod
-#     def from_prefix(cls, path: Path) -> Mapping[str, tuple[Path, ...]]:
-#         artifacts = {}
-#         p = Path(path)
-#         file_dir = p.parent
-#         file_prefix = p.stem
-#         for p in file_dir.iterdir():
-#             if p.stem.startswith(file_prefix):
-#                 artifacts[p.stem] = (p.resolve(),)
-#         return artifacts
-
-#     @classmethod
-#     def normalize(
-#         cls,
-#         input: Path | str | Mapping[str, Path | str | list[Path]],
-#         is_prefix: bool = False,
-#     ) -> Mapping[str, tuple[Path, ...]]:
-#         if isinstance(input, (str, Path)):
-#             if is_prefix:
-#                 return cls.from_prefix(Path(input))
-#             return {"primary": (Path(input),)}
-#         elif isinstance(input, Mapping):
-#             normalized: dict[str, tuple[Path, ...]] = {}
-#             for k, v in input.items():
-#                 if isinstance(v, (str, Path)):
-#                     normalized[k] = (Path(v),)
-#                 elif isinstance(v, list):
-#                     normalized[k] = tuple(Path(p) for p in v)
-#                 else:
-#                     raise TypeError(f"Invalid type for path mapping value: {type(v)}")
-#             return normalized
-#         else:
-#             raise TypeError(f"Invalid type for input: {type(input)}")
-
-#     @property
-#     def name(self) -> str:
-#         return self._name
-
-#     @property
-#     def artifacts(self) -> ArtifactSet:
-#         return ArtifactSet.from_any(self.normalized)
-
-#     @property
-#     def determinants(self) -> tuple[str, ...]:
-#         return ()
-
-#     @property
-#     def outputs(self) -> tuple[Path, ...]:
-#         return tuple(path for path in self.artifacts.outputs)
-
-#     @property
-#     def tag(self) -> ElementTag:
-#         return self._tag
-
-
-# class SampleSource(FileSource):
-
-#     def __init__(
-#         self,
-#         name: str,
-#         input: Path | str | Mapping[str, Path | str | list[Path]],
-#         tag: ElementTag | None = None,
-#         is_prefix: bool = False,
-#     ):
-#         super().__init__(name, input, tag=tag, is_prefix=is_prefix)
-
-#     self._artifacts = self.set_artifacts()
-
-# def set_artifacts(self) -> ArtifactSet:
-#     to_artifact = {}
-#     for name, filepaths in self.normalized.items():
-#         if len(filepaths) > 1:
-#             raise NotImplementedError("Implement gerning of fastqs")
-#         elif len(filepaths) == 1:
-#             to_artifact[name] = filepaths[0]
-#         else:
-#             raise ValueError(f"No filepaths found for artifact name: {name}")
-#     return ArtifactSet.from_any(to_artifact)
-
-# @property
-# def artifacts(self) -> ArtifactSet:
-#     return self._artifacts
-
-
-class FastqNormalize(Element):
-
-    def __init__(
-        self,
-        name: str,
-        folder: Path | str,
-        output_folder: Path = Path("cache/fastq"),
-        *,
-        pres: tuple[Element, ...] | None = None,
-        tag: ElementTag | PartialElementTag | None = None,
-        type: Literal["illumina", "novogene"] = "novogene",
-    ):
-        # Creates FastqArtifacts by concatenation
-        self.path = Path(folder).resolve()
-        self.type = type
-        self.output_folder = output_folder
-        tag = ElementTag(
-            root=name,
-            level=0,
-            omics=Omics.DNA,
-            stage=Stage.INPUT,
-            method=Method.CUSTOM,
-            state=State.RAW,
-        ).merge(tag)
-        key, name = generate_element_key_name(
-            tag, "FastqSource", subcommand="normalized"
-        )
-        self.name = name
-        normalized, files_to_merge = self.setup_normalization()
-        artifacts = ArtifactSet(FastqArtifact(normalized["R1"], normalized.get("R2")))
-        self.normalized = normalized
-        self.files_to_merge = files_to_merge
-
-        super().__init__(
-            key,
-            self.normalize(),
-            tag,
-            artifacts=artifacts,
-            pres=(),
-            name=name,
-        )  # Element
-
-    def resolve_output_filename(self, read: str, suffix: str) -> str:
-        if self.type == "illumina":
-            return f"{self.name}_{read}_001.{suffix}"
-        elif self.type == "novogene":
-            return f"{self.name}_{read}.{suffix}"
-        else:
-            raise ValueError(f"Unsupported type: {self.type}")
-
-    def r1(self) -> Path:
-        return self.artifacts["r1"]
-
-    def r2(self) -> Path | None:
-        return self.artifacts.get("r2", None)
-
-    def normalize(self) -> Runnable:
-        def __run():
-            for output_path, input_files in self.files_to_merge.items():
-                self.__normalize_lane(input_files, output_path)
-            return True
-
-        display = CallSpec(
-            path=("FastqSource", "normalize", "__run"),
-            kwargs={"name": self.name, "folder": self.path, "type": self.type},
-        ).render()
-
-        return Runnable(__run, display=display)
-
-    def setup_normalization(self):
-        files_to_merge = {}
-        normalized: dict[str, Path] = {}
-        if self.type == "illumina":
-            input_files_dict = self.__gather_illumina_files()
-        elif self.type == "novogene":
-            input_files_dict = self.__gather_novogene_files()
-        else:
-            raise ValueError(f"Unsupported type: {self.type}")
-
-        if not input_files_dict:
-            raise FileNotFoundError(
-                f"No {self.type.capitalize()} files found for sample '{self.name}' in folder '{self.path}'"
-            )
-        for key, tuple_of_files in input_files_dict.items():
-            if not tuple_of_files:
-                raise FileNotFoundError(
-                    f"No files found for key '{key}' in sample '{self.name}'"
-                )
-            if len(tuple_of_files) == 1:
-                normalized[key] = tuple_of_files[0]
-            else:
-                output_filename = self.resolve_output_filename(
-                    read=key, suffix=tuple_of_files[0].suffix.lstrip(".")
-                )
-                output_path = self.output_folder / output_filename
-                files_to_merge[output_path] = list(tuple_of_files)
-                normalized[key] = output_path
-        return normalized, files_to_merge
-
-    def __normalize_lane(self, input_files: Iterable[Path], output: Path):
-
-        command = ["cat", *map(str, input_files)]
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with output.open("wb") as out:
-            subprocess.run(
-                command,
-                stdout=out,
-                check=True,
-            )
-
-    def remove_suffixes(self, path: Path) -> tuple[str, str]:
+    def remove_suffixes(cls, path: Path) -> tuple[str, str]:
         """Remove all suffixes from a file path to get the base name."""
-        suffixes = "".join(path.suffixes)
+        if path.name.endswith(".gz"):
+            suffixes = "".join(path.suffixes[-2:])
+        else:
+            suffixes = "".join(path.suffixes)
         stem = path.name.removesuffix(suffixes)
         return stem, suffixes
 
-    def __gather_illumina_files(self) -> Mapping[str, list[Path]]:
-        files = {"R1": [], "R2": []}
-        for filepath in self.path.iterdir():
-            stem, suffixes = self.remove_suffixes(filepath)
-            if filepath.is_file() and self.is_sample(suffixes):
-                if "_R1_" in stem:
-                    files["R1"].append(filepath.resolve())
-                elif "_R2_" in stem:
-                    files["R2"].append(filepath.resolve())
-        # illumina files are all in a single folder, files are named with a specific
-        return files
-
     def is_sample(self, suffix: str) -> bool:
+        """
+        Check if the given suffix corresponds to a FASTQ file.
+
+        Parameters
+        ----------
+        suffix : str
+            The suffix of the file to check.
+
+        Returns
+        -------
+        bool
+            True if the suffix corresponds to a FASTQ file, False otherwise.
+        """
         return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
 
-    def __gather_novogene_files(self) -> Mapping[str, list[Path]]:
+    def select(self, sample: str) -> Mapping[str, list[Path]]:
+        """
+        Select FASTQ files for the given sample.
 
+        This method searches the folder for FASTQ files that match the sample
+        name and read identifiers (R1/R2).
+
+        Parameters
+        ----------
+        sample : str
+            The name of the sample to select FASTQ files for.
+
+        Returns
+        -------
+        Mapping[str, list[Path]]
+            A mapping with keys "R1" and "R2" containing lists of Paths to the
+            corresponding FASTQ files.
+
+        Raises
+        ------
+        FileNotFoundError
+            If no FASTQ files are found for the given sample in the folder.
+        """
         files = {"R1": [], "R2": []}
-        sample_path = self.path
-        if not sample_path.exists():
-            raise FileNotFoundError(f"Sample path {sample_path} does not exist.")
-        for filepath in sample_path.iterdir():
-            if filepath.is_file():
-                stem, suffixes = self.remove_suffixes(filepath)
-                if self.is_sample(suffixes):
-                    if stem.endswith("_1"):
-                        files["R1"].append(filepath.resolve())
-                    elif stem.endswith("_2"):
-                        files["R2"].append(filepath.resolve())
-        # novogene files may be nested in subdirectories, so we need to walk the directory tree
+        for filepath in self.folder.iterdir():
+            stem, suffixes = FastqSelector.remove_suffixes(filepath)
+            if filepath.is_file() and self.is_sample(suffixes):
+                read, check = self.match_read(stem, sample)
+                if check:
+                    files[read].append(filepath.resolve())
+        if len(files["R1"]) == 0 and len(files["R2"]) == 0:
+            raise FileNotFoundError(
+                f"No {self.__class__.__name__.capitalize()} files found for sample '{sample}' in folder '{self.folder}'"  # noqa: E501
+            )
         return files
 
+    def match_read(self, stem: str, sample: str) -> tuple[str, bool]:
+        """
+        Match the read identifier (R1/R2) for the given sample.
 
-class FastqSelector(Protocol):
-    def __call__(self, folder: Path) -> Mapping[str, list[Path]]: ...
+        This method checks if the stem of a FASTQ file corresponds to the given
+        sample and determines whether it is an R1 or R2 read.
+
+        Parameters
+        ----------
+        stem : str
+            The stem of the FASTQ file (filename without suffixes).
+        sample : str
+            The name of the sample to match against the stem.
+
+        Returns
+        -------
+        tuple[str, bool]
+            A tuple containing the read identifier ("R1" or "R2") and a boolean
+            indicating whether the stem matches the sample. If no match is found,
+            returns ("", False).
+        """
+        if stem.startswith(sample):
+            if "R1" in stem:
+                return "R1", True
+            elif "R2" in stem:
+                return "R2", True
+        return "", False
 
 
 class NovogeneSelector(FastqSelector):
+    """
+    A FastqSelector for Novogene-style FASTQ files, which typically have
+    filenames ending with '_1' for R1 and '_2' for R2 reads.
+    """
 
-    def __call__(self, folder: Path) -> Mapping[str, list[Path]]:
-        files = {"R1": [], "R2": []}
-        for filepath in folder.iterdir():
-            if filepath.is_file():
-                stem, suffixes = self.remove_suffixes(filepath)
-                if self.is_sample(suffixes):
-                    if stem.endswith("_1"):
-                        files["R1"].append(filepath.resolve())
-                    elif stem.endswith("_2"):
-                        files["R2"].append(filepath.resolve())
-        return files
+    def match_read(self, stem: str, sample: str) -> tuple[str, bool]:
+        """
+        Match the read identifier (R1/R2) for Novogene-style FASTQ files.
 
-    def is_sample(self, suffix: str) -> bool:
-        return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
+        Parameters
+        ----------
+        stem : str
+            The stem of the FASTQ file (filename without suffixes).
+        sample : str
+            The name of the sample to match against the stem.
+
+        Returns
+        -------
+        tuple[str, bool]
+            A tuple containing the read identifier ("R1" or "R2") and a boolean
+            indicating whether the stem matches the sample. If no match is
+            found, returns ("", False).
+        """
+        if stem.startswith(sample):
+            if stem.endswith("_1"):
+                return "R1", True
+            elif stem.endswith("_2"):
+                return "R2", True
+        return "", False
 
 
 class IlluminaSelector(FastqSelector):
+    """
+    An IlluminaSelector for Illumina-style FASTQ files, which typically have
+    filenames containing '_R1_' for R1 and '_R2_' for R2 reads.
+    """
 
-    def __call__(self, folder: Path) -> Mapping[str, list[Path]]:
-        files = {"R1": [], "R2": []}
-        for filepath in folder.iterdir():
-            stem, suffixes = self.remove_suffixes(filepath)
-            if filepath.is_file() and self.is_sample(suffixes):
-                if "_R1_" in stem:
-                    files["R1"].append(filepath.resolve())
-                elif "_R2_" in stem:
-                    files["R2"].append(filepath.resolve())
-        return files
+    def match_read(self, stem: str, sample: str) -> tuple[str, bool]:
+        """
+        Match the read identifier (R1/R2) for Illumina-style FASTQ files.
 
-    def is_sample(self, suffix: str) -> bool:
-        return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
+        Parameters
+        ----------
+        stem : str
+            The stem of the FASTQ file (filename without suffixes).
+        sample : str
+            The name of the sample to match against the stem.
+
+        Returns
+        -------
+        tuple[str, bool]
+            A tuple containing the read identifier ("R1" or "R2") and a boolean
+            indicating whether the stem matches the sample. If no match is
+            found, returns ("", False).
+        """
+        if stem.startswith(sample):
+            if "_R1_" in stem:
+                return "R1", True
+            elif "_R2_" in stem:
+                return "R2", True
+        return "", False
 
 
 class UndeterminedSelector(FastqSelector):
+    """
+    A FastqSelector for undetermined reads, typically labeled as "Undetermined"
+    in the sample name.
+    """
 
-    def __call__(self, folder: Path) -> Mapping[str, list[Path]]:
-        # patch this
-        files = {"R1": [], "R2": []}
-        for filepath in folder.iterdir():
-            stem, suffixes = self.remove_suffixes(filepath)
-            if filepath.is_file() and self.is_sample(suffixes):
-                if "_R1_" in stem and "Undetermined" in stem:
-                    files["R1"].append(filepath.resolve())
-                elif "_R2_" in stem and "Undetermined" in stem:
-                    files["R2"].append(filepath.resolve())
-        return files
+    def match_read(self, stem: str, sample: str = "Undetermined") -> tuple[str, bool]:
+        """
+        Match the read identifier (R1/R2) for undetermined FASTQ files.
 
-    def is_sample(self, suffix: str) -> bool:
-        return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
+        Parameters
+        ----------
+        stem : str
+            The stem of the FASTQ file (filename without suffixes).
+        sample : str, optional
+            The name of the sample to match against the stem, by default
+            "Undetermined".
+
+        Returns
+        -------
+        tuple[str, bool]
+            A tuple containing the read identifier ("R1" or "R2") and a boolean
+            indicating whether the stem matches the sample. If no match is
+            found, returns ("", False).
+        """
+        if sample in stem:
+            if "_R1_" in stem:
+                return "R1", True
+            elif "_R2_" in stem:
+                return "R2", True
+        return "", False
 
 
 class FastqConcat(Element):
+    """
+    An Element that concatenates multiple FASTQ files for a given sample into
+    single R1 and R2 files. This is useful for samples that have been sequenced
+    across multiple lanes or runs, where the resulting FASTQ files need to be
+    combined for downstream analysis.
+    """
 
     def __init__(
         self,
@@ -1286,13 +1491,33 @@ class FastqConcat(Element):
         folder: Path | str,
         output_folder: Path = Path("cache/fastq"),
         *,
-        selector: FastqSelector = NovogeneSelector(),
-        pres: tuple[Element, ...] | None = None,
+        selector: type[FastqSelector] = NovogeneSelector,
         tag: ElementTag | PartialElementTag | None = None,
     ):
+        """
+        Initialize a FastqConcat element.
+
+        This constructor sets up the FastqConcat element, which concatenates
+        multiple FASTQ files for a given sample into single R1 and R2 files.
+
+        Parameters
+        ----------
+        name : str
+            The name of the FastqConcat element.
+        folder : Path | str
+            The folder containing the input FASTQ files.
+        output_folder : Path, optional
+            The folder to store the concatenated FASTQ files, by default
+            Path("cache/fastq").
+        selector : type[FastqSelector], optional
+            The selector class to use for identifying FASTQ files, by default
+            NovogeneSelector
+        tag : ElementTag | PartialElementTag | None, optional
+            An optional tag for the element, by default None
+        """
         # Creates FastqArtifacts by concatenation
         self.path = Path(folder).resolve()
-        self.selector = selector
+        self.selector = selector(self.path)
         self.output_folder = output_folder
         tag = ElementTag(
             root=name,
@@ -1302,20 +1527,17 @@ class FastqConcat(Element):
             method=Method.CUSTOM,
             state=State.RAW,
         ).merge(tag)
-        key, name = generate_element_key_name(tag, "FastqSource", subcommand="concat")
-        self.name = name
+        key = Element.generate_key(tag, "FastqConcat")
         normalized, files_to_merge = self.setup_normalization()
         artifacts = ArtifactSet(FastqArtifact(normalized["R1"], normalized.get("R2")))
-        self.normalized = normalized
-        self.files_to_merge = files_to_merge
+        run = self.normalize(files_to_merge)
 
         super().__init__(
             key,
-            self.concat(),
+            run,
             tag,
-            artifacts=artifacts,
+            artifacts,
             pres=(),
-            name=name,
         )  # Element
 
     def resolve_output_filename(self, read: str, suffix: str) -> str:
@@ -1332,10 +1554,13 @@ class FastqConcat(Element):
     def r2(self) -> Path | None:
         return self.artifacts.get("r2", None)
 
-    def normalize(self) -> Runnable:
+    def normalize(self, files_to_merge: Mapping[Path, list[Path]]) -> Runnable:
         def __run():
-            for output_path, input_files in self.files_to_merge.items():
-                self.normalize_lane(input_files, output_path)
+            for output_path, input_files in files_to_merge.items():
+                FastqConcat.concat(
+                    input_files=input_files,
+                    output=output_path,
+                )
             return True
 
         display = CallSpec(
@@ -1346,20 +1571,12 @@ class FastqConcat(Element):
         return Runnable(__run, display=display)
 
     def setup_normalization(self):
-        files_to_merge = {}
+        files_to_concat = self.selector.select(self.name)
+        if not files_to_concat:
+            raise FileNotFoundError(f"No files found for sample '{self.name}'")
         normalized: dict[str, Path] = {}
-        if self.type == "illumina":
-            input_files_dict = self.__gather_illumina_files()
-        elif self.type == "novogene":
-            input_files_dict = self.__gather_novogene_files()
-        else:
-            raise ValueError(f"Unsupported type: {self.type}")
-
-        if not input_files_dict:
-            raise FileNotFoundError(
-                f"No {self.type.capitalize()} files found for sample '{self.name}' in folder '{self.path}'"
-            )
-        for key, tuple_of_files in input_files_dict.items():
+        files_to_merge: dict[Path, list[Path]] = {}
+        for key, tuple_of_files in files_to_concat.items():
             if not tuple_of_files:
                 raise FileNotFoundError(
                     f"No files found for key '{key}' in sample '{self.name}'"
@@ -1379,7 +1596,7 @@ class FastqConcat(Element):
     def concat(cls, input_files: Iterable[Path], output: Path):
 
         command = ["cat", *map(str, input_files)]
-        output.parent.mkdir(parents=True, exist_ok=True)
+        parents(output)
         with output.open("wb") as out:
             subprocess.run(
                 command,
@@ -1387,928 +1604,76 @@ class FastqConcat(Element):
                 check=True,
             )
 
-    def remove_suffixes(self, path: Path) -> tuple[str, str]:
-        """Remove all suffixes from a file path to get the base name."""
-        suffixes = "".join(path.suffixes)
-        stem = path.name.removesuffix(suffixes)
-        return stem, suffixes
 
-    def __gather_illumina_files(self) -> Mapping[str, list[Path]]:
-        files = {"R1": [], "R2": []}
-        for filepath in self.path.iterdir():
-            stem, suffixes = self.remove_suffixes(filepath)
-            if filepath.is_file() and self.is_sample(suffixes):
-                if "_R1_" in stem:
-                    files["R1"].append(filepath.resolve())
-                elif "_R2_" in stem:
-                    files["R2"].append(filepath.resolve())
-        # illumina files are all in a single folder, files are named with a specific
-        return files
-
-    def is_sample(self, suffix: str) -> bool:
-        return suffix in {".fastq", ".fastq.gz", ".fq.gz", ".fq"}
-
-    def __gather_novogene_files(self) -> Mapping[str, list[Path]]:
-
-        files = {"R1": [], "R2": []}
-        sample_path = self.path
-        if not sample_path.exists():
-            raise FileNotFoundError(f"Sample path {sample_path} does not exist.")
-        for filepath in sample_path.iterdir():
-            if filepath.is_file():
-                stem, suffixes = self.remove_suffixes(filepath)
-                if self.is_sample(suffixes):
-                    if stem.endswith("_1"):
-                        files["R1"].append(filepath.resolve())
-                    elif stem.endswith("_2"):
-                        files["R2"].append(filepath.resolve())
-        # novogene files may be nested in subdirectories, so we need to walk the directory tree
-        return files
+def __check_pre_sigs(current: dict[str, Any], stored: dict[str, Any]) -> str:
+    cur_pre = sorted(current.get("pre_sigs", []))
+    sto_pre = sorted(stored.get("pre_sigs", []))
+    if cur_pre != sto_pre:
+        only_current = set(cur_pre) - set(sto_pre)
+        only_stored = set(sto_pre) - set(cur_pre)
+        detail_lines = ["Predecessor signatures differ:"]
+        if only_current:
+            detail_lines.append(f"    only in current: {sorted(only_current)}")
+        if only_stored:
+            detail_lines.append(f"    only in stored:  {sorted(only_stored)}")
+        return "\n".join(detail_lines)
+    return ""
 
 
-# class Sample(Element):
-
-#     def __init__(
-#         self,
-#         source: Source,
-#         *,
-#         key: str | None = None,
-#         name: str | None = None,
-#         root: str | None = None,
-#         tag: PartialElementTag | ElementTag | None = None,
-#         pres: tuple[Element, ...] | None = None,
-#     ):
-#         self.source = source
-#         root = root or source.name
-#         tag = ElementTag(
-#             root=root,
-#             level=0,
-#             omics=Omics.DNA,
-#             stage=Stage.INPUT,
-#             method=Method.CHECK,
-#             state=State.RAW,
-#         ).merge(tag)
-#         key = key or f"{tag.default_name}"
-#         name = name or tag.default_name or root
-
-#         super().__init__(
-#             key,
-#             source.run,
-#             tag=tag,
-#             determinants=source.determinants,
-#             inputs=source.outputs,
-#             artifacts=source.artifacts,
-#             pres=pres,
-#             name=name,
-#         )
-
-
-# class NextGenSampleElement(Sample):
-
-#     def __init__(
-#         self,
-#         # path: Path | str | Mapping[str, Path | str],
-#         source: FastqSource,
-#         *,
-#         key: str | None = None,
-#         name: str | None = None,
-#         root: str | None = None,
-#         tag: PartialElementTag | ElementTag | None = None,
-#         read_group: str | None = None,
-#         reverse_reads: bool = False,
-#         cache_dir: Path | None = None,
-#         result_dir: Path | None = None,
-#         pres: tuple[Element, ...] | None = None,
-#     ):
-#         tag = from_prior(
-#             source.tag,
-#             tag,
-#             root=source.tag.root,
-#             level=source.tag.level,
-#             state=State.RAW,
-#             stage=Stage.INPUT,
-#         )
-#         key = key or tag.default_name
-#         super().__init__(source, key=key, root=root, tag=tag, pres=pres, name=name)
-
-#         self.reverse_reads = reverse_reads
-#         self.read_group = read_group
-#         self.cache_dir = cache_dir or Path("cache") / "samples" / source.tag.root
-#         self.result_dir = result_dir or Path("results") / "samples" / source.tag.root
-#         self.pairing: Pairing = (
-#             Pairing.PAIRED if len(self.artifacts) > 1 else Pairing.SINGLE
-#         )
-
-#     @property
-#     def input_files(self) -> list[Path]:
-#         return sorted(self.artifacts.values(), key=str)
-
-
-# def sample_fastqs(
-#     sample: Sample | Element,
-# ) -> tuple[Path, Path | None, str, str | None]:
-#     if isinstance(sample, Sample):
-#         r1 = Path(sample.input_files[0]).absolute()
-#         r2 = (
-#             Path(sample.input_files[1]).absolute()
-#             if len(sample.input_files) > 1
-#             else None
-#         )
-#         name = sample.name
-#         rg = getattr(sample, "read_group", None)
-#         return r1, r2, name, rg
-#     else:
-#         r1 = Path(sample.artifacts["fastq_r1"]).absolute()
-#         fastq_r2 = sample.artifacts.get("fastq_r2", None)
-#         r2 = Path(fastq_r2).absolute() if fastq_r2 else None
-#         name = sample.artifacts.get("sample_name", sample.name)
-#         rg = sample.artifacts.get("read_group")
-#         return r1, r2, name, rg
-
-
-# class TableElement(Element):
-
-#     def __init__(
-#         self,
-#         key: str,
-#         run: RunType,
-#         tag: ElementTag,
-#         *,
-#         determinants: tuple | None = None,
-#         inputs: tuple[Path, ...] | None = None,
-#         artifacts: Mapping[str, Any] | None = None,
-#         pres: tuple[Element, ...] | None = None,
-#         name: str | None = None,
-#     ):
-
-#         super().__init__(
-#             key=key,
-#             run=run,
-#             tag=tag,
-#             determinants=determinants,
-#             inputs=inputs,
-#             artifacts=artifacts,
-#             pres=pres,
-#             name=name,
-#         )
-
-#     @property
-#     def table(self) -> Path:
-#         return self.artifacts.primary
-
-
-# deprectated - this will in future be an TableArtifact
-class TableElement(Element):
-    """An Element that produces a TSV (for humans) and a Parquet file (for the pipeline).
-
-    Parameters
-    ----------
-    key : str
-        Unique cache key.
-    run : Callable
-        Zero-argument callable that executes the computation and writes both files.
-    tag : ElementTag
-        Tag used for naming / provenance.
-    tsv : Path
-        Output TSV path.
-    parquet : Path
-        Output Parquet path.
-    column_roles : Mapping[str, str] | None
-        Optional semantic role per column, e.g.::
-
-            {
-                "raw_A": "raw_counts",
-                "raw_B": "raw_counts",
-                "vst_A": "vst",
-                "gene_desc": "annotation",
-            }
-
-        Well-known roles: ``"raw_counts"``, ``"cpm"``, ``"vst"``, ``"rlog"``,
-        ``"log2fc"``, ``"fdr"``, ``"p"``, ``"stat"``, ``"annotation"``,
-        ``"metadata"``.
-    determinants, inputs, pres, name
-        Forwarded to :class:`Element`.
-
-    Artefacts
-    ---------
-    ``"tsv"``     → *tsv*
-    ``"parquet"`` → *parquet*
-
-    The pipeline should prefer ``element.parquet`` for chaining.
-    Users / downstream tools consume ``element.tsv``.
-
-    Examples
-    --------
-    raw = TableElement(..., column_roles={
-    "KO_1": "raw_counts", "KO_2": "raw_counts",
-    "WT_1": "raw_counts", "WT_2": "raw_counts",
-    "gene_name": "annotation", "gene_desc": "annotation",
-    })
-
-    # VST — Annotationens get propagated automatically via propagate()
-    vst = deseq2.vst(raw, sample_columns=["KO_1","KO_2","WT_1","WT_2"])
-    # vst.column_roles == {"KO_1": "vst", ..., "gene_name": "annotation", ...}
-
-    # Views
-    vst.view("vst")          # only VST columns
-    vst.view("annotation")   # only annotation columns
-    vst.matrix("vst", include_annotations=True)  # VST + annotation columns together
-
-    # Multiple roles at once
-    vst.roles("vst", "annotation")
-
-    # FFor PCA — only the matrix
-    clustering.pca(vst.matrix("vst"))
-    """
-
-    # Roles that are considered *orthogonal* annotations and are propagated
-    # automatically when a derived TableElement is created via
-    # :meth:`propagate`.
-    ANNOTATION_ROLES: frozenset[str] = frozenset({"annotation", "metadata"})
-
-    def __init__(
-        self,
-        key: str,
-        run: Runnable | Callable[[], CompletedProcess] | Path | str | None = None,
-        *,
-        tag: PartialElementTag | ElementTag | None = None,
-        root: str | None = None,
-        tsv: Path | None = None,
-        parquet: Path | None = None,
-        column_roles: Mapping[str, str] | None = None,
-        determinants: tuple | None = None,
-        inputs: tuple[Path, ...] | None = None,
-        pres: tuple[Element, ...] | None = None,
-        artifacts: dict[str, Any] | None = None,
-        name: str | None = None,
-        index: str | None = None,
-    ) -> None:
-        # --- resolve file-based construction ---
-        if isinstance(run, (Path, str)):
-            # run is actually a file path
-            p = Path(run).absolute()
-            if p.suffix in (".parquet",):
-                parquet = parquet or p
-            elif p.suffix in (".tsv", ".csv", ".txt"):
-                tsv = tsv or p
-            else:
-                raise ValueError(
-                    f"Cannot infer file type from suffix {p.suffix!r}. "
-                    "Pass tsv= or parquet= explicitly."
-                )
-            actual_run = paths_exists(p)
-            actual_run.threads = 1
-            actual_run.command = [f"check_exists({p})"]  # type: ignore[attr-defined]
-            inputs = inputs or (p,)
-            default_root = p.stem
-
-        elif run is None:
-            # tsv or parquet must be supplied explicitly
-            if parquet is None and tsv is None:
-                raise ValueError(
-                    "Provide at least one of tsv= or parquet= when run=None."
-                )
-            paths_to_check = [p for p in (tsv, parquet) if p is not None]
-            actual_run = paths_exists(*paths_to_check)
-            actual_run.threads = 1
-            actual_run.command = ["check_exists(...)"]  # type: ignore[attr-defined]
-            inputs = inputs or tuple(paths_to_check)
-            default_root = paths_to_check[0].stem
-
-        else:
-            actual_run = run
-            default_root = root or (name or key)
-
-        if tsv is None and parquet is None:
-            raise ValueError("At least one of tsv= or parquet= must be provided.")
-
-        # sentinel so we can tell callers "no TSV / no parquet"
-        self._tsv = Path(tsv) if tsv is not None else None
-        self._parquet = Path(parquet) if parquet is not None else None
-        self.index_column = index
-        self.column_roles: dict[str, str] = dict(column_roles or {})
-
-        artifacts = artifacts or {}
-        if self._tsv:
-            artifacts["tsv"] = self._tsv
-        if self._parquet:
-            artifacts["parquet"] = self._parquet
-        root = root or default_root
-        tag = ElementTag(
-            root=root,
-            level=0,
-            omics=None,
-            stage=Stage.INPUT,
-            method=Method.CHECK,
-            state=State.RAW,
-            ext=".tsv",
-        ).merge(tag)
-
-        super().__init__(
-            key=key,
-            run=actual_run,
-            tag=tag,
-            determinants=determinants,
-            inputs=inputs,
-            artifacts=artifacts,
-            pres=pres,
-            name=name,
+def __check_key(current: dict[str, Any], stored: dict[str, Any]) -> str:
+    if current.get("key") != stored.get("key"):
+        return (
+            f"Keys differ:\n"
+            f"    current: {current.get('key')!r}\n"
+            f"    stored:  {stored.get('key')!r}"
         )
-
-    @property
-    def tsv(self) -> Path:
-        if self._tsv is None:
-            raise AttributeError(f"TableElement {self.name!r} has no TSV file.")
-        return self._tsv
-
-    @property
-    def parquet(self) -> Path:
-        if self._parquet is None:
-            raise AttributeError(f"TableElement {self.name!r} has no Parquet file.")
-        return self._parquet
-
-    @property
-    def index(self) -> pd.Index:
-        """Return the DataFrame index (row labels) of this table."""
-        return self.df.index
-
-    @property
-    def index_name(self) -> str:
-        """Return the name of the DataFrame index column."""
-        return str(self.df.index.name) if self.df.index.name is not None else ""
-
-    @property
-    def file(self) -> Path:
-        return self.parquet if self._parquet is not None else self.tsv
-
-    # ------------------------------------------------------------------
-    # column_roles helpers
-    # ------------------------------------------------------------------
-
-    def columns_for_role(self, role: str) -> list[str]:
-        """Return all column names assigned to *role*."""
-        return [col for col, r in self.column_roles.items() if r == role]
-
-    def roles_present(self) -> set[str]:
-        """Return the set of distinct roles registered for this table."""
-        return set(self.column_roles.values())
-
-    # ------------------------------------------------------------------
-    # Views
-    # ------------------------------------------------------------------
-
-    def view(self, role: str) -> pd.DataFrame:
-        """Return a :class:`~pandas.DataFrame` with only the columns that
-        have the given *role*.
-
-        The index of the full table is preserved.
-
-        Parameters
-        ----------
-        role : str
-            Semantic role to filter for, e.g. ``"vst"``, ``"annotation"``.
-
-        Returns
-        -------
-        pd.DataFrame
-            Subset of :attr:`df` with only the matching columns.
-
-        Raises
-        ------
-        KeyError
-            If no columns are registered for *role*.
-        """
-        cols = self.columns_for_role(role)
-        if not cols:
-            raise KeyError(
-                f"No columns with role {role!r} in {self.name!r}.\n"
-                f"Available roles: {sorted(self.roles_present())}"
-            )
-        return self.df[cols]
-
-    def roles(
-        self,
-        *roles: str,
-        extra_columns: Iterable[str] | None = None,
-    ) -> pd.DataFrame:
-        """Return a DataFrame with columns matching any of the given *roles*.
-
-        Parameters
-        ----------
-        *roles : str
-            One or more role names to include.
-        extra_columns : Iterable[str] | None
-            Additional column names to include regardless of their role.
-
-        Returns
-        -------
-        pd.DataFrame
-            Combined subset; column order follows the original table.
-        """
-        wanted: set[str] = set()
-        for role in roles:
-            wanted.update(self.columns_for_role(role))
-        if extra_columns:
-            wanted.update(extra_columns)
-        # preserve original column order
-        ordered = [c for c in self.df.columns if c in wanted]
-        return self.df[ordered]
-
-    def propagate(
-        self,
-        roles: Iterable[str] | None = None,
-    ) -> dict[str, str]:
-        """Return a ``column_roles`` dict containing only the *annotation*
-        (or custom) columns from this table — ready to be merged into a
-        derived element's ``column_roles``.
-
-        This lets transformations like VST or TMM carry annotation columns
-        forward without having to enumerate them explicitly.
-
-        Parameters
-        ----------
-        roles : Iterable[str] | None
-            Roles to propagate.  Defaults to :attr:`ANNOTATION_ROLES`
-            (``{"annotation", "metadata"}``).
-
-        Returns
-        -------
-        dict[str, str]
-            Mapping ``{column: role}`` for all matching columns.
-
-        Examples
-        --------
-        >>> derived_roles = {"vst_A": "vst", "vst_B": "vst"}
-        >>> derived_roles.update(raw_counts.propagate())
-        >>> vst_element = TableElement(..., column_roles=derived_roles)
-        """
-        keep = frozenset(roles) if roles is not None else self.ANNOTATION_ROLES
-        return {col: role for col, role in self.column_roles.items() if role in keep}
-
-    # ------------------------------------------------------------------
-    # Convenience: expression-matrix view
-    # ------------------------------------------------------------------
-
-    def matrix(
-        self,
-        kind: str,
-    ) -> ndarray:
-        """Return the expression matrix for a given normalisation *kind*.
-
-        A thin convenience wrapper around :meth:`view`.
-
-        Parameters
-        ----------
-        kind : str
-            Normalisation kind / role, e.g. ``"vst"``, ``"rlog"``,
-            ``"raw_counts"``, ``"cpm"``.
-
-        Returns
-        -------
-        np.ndarray
-        """
-        return self.view(kind).to_numpy()
-
-    # ------------------------------------------------------------------
-    # Load from disk
-    # ------------------------------------------------------------------
-
-    @cached_property
-    def df(self) -> DataFrame:
-        """Load the result table (prefers Parquet, falls back to TSV)."""
-        if self._parquet is not None and self._parquet.exists():
-            df = pd.read_parquet(self._parquet)
-        elif self._tsv is not None and self._tsv.exists():
-            df = pd.read_csv(self._tsv, sep="\t")  # , index_col=self.index_column)
-        else:
-            raise FileNotFoundError(
-                f"Neither Parquet nor TSV output found for {self.name!r}.\n"
-                f"  parquet: {self._parquet}\n"
-                f"  tsv:     {self._tsv}"
-            )
-        if self.index_column and self.index_column in df.columns:
-            df["index"] = df[self.index_column].copy()
-            df.set_index("index", inplace=True)
-        return df
+    return ""
 
 
-class AdataElement(Element):
-    """An Element that wraps an :class:`anndata.AnnData` object persisted as
-    an ``.h5ad`` file.
-
-    Analogous to :class:`TableElement` for AnnData objects used in single-cell
-    or bulk RNA-seq workflows.
-
-    Parameters
-    ----------
-    key : str
-        Unique cache key.
-    run : Callable | Path | str | None
-        Zero-argument callable that executes the computation and writes the
-        ``.h5ad`` file.  If a *Path* or *str* pointing to an existing
-        ``.h5ad`` file is passed, the element is created as an input-only
-        node that validates the file exists.  Pass ``None`` together with an
-        explicit *h5ad* path for the same effect.
-    tag : PartialElementTag | ElementTag | None
-        Tag used for naming / provenance.
-    h5ad : Path | None
-        Output ``.h5ad`` path.
-    obs_roles : Mapping[str, str] | None
-        Optional semantic role per ``obs`` column, e.g.::
-
-            {
-                "cell_type": "annotation",
-                "sample":    "metadata",
-                "UMAP_1":    "embedding",
-                "UMAP_2":    "embedding",
-            }
-
-        Well-known roles: ``"annotation"``, ``"metadata"``, ``"embedding"``,
-        ``"qc"``, ``"cluster"``.
-    var_roles : Mapping[str, str] | None
-        Optional semantic role per ``var`` column, e.g.::
-
-            {"highly_variable": "feature_selection", "gene_name": "annotation"}
-    determinants, inputs, pres, name
-        Forwarded to :class:`Element`.
-
-    Artefacts
-    ---------
-    ``"h5ad"`` → *h5ad*
-
-    Examples
-    --------
-    >>> raw = AdataElement(
-    ...     key="raw_counts",
-    ...     run=compute_raw_counts,
-    ...     tag=my_tag,
-    ...     h5ad=Path("results/raw.h5ad"),
-    ...     obs_roles={"cell_type": "annotation", "sample": "metadata"},
-    ... )
-    >>> raw.adata          # loads AnnData from disk
-    >>> raw.obs_view("annotation")   # obs columns with role "annotation"
-    >>> raw.obsm_key("embedding")    # first obsm key associated with role
-    """
-
-    ANNOTATION_ROLES: frozenset[str] = frozenset({"annotation", "metadata"})
-
-    def __init__(
-        self,
-        key: str,
-        run: Callable[[], Any] | Path | str | None = None,
-        *,
-        tag: PartialElementTag | ElementTag | None = None,
-        root: str | None = None,
-        h5ad: Path | None = None,
-        # obs_roles: Mapping[str, str] | None = None,
-        # var_roles: Mapping[str, str] | None = None,
-        determinants: tuple | None = None,
-        inputs: tuple[Path, ...] | None = None,
-        pres: tuple[Element, ...] | None = None,
-        name: str | None = None,
-    ) -> None:
-        # --- resolve file-based construction ---
-        if isinstance(run, (Path, str)):
-            p = Path(run).absolute()
-            if p.suffix not in (".h5ad",):
-                raise ValueError(
-                    f"Expected a .h5ad file, got suffix {p.suffix!r}. "
-                    "Pass h5ad= explicitly."
-                )
-            h5ad = h5ad or p
-            actual_run = paths_exists(p)
-            actual_run.threads = 1
-            actual_run.command = [f"check_exists({p})"]  # type: ignore[attr-defined]
-            inputs = inputs or (p,)
-            default_root = p.stem
-
-        elif run is None:
-            if h5ad is None:
-                raise ValueError("Provide h5ad= when run=None.")
-            actual_run = paths_exists(h5ad)
-            actual_run.threads = 1
-            actual_run.command = [f"check_exists({h5ad})"]  # type: ignore[attr-defined]
-            inputs = inputs or (h5ad,)
-            default_root = h5ad.stem
-
-        else:
-            if h5ad is None:
-                raise ValueError("h5ad= must be provided when run is a callable.")
-            actual_run = run
-            default_root = root or (name or key)
-
-        self._h5ad = Path(h5ad).absolute()
-        # self.obs_roles: dict[str, str] = dict(obs_roles or {})
-        # self.var_roles: dict[str, str] = dict(var_roles or {})
-
-        artifacts: dict[str, Any] = {"h5ad": self._h5ad}
-
-        root = root or default_root
-        tag = ElementTag(
-            root=root,
-            level=0,
-            omics=None,
-            stage=Stage.INPUT,
-            method=Method.CHECK,
-            state=State.RAW,
-            ext=".h5ad",
-        ).merge(tag)
-
-        super().__init__(
-            key=key,
-            run=actual_run,
-            tag=tag,
-            determinants=determinants,
-            inputs=inputs,
-            artifacts=artifacts,
-            pres=pres,
-            name=name,
+def __check_determinants(current: dict[str, Any], stored: dict[str, Any]) -> str:
+    cur_det = list(current.get("determinants", []))
+    sto_det = list(stored.get("determinants", []))
+    if cur_det != sto_det:
+        return (
+            f"Determinants differ:\n"
+            f"    current: {cur_det}\n"
+            f"    stored:  {sto_det}"
         )
-
-    # ------------------------------------------------------------------
-    # Core property
-    # ------------------------------------------------------------------
-
-    @property
-    def h5ad(self) -> Path:
-        return self._h5ad
-
-    @cached_property
-    def adata(self):
-        """Load and return the :class:`anndata.AnnData` from disk."""
-        try:
-            import anndata as ad  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(
-                "anndata is required for AdataElement. "
-                "Install it with: pip install anndata"
-            ) from exc
-        if not self._h5ad.exists():
-            raise FileNotFoundError(
-                f"h5ad file not found for {self.name!r}: {self._h5ad}"
-            )
-        return ad.read_h5ad(self._h5ad)
-
-    def view(
-        self,
-        layer: str | None = None,
-        obs_roles: dict[str, list[str]] | None = None,
-        var_roles: dict[str, list[str]] | None = None,
-    ) -> DataFrame:
-        """Return a DataFrame of a given layer filtered by obs columns and/or var columns.
-
-            Parameters
-            ----------
-            layer : str | None
-                The layer to filter for, e.g. ``"raw"``, ``"cpm"``, ``"vst"``.
-            obs_roles : dict[str, list[str]] | None
-                Dictionary mapping obs roles to lists of column names.
-            var_roles : dict[str, list[str]] | None
-                Dictionary mapping var roles to lists of column names.
-
-            Returns
-            -------
-            DataFrame
-                A DataFrame containing the filtered data based on the specified layer and roles.
-
-            Raises
-            ------
-        # --- Result ---
-        if not diffs:
-            result = True
-            msg = f"[✓] No differences in sig_data for {key!r}"
-        else:
-            result = False
-            msg = f"[✗] Sig_data differs for {key!r}:"
-            for diff in diffs:
-            KeyError
-                If no ``obs`` or ``var`` columns are registered.
-        """
-        var_mask = Series(True, index=self.adata.var_names)
-        if var_roles:
-            for col, wanted in var_roles.items():
-                var_mask &= self.adata.var[col].isin(wanted)
-        obs_mask = Series(True, index=self.adata.obs_names)
-        if obs_roles:
-            for col, wanted in obs_roles.items():
-                obs_mask &= self.adata.obs[col].isin(wanted)
-        df_view = self.adata[layer][obs_mask, var_mask]
-        return df_view
-
-    # # ------------------------------------------------------------------
-    # # obs helpers
-    # # ------------------------------------------------------------------
-
-    # def obs_columns_for_role(self, role: str) -> list[str]:
-    #     """Return all ``obs`` column names assigned to *role*."""
-    #     return [col for col, r in self.obs_roles.items() if r == role]
-
-    # def obs_roles_present(self) -> set[str]:
-    #     """Return the set of distinct roles registered for ``obs``."""
-    #     return set(self.obs_roles.values())
-
-    # def obs_view(self, role: str) -> DataFrame:
-    #     """Return a DataFrame of ``obs`` columns that have the given *role*.
-
-    #     Parameters
-    #     ----------
-    #     role : str
-    #         Semantic role to filter for, e.g. ``"annotation"``, ``"qc"``.
-
-    #     Returns
-    #     -------
-    #     DataFrame
-
-    #     Raises
-    #     ------
-    #     KeyError
-    #         If no ``obs`` columns are registered for *role*.
-    #     """
-    #     cols = self.obs_columns_for_role(role)
-    #     if not cols:
-    #         raise KeyError(
-    #             f"No obs columns with role {role!r} in {self.name!r}.\n"
-    #             f"Available roles: {sorted(self.obs_roles_present())}"
-    #         )
-    #     available = [c for c in cols if c in self.adata.obs.columns]
-    #     return self.adata.obs[available]
-
-    # # ------------------------------------------------------------------
-    # # var helpers
-    # # ------------------------------------------------------------------
-
-    # def var_columns_for_role(self, role: str) -> list[str]:
-    #     """Return all ``var`` column names assigned to *role*."""
-    #     return [col for col, r in self.var_roles.items() if r == role]
-
-    # def var_roles_present(self) -> set[str]:
-    #     """Return the set of distinct roles registered for ``var``."""
-    #     return set(self.var_roles.values())
-
-    # def var_view(self, role: str) -> DataFrame:
-    #     """Return a DataFrame of ``var`` columns that have the given *role*.
-
-    #     Parameters
-    #     ----------
-    #     role : str
-    #         Semantic role to filter for, e.g. ``"annotation"``, ``"feature_selection"``.
-
-    #     Returns
-    #     -------
-    #     DataFrame
-
-    #     Raises
-    #     ------
-    #     KeyError
-    #         If no ``var`` columns are registered for *role*.
-    #     """
-    #     cols = self.var_columns_for_role(role)
-    #     if not cols:
-    #         raise KeyError(
-    #             f"No var columns with role {role!r} in {self.name!r}.\n"
-    #             f"Available roles: {sorted(self.var_roles_present())}"
-    #         )
-    #     available = [c for c in cols if c in self.adata.var.columns]
-    #     return self.adata.var[available]
-
-    # # ------------------------------------------------------------------
-    # # obsm helpers
-    # # ------------------------------------------------------------------
-
-    # def obsm_keys_for_role(self, role: str) -> list[str]:
-    #     """Return ``obsm`` keys whose name is registered under *role*.
-
-    #     Convention: register obsm keys the same way as obs columns in
-    #     ``obs_roles``, e.g. ``{"X_umap": "embedding", "X_pca": "embedding"}``.
-    #     """
-    #     return [k for k, r in self.obs_roles.items() if r == role and k in self.adata.obsm]
-
-    # def matrix(self, obsm_key: str) -> ndarray:
-    #     """Return a low-dimensional embedding / matrix stored in ``obsm``.
-
-    #     Parameters
-    #     ----------
-    #     obsm_key : str
-    #         Key in ``adata.obsm``, e.g. ``"X_umap"`` or ``"X_pca"``.
-
-    #     Returns
-    #     -------
-    #     np.ndarray
-    #     """
-    #     return self.adata.obsm[obsm_key]
-
-    # # ------------------------------------------------------------------
-    # # Propagate annotation roles to derived elements
-    # # ------------------------------------------------------------------
-
-    # def propagate(
-    #     self,
-    #     obs_roles: Iterable[str] | None = None,
-    #     var_roles: Iterable[str] | None = None,
-    # ) -> tuple[dict[str, str], dict[str, str]]:
-    #     """Return ``(obs_roles, var_roles)`` dicts containing only the
-    #     *annotation* columns from this element — ready to be merged into a
-    #     derived element's role mappings.
-
-    #     Parameters
-    #     ----------
-    #     obs_roles : Iterable[str] | None
-    #         ``obs`` roles to propagate.  Defaults to :attr:`ANNOTATION_ROLES`.
-    #     var_roles : Iterable[str] | None
-    #         ``var`` roles to propagate.  Defaults to :attr:`ANNOTATION_ROLES`.
-
-    #     Returns
-    #     -------
-    #     tuple[dict[str, str], dict[str, str]]
-    #         ``(obs_role_mapping, var_role_mapping)`` for annotation columns.
-
-    #     Examples
-    #     --------
-    #     >>> obs_r, var_r = raw.propagate()
-    #     >>> derived = AdataElement(..., obs_roles={**obs_r, "cluster": "cluster"})
-    #     """
-    #     keep_obs = frozenset(obs_roles) if obs_roles is not None else self.ANNOTATION_ROLES
-    #     keep_var = frozenset(var_roles) if var_roles is not None else self.ANNOTATION_ROLES
-    #     return (
-    #         {col: role for col, role in self.obs_roles.items() if role in keep_obs},
-    #         {col: role for col, role in self.var_roles.items() if role in keep_var},
-    #     )
-
-    # # ------------------------------------------------------------------
-    # # Convenience: filter cells / genes by role
-    # # ------------------------------------------------------------------
-
-    # def subset_obs(self, role: str) -> Any:
-    #     """Return an AnnData view filtered to cells where *role* columns are
-    #     not null/NaN.
-
-    #     Useful for e.g. restricting to annotated cells only.
-    #     """
-    #     cols = self.obs_columns_for_role(role)
-    #     if not cols:
-    #         raise KeyError(f"No obs columns with role {role!r}")
-    #     mask = self.adata.obs[cols].notna().all(axis=1)
-    #     return self.adata[mask]
-
-    # def subset_var(self, role: str, value: Any = True) -> Any:
-    #     """Return an AnnData view filtered to genes where a *role* column
-    #     equals *value* (default ``True``).
-
-    #     Useful for e.g. restricting to highly variable genes.
-    #     """
-    #     cols = self.var_columns_for_role(role)
-    #     if not cols:
-    #         raise KeyError(f"No var columns with role {role!r}")
-    #     col = cols[0]
-    #     mask = self.adata.var[col] == value
-    #     return self.adata[:, mask]
+    return ""
 
 
-def generate_element_key_name(
-    tag: ElementTag,
-    tool_name: str,
-    tool_version: str | None = None,
-    subcommand: str | None = None,
-    suffix: str | None = None,
-    **params_str: Any,
-) -> tuple[str, str]:
-    """
-    generate_element_key generates a unique key for an Element based on its tag
-    and other parameters. We want the keys to be somewhat informative for
-    debugging and provenance, but also unique and stable for caching.
+def __check_inputs(current: dict[str, Any], stored: dict[str, Any]) -> str:
+    cur_inputs = current.get("inputs", [])
+    sto_inputs = stored.get("inputs", [])
+    if cur_inputs != sto_inputs:
+        detail_lines = [
+            f"Inputs differ: ({len(cur_inputs)} current vs {len(sto_inputs)} stored)"
+        ]  # noqa: E501
+        all_paths = {inp.get("path") for inp in cur_inputs + sto_inputs}
+        for path in sorted(all_paths):
+            cur_entry = next((i for i in cur_inputs if i.get("path") == path), None)
+            sto_entry = next((i for i in sto_inputs if i.get("path") == path), None)
+            if cur_entry != sto_entry:
+                detail_lines.append(f"    path: {path!r}")
+                detail_lines.append(f"      current: {cur_entry}")
+                detail_lines.append(f"      stored:  {sto_entry}")
+        return "\n".join(detail_lines)
+    return ""
 
-    Parameters
-    ----------
-    tag : ElementTag
-        The tag associated with the element.
-    tool_version_name : str
-        The name of the tool version.
-    subcommand : str | None, optional
-        The subcommand used, by default None
-    suffix : str | None, optional
-        The suffix to append to the key, by default None
-    params : str | None, optional
-        Additional parameters to include in the key, by default None
 
-    Returns
-    -------
-    tuple[str, str]
-        The generated element key.
-    """
-    parts = [tag.default_name]
-    if subcommand:
-        parts.append(subcommand)
-    short = "_".join(parts)
-    if tool_version:
-        parts.append(tool_version)
-    if suffix:
-        parts.append(suffix)
-    for k, v in params_str.items():
-        if v is not None:
-            parts.append(f"{k}-{v}")
-    key = "_".join(parts)
-    ret = key, short
-    return ret
+def __check_artifacts(current: dict[str, Any], stored: dict[str, Any]) -> str:
+    cur_art = current.get("artifacts", {})
+    sto_art = stored.get("artifacts", {})
+    if cur_art != sto_art:
+        all_artifact_keys = set(cur_art) | set(sto_art)
+        detail_lines = ["Artifacts differ:"]
+        for k in sorted(all_artifact_keys):
+            if cur_art.get(k) != sto_art.get(k):
+                detail_lines.append(f"    [{k!r}]")
+                detail_lines.append(f"      current: {cur_art.get(k)!r}")
+                detail_lines.append(f"      stored:  {sto_art.get(k)!r}")
+        return "\n".join(detail_lines)
+    return ""
 
 
 def explain_signature_diff(
@@ -2331,66 +1696,30 @@ def explain_signature_diff(
 
     diffs: list[str] = []
 
-    # --- key ---
-    if current.get("key") != stored.get("key"):
-        diffs.append(
-            f"Keys differ:\n"
-            f"    current: {current.get('key')!r}\n"
-            f"    stored:  {stored.get('key')!r}"
-        )
+    diff = __check_key(current, stored)
+    if diff:
+        diffs.append(diff)
 
     # --- determinants ---
-    cur_det = list(current.get("determinants", []))
-    sto_det = list(stored.get("determinants", []))
-    if cur_det != sto_det:
-        diffs.append(
-            f"Determinants differ:\n"
-            f"    current: {cur_det}\n"
-            f"    stored:  {sto_det}"
-        )
+    diff = __check_determinants(current, stored)
+    if diff:
+        diffs.append(diff)
 
     # --- inputs ---
-    cur_inputs = current.get("inputs", [])
-    sto_inputs = stored.get("inputs", [])
-    if cur_inputs != sto_inputs:
-        detail_lines = [
-            f"Inputs differ: ({len(cur_inputs)} current vs {len(sto_inputs)} stored)"
-        ]  # noqa: E501
-        all_paths = {inp.get("path") for inp in cur_inputs + sto_inputs}
-        for path in sorted(all_paths):
-            cur_entry = next((i for i in cur_inputs if i.get("path") == path), None)
-            sto_entry = next((i for i in sto_inputs if i.get("path") == path), None)
-            if cur_entry != sto_entry:
-                detail_lines.append(f"    path: {path!r}")
-                detail_lines.append(f"      current: {cur_entry}")
-                detail_lines.append(f"      stored:  {sto_entry}")
-        diffs.append("\n".join(detail_lines))
+    diff = __check_inputs(current, stored)
+    if diff:
+        diffs.append(diff)
 
     # --- artifacts ---
-    cur_art = current.get("artifacts", {})
-    sto_art = stored.get("artifacts", {})
-    if cur_art != sto_art:
-        all_artifact_keys = set(cur_art) | set(sto_art)
-        detail_lines = ["Artifacts differ:"]
-        for k in sorted(all_artifact_keys):
-            if cur_art.get(k) != sto_art.get(k):
-                detail_lines.append(f"    [{k!r}]")
-                detail_lines.append(f"      current: {cur_art.get(k)!r}")
-                detail_lines.append(f"      stored:  {sto_art.get(k)!r}")
-        diffs.append("\n".join(detail_lines))
+    diff = __check_artifacts(current, stored)
+    if diff:
+        diffs.append(diff)
 
     # --- pre_sigs ---
-    cur_pre = sorted(current.get("pre_sigs", []))
-    sto_pre = sorted(stored.get("pre_sigs", []))
-    if cur_pre != sto_pre:
-        only_current = set(cur_pre) - set(sto_pre)
-        only_stored = set(sto_pre) - set(cur_pre)
-        detail_lines = ["Predecessor signatures differ:"]
-        if only_current:
-            detail_lines.append(f"    only in current: {sorted(only_current)}")
-        if only_stored:
-            detail_lines.append(f"    only in stored:  {sorted(only_stored)}")
-        diffs.append("\n".join(detail_lines))
+
+    diff = __check_pre_sigs(current, stored)
+    if diff:
+        diffs.append(diff)
 
     # --- Result ---
     if not diffs:
@@ -2496,7 +1825,7 @@ def element(
                     e = cast(R, reg.intern(e.producer))
             # mkdir parents for outputs (independent of registry)
             arts = e.artifacts
-            output_files = e.output_files
+            output_files = e.files
 
             candidates = get_candidates(arts, outputs, output_files, auto_outputs)
 

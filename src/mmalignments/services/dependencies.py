@@ -1,10 +1,18 @@
 import hashlib
 import json
+from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 
-class DynamicValue:
+@runtime_checkable
+class Signifiable(Protocol):
+
+    @cached_property
+    def signature(self) -> str: ...
+
+
+class DynamicValue(Signifiable):
     def __init__(
         self, resolver: Callable[[], Any], dependency: list[Any] | None = None
     ):
@@ -14,7 +22,7 @@ class DynamicValue:
     def resolve(self) -> Any:
         return self.resolver()
 
-    @property
+    @cached_property
     def signature(self):
         return combined_signature(function_hash(self.resolver), *self.dependency)
 
@@ -101,18 +109,27 @@ def combined_signature(*args) -> str:
     sigs = []
     for arg in args:
         if hasattr(arg, "signature"):
-            sigs.append(arg.signature)
-        elif isinstance(arg, Path):
+            sigs.append(arg.signature)  # all Signifiable
+        elif isinstance(arg, Path):  # all paths
             sigs.append(file_signature(arg))
-        elif isinstance(arg, DynamicValue):
-            sigs.append(arg.signature)
-        elif callable(arg):
+        elif callable(arg):  # Callable, runnable and functions
             sigs.append(function_hash(arg))
         elif isinstance(arg, (str, int, float, bool)):
             sigs.append(str(arg))
+        elif isinstance(arg, DynamicValue):  # all dynamic values
+            sigs.append(arg.signature)
         else:
             sigs.append(stable_hash(arg))
     return stable_hash(sigs)
+
+
+def _compute_signature(self) -> str:
+    try:
+        return stable_hash(self.signature_data)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to compute signature for {self.key!r}, signature_data: {self.signature_data!r}"
+        ) from e
 
 
 def try_cast(v: str) -> Any:

@@ -9,7 +9,7 @@ import pandas as pd  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
 
 from mmalignments.core.annotations import _VIEWS, ColumnSchema, ColumnTag, View
-from mmalignments.models.artifacts import ArtifactSet, OutputSpec, TableArtifact
+from mmalignments.models.artifacts import ArtifactSet, TableArtifact
 from mmalignments.models.elements import (
     Element,
     FileSource,
@@ -711,7 +711,7 @@ class Tables:
             tag=tag,
             default_dir=infile.parent,
             spec=output_spec,
-            index_column=index_column or first_element.primary.index_column,
+            # index_column=index_column or first_element.primary.index_column,
         )  # in another function
 
         @depends(frame_callable)
@@ -1321,3 +1321,76 @@ def filter_to_group(
         return df[df[group].isin(values)]  # type: ignore[return-value]
 
     return Morph.from_callable(__filter, view=view, params={"group": group})
+
+
+def split_sample_from_columns(
+    sample_column: str = "Sample", view: View | None = None
+) -> Morph:
+    def __split_sample(df: DataFrame) -> DataFrame:
+        df[["Library", "tmp"]] = df[sample_column].str.split("_", expand=True)
+        df[["Exon", "Replicate"]] = df["tmp"].str.split("-", expand=True)
+        df = df.drop(columns=["tmp"])
+        df = df[
+            ["mut_ID", "Sample", "Library", "Exon", "Replicate", "Count", "Frequency"]
+        ]
+        return df
+
+    return Morph.from_callable(
+        __split_sample, view=view, params={"sample_column": sample_column}
+    )
+
+
+def pivot_values(
+    *,
+    meta_columns: list[str],
+    id_vars: list[str],
+    values: list[str],
+    drop_vars: list[str] | None = None,
+    pipeline: str = "",
+    view: View | None = None,
+) -> Morph:
+    def __pivot(df: DataFrame) -> DataFrame:
+        if view is not None:
+            selected_columns = ColumnTag.select_from_view(df.columns.to_list(), view)
+            if selected_columns:
+                df = df[selected_columns]
+
+        # remove columns that should not participate in the pivot
+        if drop_vars:
+            df = df.drop(columns=drop_vars, errors="ignore")
+
+        # combine identifier columns into one sample id
+        sample_ids = df[id_vars].astype(str).agg("_".join, axis=1)
+
+        df = df.assign(__sample_id=sample_ids)
+
+        result = df.pivot(
+            index=meta_columns,
+            columns="__sample_id",
+            values=values,
+        ).sort_index(axis=1, level=[1, 0])
+
+        # flatten MultiIndex columns
+        new_columns = []
+
+        for value_name, sample_id in result.columns:
+            if pipeline:
+                new_columns.append(f"{value_name} ({sample_id}) [{pipeline}]")
+            else:
+                new_columns.append(f"{value_name} ({sample_id})")
+
+        result.columns = new_columns
+
+        return result.reset_index()
+
+    return Morph.from_callable(
+        __pivot,
+        view=view,
+        params={
+            "meta_columns": meta_columns,
+            "id_vars": id_vars,
+            "drop_vars": drop_vars,
+            "values": values,
+            "pipeline": pipeline,
+        },
+    )

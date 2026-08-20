@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
 
-from mmalignments.services.io import read_frame, write_frame
+from mmalignments.services.io import parents, read_frame, write_frame
 
 
 def _format_int(value: int) -> str:
@@ -86,100 +86,153 @@ def _read_labels(frame: DataFrame) -> tuple[str, ...]:
     return tuple(labels)
 
 
-def _assignment_rows(frame: DataFrame) -> DataFrame:
-    rows: list[dict[str, object]] = []
+def _empty_assignment_summary() -> DataFrame:
+    return DataFrame(
+        columns=[
+            "read",
+            "sample",
+            "barcode_type",
+            "matched_barcode",
+            "assigned_count",
+            "read_total",
+            "share_of_read",
+            "mean_edit_distance",
+            "min_edit_distance",
+        ]
+    )
 
-    for read_label in _read_labels(frame):
-        sample_column = f"Sample ({read_label})"
+
+def _sampleadapters_summary_usecols(column_name: str) -> bool:
+    needed_columns = {
+        f"{prefix} ({read_label})"
+        for read_label in ("R1", "R2")
+        for prefix in (
+            "Assigned",
+            "Best",
+            "Count",
+            "Edit distance",
+            "Matched barcode",
+        )
+    }
+    return column_name in needed_columns
+
+
+def _assignment_summary(frame: DataFrame) -> DataFrame:
+    summaries = []
+
+    read_labels = _read_labels(frame)
+
+    for read_label in read_labels:
+        assigned_column = f"Assigned ({read_label})"
         count_column = f"Count ({read_label})"
         best_column = f"Best ({read_label})"
         distance_column = f"Edit distance ({read_label})"
         barcode_column = f"Matched barcode ({read_label})"
-        prefix_column = f"Prefix match length ({read_label})"
-        pattern_column = f"Match pattern ({read_label})"
 
-        if sample_column not in frame.columns or count_column not in frame.columns:
+        if assigned_column not in frame.columns or count_column not in frame.columns:
             continue
 
-        classified = frame[frame[sample_column].fillna("unknown") != "unknown"]
-        for _, row in classified.iterrows():
-            count = row.get(count_column)
-            sample = row.get(sample_column)
-            if pd.isna(count) or pd.isna(sample):
-                continue
+        assigned = frame[assigned_column]
 
-            best = str(row.get(best_column, ""))
-            barcode_type = best.split(":", 1)[0] if ":" in best else "unknown"
+        counts = pd.to_numeric(frame[count_column], errors="coerce")
 
-            rows.append(
-                {
-                    "read": read_label,
-                    "sample": str(sample),
-                    "barcode_type": barcode_type,
-                    "matched_barcode": str(row.get(barcode_column, "")),
-                    "count": float(count),
-                    "edit_distance": float(row.get(distance_column, 0) or 0),
-                    "prefix_match_length": float(row.get(prefix_column, 0) or 0),
-                    "match_pattern": str(row.get(pattern_column, "")),
-                    "best": best,
-                }
-            )
+        mask = assigned.notna() & assigned.ne("unknown") & counts.notna()
 
-    columns = [
-        "read",
-        "sample",
-        "barcode_type",
-        "matched_barcode",
-        "count",
-        "edit_distance",
-        "prefix_match_length",
-        "match_pattern",
-        "best",
-    ]
-    return DataFrame(rows, columns=columns)
+        if not mask.any():
+            continue
 
+        idx = mask[mask].index
 
-def _assignment_summary(frame: DataFrame) -> DataFrame:
-    assignments = _assignment_rows(frame)
-    if assignments.empty:
-        return DataFrame(
-            columns=[
-                "read",
-                "sample",
-                "barcode_type",
-                "matched_barcode",
-                "assigned_count",
-                "read_total",
-                "share_of_read",
-                "mean_edit_distance",
-                "min_edit_distance",
-            ]
+        # Nur relevante Zeilen kopieren
+        sample = assigned.loc[idx].astype(str)
+        count = counts.loc[idx].astype(float)
+
+        if best_column in frame:
+            best = frame.loc[idx, best_column].fillna("").astype(str)
+        else:
+            best = pd.Series("", index=idx)
+
+        if barcode_column in frame:
+            barcode = frame.loc[idx, barcode_column].fillna("").astype(str)
+        else:
+            barcode = pd.Series("", index=idx)
+
+        if distance_column in frame:
+            distance = pd.to_numeric(
+                frame.loc[idx, distance_column], errors="coerce"
+            ).fillna(0)
+        else:
+            distance = pd.Series(0.0, index=idx)
+
+        # Barcode-Typ schneller extrahieren
+        barcode_type = best.str.partition(":")[0]
+        barcode_type = barcode_type.where(
+            best.str.contains(":", regex=False), "unknown"
         )
 
-    summary = assignments.groupby(
-        ["read", "sample", "barcode_type", "matched_barcode"],
-        dropna=False,
-        as_index=False,
-    ).agg(
-        assigned_count=("count", "sum"),
-        mean_edit_distance=("edit_distance", "mean"),
-        min_edit_distance=("edit_distance", "min"),
+        classified = pd.DataFrame(
+            {
+                "read": read_label,
+                "sample": sample.values,
+                "barcode_type": barcode_type.values,
+                "matched_barcode": barcode.values,
+                "count": count.values,
+                "edit_distance": distance.values,
+            }
+        )
+
+        summaries.append(
+            classified.groupby(
+                [
+                    "read",
+                    "sample",
+                    "barcode_type",
+                    "matched_barcode",
+                ],
+                as_index=False,
+                dropna=False,
+            ).agg(
+                assigned_count=("count", "sum"),
+                mean_edit_distance=("edit_distance", "mean"),
+                min_edit_distance=("edit_distance", "min"),
+            )
+        )
+
+    if not summaries:
+        return _empty_assignment_summary()
+
+    summary = pd.concat(
+        summaries,
+        ignore_index=True,
     )
-    summary["read_total"] = summary.groupby("read", dropna=False)[
-        "assigned_count"
-    ].transform("sum")
+
+    summary["read_total"] = summary.groupby("read")["assigned_count"].transform("sum")
+
     summary["share_of_read"] = summary["assigned_count"] / summary[
         "read_total"
     ].replace(0, pd.NA)
 
     summary["assigned_count"] = summary["assigned_count"].round().astype(int)
+
     summary["read_total"] = summary["read_total"].round().astype(int)
+
     summary["mean_edit_distance"] = summary["mean_edit_distance"].round(3)
+
     summary["min_edit_distance"] = summary["min_edit_distance"].round().astype(int)
 
     return summary.sort_values(
-        by=["read", "assigned_count", "sample", "barcode_type"],
-        ascending=[True, False, True, True],
+        [
+            "read",
+            "assigned_count",
+            "sample",
+            "barcode_type",
+        ],
+        ascending=[
+            True,
+            False,
+            True,
+            True,
+        ],
     )
 
 
@@ -309,7 +362,7 @@ def _styled_table_block(frame: DataFrame, *, bar_column: str | None = None) -> s
             formatters[">=2 mismatches %"] = "{:.1%}"
         if "Mean edit distance" in frame.columns:
             formatters["Mean edit distance"] = "{:.3f}"
-        styler = styler.format(formatters)
+        styler = styler.format(formatters)  # type: ignore[arg-type]
 
     return styler.to_html()
 
@@ -390,7 +443,7 @@ def _sampleadapters_qmd(table_path: Path, frame: DataFrame) -> str:
 
 def render_quarto_html(qmd_text: str, outfile: Path) -> Path:
     outfile = outfile.resolve()
-    outfile.parent.mkdir(parents=True, exist_ok=True)
+    parents(outfile)
     to_render = outfile.with_suffix(".report.qmd")
     with to_render.open("w", encoding="utf-8") as f:
         f.write(qmd_text)
@@ -420,12 +473,14 @@ def write_sampleadapters_report(
 ) -> Path:
     table_path = table_path.resolve()
     report_path = outfile if outfile is not None else table_path.with_suffix(".html")
-    frame = read_frame(table_path)
-    qmd_text = _sampleadapters_qmd(table_path, frame)
-    render_quarto_html(qmd_text, report_path)
+    if summary_outfile is None:
+        return report_path
 
-    if summary_outfile is not None:
-        summary_frame = _assignment_summary(frame)
-        write_frame(summary_frame, summary_outfile, index=False)
+    frame = read_frame(table_path, usecols=_sampleadapters_summary_usecols)
+    # qmd_text = _sampleadapters_qmd(table_path, frame)
+    # render_quarto_html(qmd_text, report_path)
+
+    summary_frame = _assignment_summary(frame)
+    write_frame(summary_frame, summary_outfile, index=False)
 
     return report_path

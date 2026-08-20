@@ -587,8 +587,15 @@ class HBarPlotState(PlotState):
     sidebar_group = "Layer"
 
     bar_color = param.Color(default="#1f77b4", label="Bar Color")
+
+    # a appearance
     opacity = param.Number(default=1.0, bounds=(0.0, 1.0), label="Opacity")
     top = param.Integer(default=10, bounds=(-100, 100), label="Top N")
+    orientation = param.Selector(
+        default="h",
+        objects=["h", "v"],
+        label="Orientation",
+    )
     # barmode = param.Selector(
     #     default="group",
     #     objects=["relative", "group", "overlay"],
@@ -605,8 +612,8 @@ class HorizontalBarPlot(BasePlot):
     ROLE_SPECS = {
         "x": RoleSpec(name="x", dtype="continuous", description="Value axis"),
         "y": RoleSpec(name="y", dtype="categorical", description="Category axis"),
-        "error_x": RoleSpec(
-            name="error_y",
+        "error": RoleSpec(
+            name="error",
             dtype="continuous",
             required=False,
             description="Error bar values",
@@ -631,14 +638,20 @@ class HorizontalBarPlot(BasePlot):
         self,
         df: pd.DataFrame,
         layer: PlotLayer,
+        view: LayerStateView,
         state: HBarPlotState,
         processor: TraceProcessor,
         fig=None,
     ) -> go.Figure:
         roles = layer.roles
         kwargs = {}
+        x = view[roles["x"]]
+        y = view[roles["y"]]
+        orientation = view["orientation"]
+        color = view[roles["color"]]
+        error = view[roles["error"]] if "error" in roles else None
         if "color" in roles:
-            kwargs["color"] = roles["color"]
+            kwargs["color"] = color
             color_map = layer.color_maps.get("color")
             if color_map:
                 kwargs["color_discrete_map"] = color_map
@@ -646,15 +659,18 @@ class HorizontalBarPlot(BasePlot):
             kwargs["hover_data"] = layer.hover
         new_fig = px.bar(
             df,
-            x=roles["x"],
-            y=roles["y"],
-            orientation="h",
-            error_x=roles.get("error_x"),
+            x=x,
+            y=y,
+            orientation=orientation,
+            error_x=error if orientation == "h" else None,
+            error_y=error if orientation == "v" else None,
             **kwargs,
         )
         if "color" not in roles:
             new_fig.update_traces(marker_color=state.bar_color)
-        new_fig.update_traces(opacity=state.opacity)
+        for param in state.param:
+            print(param)
+        new_fig.update_traces(opacity=view["opacity"])
         new_fig = processor.apply(new_fig, state, self.trace_capabilities)
         return _merge(fig, new_fig)
 
@@ -1022,7 +1038,6 @@ class GSEADotplotState(DynamicPlotState):
         label="Select on",
     )
 
-
     top_x = param.Integer(default=20, bounds=None, label="Top X Terms")
     # fdr_metric = param.Selector(
     #     default="FDR q-val",
@@ -1091,10 +1106,10 @@ class GSEADotplotState(DynamicPlotState):
 class GSEADotplotPlot(BasePlot):
 
     ROLE_SPECS = {
-        "x": RoleSpec(name="x", dtype="categorical", description="Category (e.g. condition)"),
-        "y": RoleSpec(
-            name="y", dtype="categorical", description="Gene set or term"
+        "x": RoleSpec(
+            name="x", dtype="categorical", description="Category (e.g. condition)"
         ),
+        "y": RoleSpec(name="y", dtype="categorical", description="Gene set or term"),
         "size": RoleSpec(
             name="size", dtype="continuous", description="Gene ratio or count"
         ),
@@ -1118,7 +1133,8 @@ class GSEADotplotPlot(BasePlot):
         layer: PlotLayer,
         view: LayerStateView,
         state: Parameterized,
-        processor, fig=None
+        processor,
+        fig=None,
     ) -> go.Figure:
 
         roles = layer.roles
@@ -1160,7 +1176,7 @@ class GSEADotplotPlot(BasePlot):
             range_color=(df[color].min(), df[color].max()),
             size_max=size_max,
             title="GSEA",
-            category_orders={x:analysis_order},
+            category_orders={x: analysis_order},
             **kwargs,
         )
         marker_x = [0.1, 0.25, 0.5, 1]
@@ -1194,7 +1210,7 @@ class GSEADotplotPlot(BasePlot):
                 "y": 0.4,
                 "thickness": 18,
                 "yanchor": "middle",
-                "outlinewidth":0
+                "outlinewidth": 0,
             },
         )
         new_fig.update_xaxes(
@@ -1232,10 +1248,9 @@ class GSEADotplotPlot(BasePlot):
             uniformtext_mode="hide",
             showlegend=view_colorbar,
             yaxis={"tickangle": y_tickangle},
-            margin={"r":180},
-            legend={'itemsizing': 'trace', 'groupclick': 'toggleitem'}
+            margin={"r": 180},
+            legend={"itemsizing": "trace", "groupclick": "toggleitem"},
         )
-
 
         return _merge(fig, new_fig)
 
@@ -1275,13 +1290,29 @@ class GSEAScatterPlotState(DynamicPlotState):
     )
     size = param.Selector(
         default="NES",
-        objects=["NES", "ES", "FDR q-val", "FWER p-val", "NOM p-val", "Leading Edge %", "Size"],
+        objects=[
+            "NES",
+            "ES",
+            "FDR q-val",
+            "FWER p-val",
+            "NOM p-val",
+            "Leading Edge %",
+            "Size",
+        ],
         doc="Size of the points in the scatter plot, based on the selected metric.",
         label="Size by",
     )
     color = param.Selector(
         default="NES",
-        objects=["NES", "ES", "FDR q-val", "FWER p-val", "NOM p-val", "Leading Edge %", "Size"],
+        objects=[
+            "NES",
+            "ES",
+            "FDR q-val",
+            "FWER p-val",
+            "NOM p-val",
+            "Leading Edge %",
+            "Size",
+        ],
         doc="Color of the points in the scatter plot, based on the selected metric.",
         label="Color by",
     )
@@ -1369,10 +1400,10 @@ class GSEAScatterPlotState(DynamicPlotState):
 class GSEAScatterPlot(BasePlot):
 
     ROLE_SPECS = {
-        "x": RoleSpec(name="x", dtype="categorical", description="Category (e.g. condition)"),
-        "y": RoleSpec(
-            name="y", dtype="categorical", description="Gene set or term"
+        "x": RoleSpec(
+            name="x", dtype="categorical", description="Category (e.g. condition)"
         ),
+        "y": RoleSpec(name="y", dtype="categorical", description="Gene set or term"),
         "size": RoleSpec(
             name="size", dtype="continuous", description="Gene ratio or count"
         ),
@@ -1396,7 +1427,8 @@ class GSEAScatterPlot(BasePlot):
         layer: PlotLayer,
         view: LayerStateView,
         state: Parameterized,
-        processor, fig=None
+        processor,
+        fig=None,
     ) -> go.Figure:
 
         roles = layer.roles
@@ -1443,8 +1475,8 @@ class GSEAScatterPlot(BasePlot):
             yaxis={"tickangle": y_tickangle},
         )
 
-
         return _merge(fig, new_fig)
+
 
 ################################################################################
 # Barplot State
@@ -1471,7 +1503,6 @@ class GSEABarplotState(DynamicPlotState):
             from_result=False,
             objects=[],
         ),
-
     ]
     data_select = param.ListSelector(
         default=[],
@@ -1550,7 +1581,15 @@ class GSEABarplotState(DynamicPlotState):
 
     bar_color = param.Selector(
         default="Analysis",
-        objects=["Analysis", "Leading Edge %", "Size", "NES", "ES", "FDR q-val", "FWER p-val"],
+        objects=[
+            "Analysis",
+            "Leading Edge %",
+            "Size",
+            "NES",
+            "ES",
+            "FDR q-val",
+            "FWER p-val",
+        ],
         label="Color by",
     )
     orientation = param.Selector(
@@ -1593,10 +1632,10 @@ class GSEABarplotState(DynamicPlotState):
 class GSEABarplotPlot(BasePlot):
 
     ROLE_SPECS = {
-        "x": RoleSpec(name="x", dtype="categorical", description="NES or enrichment score"),
-        "y": RoleSpec(
-            name="y", dtype="continuous", description="Gene set"
+        "x": RoleSpec(
+            name="x", dtype="categorical", description="NES or enrichment score"
         ),
+        "y": RoleSpec(name="y", dtype="continuous", description="Gene set"),
         "color": RoleSpec(name="color", dtype="categorical", required=False),
     }
 
@@ -1614,7 +1653,8 @@ class GSEABarplotPlot(BasePlot):
         layer: PlotLayer,
         view: LayerStateView,
         state: Parameterized,
-        processor, fig=None
+        processor,
+        fig=None,
     ) -> go.Figure:
 
         roles = layer.roles

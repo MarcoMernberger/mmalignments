@@ -261,6 +261,25 @@ def write_fasta(path: Path, sequences: dict[str, str]) -> None:
             f.write(f">{name}\n{seq}\n")
 
 
+def write_fasta_from_list(path: Path, names: list[str], sequences: list[str]) -> None:
+    """
+    Write sequences to a FASTA file.
+
+    Parameters
+    ----------
+    path : Path
+        The path to the output FASTA file.
+    names : list[str]
+        A list of sequence names.
+    sequences : list[str]
+        A list of sequences corresponding to the names.
+    """
+    parents(path)
+    with open(path, "w") as f:
+        for name, seq in zip(names, sequences):
+            f.write(f">{name}\n{seq}\n")
+
+
 def write_frames(
     df: DataFrame,
     paths: Iterable[Path],

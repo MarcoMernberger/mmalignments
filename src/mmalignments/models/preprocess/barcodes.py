@@ -11,9 +11,6 @@ from pandas import DataFrame  # type: ignore[import]
 
 from mmalignments.models.artifacts import (
     ArtifactSet,
-    FileArtifact,
-    FileSpec,
-    OutputSpec,
     TableArtifact,
 )
 from mmalignments.models.elements import (
@@ -27,12 +24,16 @@ from mmalignments.models.elements import (
 from mmalignments.models.externals import Runnable
 from mmalignments.models.reports import write_sampleadapters_report
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
     Omics,
-    PartialElementTag,
     Stage,
     State,
+)
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
+    FileSpec,
+    OutputSpec,
     from_prior,
 )
 from mmalignments.services.genomic import (
@@ -109,7 +110,7 @@ def uniqueness(
         tag.default_name,
         Path("cache/barcodes"),
         ext="tsv",
-    ).merge(outspec)
+    ).patch(outspec)
     outfile = spec.path()
     pres = source.pres if isinstance(source, FileSource) else (source,)
     pres += genomic.pres if isinstance(genomic, FileSource) else (genomic,)
@@ -139,7 +140,6 @@ def uniqueness(
         artifacts=artifacts,
         determinants=determinants,
         pres=pres,
-        name=name,
     )
 
 
@@ -148,12 +148,12 @@ def sampleadapters(
     source: Element | FastqSource,
     barcodes: Element | FileSource | None = None,
     *,
-    start_length: int = 25,
+    start_length: int = 18,
     sample_size: int = 50000,
     forward_col: list[str] | None = ["start_barcode"],
     reverse_col: list[str] | None = ["end_barcode"],
     sample_col: str = "sample",
-    max_edit_distance: int = 8,
+    max_edit_distance: int = 2,
     min_count: int = 1,
     leven: bool = False,
     tag: PartialElementTag | ElementTag | None = None,
@@ -213,23 +213,21 @@ def sampleadapters(
         method=Method.CUSTOM,
         state=State.PREPROCESS,
         omics=Omics.DNA,
-        param="sampleadapters",
+        param="barcodes",
     )
     r1 = fastq.r1
     r2 = fastq.r2  # may be None
     spec = OutputSpec(
         tag.default_name,
-        Path("cache/barcodes"),
+        Path("results/barcodes"),
         ext="tsv",
-    ).merge(outspec)
+    ).patch(outspec)
     outfile = spec.path()
     pres = source.pres if isinstance(source, FastqSource) else (source,)
     barcode_path = None
     if barcodes is not None:
         barcode_path = barcodes.artifacts.primary.resolve()
-        pres += (
-            barcodes.pres if isinstance(barcodes, FileSource) else (barcodes,)
-        )
+        pres += barcodes.pres if isinstance(barcodes, FileSource) else (barcodes,)
 
     determinants = (
         str(start_length),
@@ -268,7 +266,6 @@ def sampleadapters(
         artifacts=artifacts,
         determinants=determinants,
         pres=pres,
-        name=name,
     )
 
 
@@ -289,27 +286,35 @@ def sampleadapters_report(
     tag = from_prior(
         source.tag,
         tag,
-        root=source.root,
         stage=Stage.SUMMARY,
         method=Method.CUSTOM,
         state=State.REPORT,
         omics=Omics.DNA,
-        param="sampleadapters_report",
+        param="barcodes_report",
     )
     spec = OutputSpec(
         tag.default_name,
-        Path("cache/barcodes"),
-        ext="html",
-    ).merge(outspec)
+        Path("results/barcodes"),
+        ext="tsv",
+    ).patch(outspec)
     spec = spec.add_output(
-        "tsv",
-        FileSpec(spec.stem or tag.default_name, "tsv"),
+        "html",
+        FileSpec(spec.stem or tag.default_name, "html"),
     )
-    report_path = spec.path()
-    summary_path = spec.files["tsv"]
+    summary_path = spec.path()
+    report_path = spec.files["html"]
 
     pres = source.pres if isinstance(source, FileSource) else (source,)
+
     def __call() -> Path:
+        print(
+            "report_path",
+            report_path,
+            "summary_path",
+            summary_path,
+            "table_path",
+            table_path,
+        )
         return write_sampleadapters_report(
             table_path,
             report_path,
@@ -329,10 +334,11 @@ def sampleadapters_report(
         "barcodes",
         subcommand="sampleadapters_report",
     )
+
     artifacts = ArtifactSet(
-        FileArtifact(report_path),
+        TableArtifact(summary_path),
         primary_name=spec.ext,
-        tsv=TableArtifact(summary_path),
+        # tsv=TableArtifact(report_path),
     )
     return Element(
         key,
@@ -341,7 +347,6 @@ def sampleadapters_report(
         artifacts=artifacts,
         determinants=(),
         pres=pres,
-        name=name,
     )
 
 
@@ -495,10 +500,11 @@ def _classify_sequence(
     candidates: list[tuple[str, str, str]],
     max_edit_distance: int,
     distance_func: Callable[[str, str, int | None], int],
-) -> tuple[str, int, str, str, int, str]:
+) -> tuple[str, str, int, str, str, int, str]:
 
     if not candidates:
         return (
+            "unknown",
             "unknown",
             -1,
             "unknown",
@@ -509,8 +515,9 @@ def _classify_sequence(
 
     best_sample = "unknown"
     best_col = "unknown"
+    classified_sample = "unknown"
     best_barcode = ""
-    best_distance = max_edit_distance + 1
+    best_distance = len(sequence) + 1
 
     for sample_name, barcode_col, barcode in candidates:
         distance = distance_func(
@@ -524,16 +531,18 @@ def _classify_sequence(
             best_sample = sample_name
             best_col = barcode_col
             best_barcode = barcode
+            if best_distance <= max_edit_distance:
+                classified_sample = best_sample
 
-    if best_distance > max_edit_distance:
-        return (
-            "unknown",
-            -1,
-            "unknown",
-            "",
-            0,
-            "",
-        )
+    # if best_distance > max_edit_distance:
+    #     return (
+    #         "unknown",
+    #         -1,
+    #         "unknown",
+    #         "",
+    #         0,
+    #         "",
+    #     )
 
     prefix_length = longest_common_prefix(
         sequence,
@@ -546,6 +555,7 @@ def _classify_sequence(
     )
 
     return (
+        classified_sample,
         best_sample,
         best_distance,
         f"{best_col}:{best_sample}:{best_barcode}",
@@ -562,11 +572,14 @@ def _classify_row_with_threshold(
     max_edit_distance: int,
     min_count: int,
     distance_func: Callable[[str, str, int | None], int],
-) -> tuple[str, int, str, str, int, str]:
+) -> tuple[str, str, int, str, str, int, str]:
     if count < min_count:
-        return "unknown", -1, "unknown", "", 0, ""
+        return "unknown", "unknown", -1, "unknown", "", 0, ""
     return _classify_sequence(
-        seq, candidates, max_edit_distance, distance_func=distance_func
+        seq,
+        candidates,
+        max_edit_distance,
+        distance_func=distance_func,
     )
 
 
@@ -590,14 +603,16 @@ def _classify_column(
         ),
         axis=1,
     )
-    sample_series = matches.apply(lambda x: x[0])
-    distance_series = matches.apply(lambda x: x[1])
-    best_series = matches.apply(lambda x: x[2])
-    barcode_series = matches.apply(lambda x: x[3])
-    prefix_series = matches.apply(lambda x: x[4])
-    pattern_series = matches.apply(lambda x: x[5])
+    assigned_series = matches.apply(lambda x: x[0])
+    sample_series = matches.apply(lambda x: x[1])
+    distance_series = matches.apply(lambda x: x[2])
+    best_series = matches.apply(lambda x: x[3])
+    barcode_series = matches.apply(lambda x: x[4])
+    prefix_series = matches.apply(lambda x: x[5])
+    pattern_series = matches.apply(lambda x: x[6])
 
     return (
+        assigned_series,
         sample_series,
         distance_series,
         best_series,
@@ -622,7 +637,8 @@ def _classify_single_end_frame(
         merged_columns,
     )
     (
-        r1_sample,
+        r1_assigned,
+        r1_closest,
         r1_dist,
         r1_best,
         r1_barcode,
@@ -638,7 +654,8 @@ def _classify_single_end_frame(
         distance_func=distance_func,
     )
     classified = frame.copy()
-    classified["Sample (R1)"] = r1_sample
+    classified["Assigned (R1)"] = r1_assigned
+    classified["Closest (R1)"] = r1_closest
     classified["Edit distance (R1)"] = r1_dist
     classified["Best (R1)"] = r1_best
     classified["Matched barcode (R1)"] = r1_barcode
@@ -663,7 +680,8 @@ def _classify_paired_frame(
         list(dict.fromkeys(start_columns + end_columns)),
     )
     (
-        r1_sample,
+        r1_assigned,
+        r1_closest,
         r1_dist,
         r1_best,
         r1_barcode,
@@ -680,7 +698,8 @@ def _classify_paired_frame(
     )
 
     (
-        r2_sample,
+        r2_assigned,
+        r2_closest,
         r2_dist,
         r2_best,
         r2_barcode,
@@ -697,14 +716,16 @@ def _classify_paired_frame(
     )
     classified = frame.copy()
 
-    classified["Sample (R1)"] = r1_sample
+    classified["Assigned (R1)"] = r1_assigned
+    classified["Closest (R1)"] = r1_closest
     classified["Edit distance (R1)"] = r1_dist
     classified["Best (R1)"] = r1_best
     classified["Matched barcode (R1)"] = r1_barcode
     classified["Prefix match length (R1)"] = r1_prefix
     classified["Match pattern (R1)"] = r1_pattern
 
-    classified["Sample (R2)"] = r2_sample
+    classified["Assigned (R2)"] = r2_assigned
+    classified["Closest (R2)"] = r2_closest
     classified["Edit distance (R2)"] = r2_dist
     classified["Best (R2)"] = r2_best
     classified["Matched barcode (R2)"] = r2_barcode

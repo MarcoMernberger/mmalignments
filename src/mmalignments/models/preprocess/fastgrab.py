@@ -20,7 +20,12 @@ from tomlkit import (  # type: ignore[import]
     table,
 )
 
-from mmalignments.models.artifacts import ArtifactSet, FastqArtifact, OutputSpec
+from mmalignments.models.artifacts import (
+    ArtifactSet,
+    FastqArtifact,
+    FileSpec,
+    OutputSpec,
+)
 from mmalignments.models.elements import (
     CallSpec,
     Element,
@@ -42,7 +47,13 @@ from mmalignments.models.tags import (
     from_prior,
 )
 from mmalignments.services.dependencies import depends
-from mmalignments.services.io import concat_fastq, parents, write_fasta
+from mmalignments.services.io import (
+    concat_fastq,
+    parents,
+    write_fasta,
+    write_fasta_from_list,
+    write_frame,
+)
 from mmalignments.services.logging import current_call_to_string
 from mmalignments.services.toml import indent_regular_tables
 
@@ -284,9 +295,6 @@ class FastGrab(External):
         demultiplex_destination = demultiplex_dir or self.default_output_dir(
             sample.root
         )
-        # demultiplex_destination = Path(demultiplex_destination) / sample.root
-        # forward_primer, reverse_primer = primers or (None, None)
-        # Allow `template` to be a single FileElement or a sequence thereof
         pres = sample.pres
         template_sources = [template] if isinstance(template, FileSource) else template
         template_paths = []
@@ -572,7 +580,6 @@ class FastGrab(External):
         config: Element,
         *,
         names: Iterator[str] | list[str],
-        rename: Callable[[str], str] | None = None,
         tag: PartialElementTag | ElementTag | None = None,
     ) -> Element:
         """Create an Element that consolidates demultiplexed FASTQ files.
@@ -619,15 +626,13 @@ class FastGrab(External):
         fastqs = {}
 
         def check_output(
-            sample_name: str, paired: bool = True
+            full_name: str, paired: bool = True
         ) -> tuple[FastqArtifact, dict[Path, Path]]:
-            r1 = config.prefix / f"{sample_name}_R1.{config.suffix}"
-            r2 = config.prefix / f"{sample_name}_R2.{config.suffix}" if paired else None
-            r1_in = config.prefix / f"{sample_name}_read1.{config.suffix}"
+            r1 = config.prefix / f"{full_name}_R1.{config.suffix}"
+            r2 = config.prefix / f"{full_name}_R2.{config.suffix}" if paired else None
+            r1_in = config.prefix / f"{full_name}_read1.{config.suffix}"
             r2_in = (
-                config.prefix / f"{sample_name}_read2.{config.suffix}"
-                if paired
-                else None
+                config.prefix / f"{full_name}_read2.{config.suffix}" if paired else None
             )
             files_to_rename = {r1_in: r1}
             if paired:
@@ -636,12 +641,13 @@ class FastGrab(External):
 
         paths = {}
         for sample_name in names:  # type: ignore
-            artifact, files_to_rename = check_output(sample_name)
-            fastqs[sample_name] = artifact
+            full_name = f"{config.library_name}_{sample_name}"
+            artifact, files_to_rename = check_output(full_name)
+            fastqs[full_name] = artifact
             paths.update(files_to_rename)
         undetermined_name = f"{config.library_name}_undetermined"
         undetermined, _ = check_output(undetermined_name)
-        fastqs["Undetermined"] = undetermined
+        fastqs[undetermined_name] = undetermined
         undetermined_rename = (
             {"read1": undetermined.r1, "read2": undetermined.r2}
             if undetermined.paired
@@ -652,7 +658,6 @@ class FastGrab(External):
             paths=paths,
             undetermined=undetermined_rename,
             prefix=config.prefix,
-            rename=rename,
             ext=config.suffix,
         )
         return Element(
@@ -672,7 +677,6 @@ class FastGrab(External):
         paths: Mapping[Path, Path],
         undetermined: Mapping[str, Path],
         prefix: Path,
-        rename: Callable[[str], str] | None = None,
         ext: str = "fq",
     ) -> Runnable:
         """Consolidate demultiplexed FASTQ files.
@@ -802,7 +806,7 @@ class FastGrab(External):
         barcodes: TableElement | FileSource,
         *,
         name_column: str = "sample",
-        barcode_column: str = "barcode",
+        barcode_columns: list[str] = ["barcode"],
         outspec: OutputSpec | None = None,
         tag: PartialElementTag | ElementTag | None = None,
     ) -> Element:
@@ -812,7 +816,7 @@ class FastGrab(External):
             state=State.PREPROCESS,
             method=Method.FASTQGRAB,
             ext="fasta",
-            param=barcode_column,
+            param="_".join(barcode_columns),
         )
         outspec = OutputSpec(
             stem=tag.default_name,
@@ -826,7 +830,7 @@ class FastGrab(External):
             sensorfile=barcodefile,
             outfile=outfile,
             name_column=name_column,
-            barcode_column=barcode_column,
+            barcode_columns=barcode_columns,
         )
         artifacts = {
             "fasta": outfile,
@@ -842,15 +846,21 @@ class FastGrab(External):
         )
 
     def write_barcode_fasta(
-        self, sensorfile: Path, outfile: Path, name_column: str, barcode_column: str
+        self,
+        sensorfile: Path,
+        outfile: Path,
+        name_column: str,
+        barcode_columns: list[str],
     ) -> Runnable:
 
         def __run():
             df_constructs = pd.read_csv(sensorfile, sep="\t")
-            sample_barcodes = dict(
-                zip(df_constructs[name_column], df_constructs[barcode_column])
-            )
-            write_fasta(outfile, sample_barcodes)
+            names = []
+            sequences = []
+            for barcode_column in barcode_columns:
+                names.extend(df_constructs[name_column].tolist())
+                sequences.extend(df_constructs[barcode_column].tolist())
+            write_fasta_from_list(outfile, names, sequences)
 
         callspec = CallSpec(
             path=("write_barcode_fasta",),
@@ -858,7 +868,7 @@ class FastGrab(External):
                 "sensorfile": sensorfile,
                 "outfile": outfile,
                 "name_column": name_column,
-                "barcode_column": barcode_column,
+                "barcode_columns": barcode_columns,
             },
         ).render()
         return Runnable(
@@ -880,7 +890,6 @@ class FastGrab(External):
         barcodes: Callable | Element | Mapping[str, Element],
         *,
         names: Iterator[str] | list[str],
-        rename: Callable[[str], str] | None = None,
         compression: Literal["Raw", "Gzip"] = "Gzip",
         tag: PartialElementTag | ElementTag | None = None,
         # outspec: OutputSpec | None = None,
@@ -889,7 +898,7 @@ class FastGrab(External):
         filename: Path | str | None = None,
         params: Params | None = None,
         cfg: ExternalRunConfig | None = None,
-    ) -> tuple[Element, Element, Element]:
+    ) -> tuple[Element, Element, Element, Element]:
         """Configure and process a demultiplexing run in one step.
 
         This convenience method calls :meth:`configure` followed by
@@ -960,9 +969,15 @@ class FastGrab(External):
         )
         process_el = self.process(config=config_el, tag=tag)
         consolidate_el = self.consolidate(
-            process=process_el, config=config_el, rename=rename, names=names, tag=tag
+            process=process_el, config=config_el, names=names, tag=tag
         )
-        return consolidate_el, process_el, config_el
+        report_el = self.report(
+            config=config_el,
+            process=process_el,
+            consolidate=consolidate_el,
+        )
+
+        return consolidate_el, process_el, config_el, report_el
 
     def demultiplex(
         self,
@@ -971,7 +986,6 @@ class FastGrab(External):
         barcodes: Callable | Element | Mapping[str, Element],
         *,
         names: Iterator[str] | list[str],
-        rename: Callable[[str], str] | None = None,
         compression: Literal["Raw", "Gzip"] = "Gzip",
         tag: PartialElementTag | ElementTag | None = None,
         demultiplex_dir: Path | None = None,
@@ -998,10 +1012,6 @@ class FastGrab(External):
             this can be a single Element with FASTA artifact.
         names : Iterator[str] | list[str]
             List of sample names to expect in the consolidated output. All samples found in the process output are included.
-        rename : Callable[[str], str] | None
-            Optional function to rename consolidated FASTQ files. If *None*, a default
-            renaming scheme is applied that removes the "barcode_unambiguous=true_"
-            prefix and replaces "_read1" and "_read2" with "_R1" and "_R2".
         compression : Literal["Raw", "Gzip"]
             Compression method for the consolidated FASTQ files.  If *Gzip*, the files
             are compressed with gzip; if *Raw*, they are left uncompressed.
@@ -1026,11 +1036,10 @@ class FastGrab(External):
         dict[str, NextGenSample]
             Mapping of sample name to demultiplexed NextGenSample.
         """
-        consolidate_el, _, _ = self.grabfast(
+        consolidate_el, process_el, config_el, report_el = self.grabfast(
             sample=sample,
             template=template,
             barcodes=barcodes,
-            rename=rename,
             names=names,
             compression=compression,
             tag=tag,
@@ -1040,11 +1049,11 @@ class FastGrab(External):
             params=params,
             cfg=cfg,
         )
-        samples, undetermined = self.samples(consolidate_el)
+        samples, undetermined = self.samples(consolidate_el, config_el.library_name)
         return samples, undetermined
 
     def samples(
-        self, consolidate_el: Element
+        self, consolidate_el: Element, library_name: str
     ) -> tuple[dict[str, NextGenSample], NextGenSample | None]:
         """Create NextGenSampleElements for each demultiplexed sample.
 
@@ -1065,7 +1074,7 @@ class FastGrab(External):
         samples = {}
         sample_elements: dict[str, NextGenSample] = {}
         for artifact_name, artifact in consolidate_el.artifacts.items():
-            if artifact_name.startswith("Undetermined"):
+            if artifact_name.endswith("undetermined"):
                 continue  # skip undetermined files
             if not isinstance(artifact, FastqArtifact):
                 continue  # skip non-FASTQ artifacts
@@ -1088,14 +1097,17 @@ class FastGrab(External):
                 source,
                 tag=tag,
             )
-        undetermined = self.undetermined(consolidate_el)
+        undetermined = self.undetermined(consolidate_el, library_name)
         return sample_elements, undetermined
 
-    def undetermined(self, consolidate_el: Element) -> NextGenSample | None:
+    def undetermined(
+        self, consolidate_el: Element, library_name: str
+    ) -> NextGenSample | None:
         """Create a NextGenSampleElement for the undetermined reads."""
-        undetermined = consolidate_el.artifacts.get("Undetermined")
+        undetermined_name = f"{library_name}_undetermined"
+        undetermined = consolidate_el.artifacts.get(undetermined_name)
         if not undetermined:
-            logger.warning("Undetermined FASTQ files are missing; returning None")
+            raise ValueError("Undetermined FASTQ files are missing; returning None")
             return None
         root = f"{consolidate_el.root}_Undetermined"
         source = FastqSource(
@@ -1118,6 +1130,177 @@ class FastGrab(External):
                 ext="fq",
             ),
         )
+
+    @element
+    def report(
+        self,
+        config: Element,
+        process: Element,
+        consolidate: Element,
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        outspec: OutputSpec | None = None,
+    ) -> Element:
+        """Create a report Element that summarizes the demultiplexing results.
+
+        Parameters
+        ----------
+        config : Element
+            The configuration Element produced by :meth:`configure`.
+        process : Element
+            The process Element produced by :meth:`process`.
+        consolidate : Element
+            The consolidation Element produced by :meth:`consolidate`.
+
+        Returns
+        -------
+        Element
+            Element with artifacts for the summary and details TSV files.
+        """
+        tag = from_prior(
+            consolidate.tag,
+            stage=Stage.PREP,
+            method=Method.FASTQGRAB,
+            state=State.DEMULTIPLEX,
+            ext="tsv",
+        )
+        spec = OutputSpec(
+            stem=tag.default_name,
+            outdir=config.prefix,
+            ext="tsv",
+        ).merge(outspec)
+        spec = spec.add_output(
+            "details", FileSpec(tag.default_name + "_details", ext="tsv")
+        )
+        summary_file = spec.files["tsv"]
+        details_file = spec.files["details"]
+        runner = self.create_report(summary_file, details_file, config.prefix)
+        artifacts = ArtifactSet.generate(spec=spec, tag=tag)
+        key, name = self.build_element_name(tag, "demultiplex_report")
+
+        return Element(
+            key=key,
+            run=runner,
+            tag=tag,
+            artifacts=artifacts,
+            pres=(config, process, consolidate),
+            name=name,
+        )
+
+    def create_report(
+        self, summary_file: Path, details_file: Path, prefix: Path
+    ) -> Runnable:
+        def __call():
+            summary, details = demultiplexing_report(prefix)
+            write_frame(summary, summary_file)
+            write_frame(details, details_file)
+
+        callspec = CallSpec(
+            path=(
+                "FastGrab",
+                "create_report",
+            ),
+            kwargs={
+                "summary_file": summary_file,
+                "details_file": details_file,
+                "prefix": prefix,
+            },
+        )
+        runnable = Runnable(
+            __call,
+            display=callspec.render(),
+        )
+        return runnable
+
+
+def classify_reads(df: pd.DataFrame) -> pd.Series:
+    """Classify reads vectorized."""
+
+    def present(col: str) -> pd.Series:
+        if col not in df.columns:
+            return pd.Series(False, index=df.index)
+
+        return df[col].astype(str).str.strip().ne("")
+
+    has_start = present("start_barcode_in_R1_corrected")
+    has_end = present("end_barcode_in_R2_corrected")
+
+    has_start_flank = present("flank_start_R1") | present("flank_start_R2")
+
+    has_end_flank = present("flank_end_R1") | present("flank_end_R2")
+
+    has_pair = present("barcode_primer_pair")
+
+    # default
+    result = pd.Series("assigned", index=df.index)
+
+    # order matters -> apply backwards
+    result.loc[~has_pair] = "unknown_barcode_pair"
+
+    result.loc[~has_end_flank] = "missing_end_flank"
+
+    result.loc[~has_start_flank] = "missing_start_flank"
+
+    result.loc[~has_end] = "missing_end_barcode"
+
+    result.loc[~has_start] = "missing_start_barcode"
+
+    result.loc[~has_start & ~has_end] = "missing_start_and_end_barcode"
+
+    return result
+
+
+def demultiplexing_report(folder: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    folder = Path(folder)
+
+    summaries = []
+    details = []
+
+    for fn in sorted(folder.glob("*.tsv")):
+
+        df = pd.read_csv(
+            fn,
+            sep="\t",
+            keep_default_na=False,
+            dtype=str,
+        )
+
+        reasons = classify_reads(df)
+
+        counts = reasons.value_counts()
+
+        total = len(df)
+
+        summaries.append(
+            {
+                "sample": fn.stem,
+                "total_reads": total,
+                **counts.to_dict(),
+            }
+        )
+
+        details.extend(
+            {
+                "sample": fn.stem,
+                "reason": reason,
+                "reads": count,
+                "percent": 100 * count / total,
+            }
+            for reason, count in counts.items()
+        )
+
+    summary = pd.DataFrame(summaries).fillna(0).set_index("sample").astype(int)
+
+    details = (
+        pd.DataFrame(details)
+        .sort_values(
+            ["sample", "reads"],
+            ascending=[True, False],
+        )
+        .reset_index(drop=True)
+    )
+
+    return summary, details
 
 
 # ---------------------------------------------------------------------------
@@ -1276,88 +1459,88 @@ def generate_sample_iterator(
 ########################################################################################
 
 
-def _reason_from_name(name: str) -> str:
-    if "nobarcode" in name:
-        return "reason:nobarcode"
-    if "barcode_unambiguous=false" in name:
-        return "reason:ambiguous_barcode"
-    raise ValueError(f"Unexpected undetermined FASTQ file name: {name}")
+# def _reason_from_name(name: str) -> str:
+#     if "nobarcode" in name:
+#         return "reason:nobarcode"
+#     if "barcode_unambiguous=false" in name:
+#         return "reason:ambiguous_barcode"
+#     raise ValueError(f"Unexpected undetermined FASTQ file name: {name}")
 
 
-def _get_file_handle(
-    name: str,
-    undetermined_r1: Path,
-    undetermined_r2: Path | None,
-) -> Path:
-    if undetermined_r2 is None:
-        return undetermined_r1
-    if "_read1." in name or "_R1" in name:
-        return undetermined_r1
-    if "_read2." in name:
-        return undetermined_r2
-    raise ValueError(
-        f"Unexpected FASTQ file name (cannot determine read direction): {name}"
-    )
+# def _get_file_handle(
+#     name: str,
+#     undetermined_r1: Path,
+#     undetermined_r2: Path | None,
+# ) -> Path:
+#     if undetermined_r2 is None:
+#         return undetermined_r1
+#     if "_read1." in name or "_R1" in name:
+#         return undetermined_r1
+#     if "_read2." in name:
+#         return undetermined_r2
+#     raise ValueError(
+#         f"Unexpected FASTQ file name (cannot determine read direction): {name}"
+#     )
 
 
-def _merge_undetermined(
-    files: list[Path],
-    undetermined_r1: Path,
-    undetermined_r2: Path | None,
-    log_fh: TextIOWrapper,
-) -> tuple[list[Path], list[Path]]:
-    def is_undetermined(name: str) -> bool:
-        return "barcode_unambiguous=false" in name or "nobarcode" in name
+# def _merge_undetermined(
+#     files: list[Path],
+#     undetermined_r1: Path,
+#     undetermined_r2: Path | None,
+#     log_fh: TextIOWrapper,
+# ) -> tuple[list[Path], list[Path]]:
+#     def is_undetermined(name: str) -> bool:
+#         return "barcode_unambiguous=false" in name or "nobarcode" in name
 
-    successful = []
-    temporary = []
+#     successful = []
+#     temporary = []
 
-    for fq_path in files:
-        name = fq_path.name
+#     for fq_path in files:
+#         name = fq_path.name
 
-        if not is_undetermined(name):
-            successful.append(fq_path)
-            continue
+#         if not is_undetermined(name):
+#             successful.append(fq_path)
+#             continue
 
-        reason = _reason_from_name(name)
-        out_fh = _get_file_handle(name, undetermined_r1, undetermined_r2)
+#         reason = _reason_from_name(name)
+#         out_fh = _get_file_handle(name, undetermined_r1, undetermined_r2)
 
-        log_fh.write(f"Adding {name} to undetermined: {reason}\n")
-        concat_fastq(inputs=(fq_path,), output=out_fh)
-        temporary.append(fq_path)
+#         log_fh.write(f"Adding {name} to undetermined: {reason}\n")
+#         concat_fastq(inputs=(fq_path,), output=out_fh)
+#         temporary.append(fq_path)
 
-    return successful, temporary
-
-
-def _rename_successful(
-    files: list[Path],
-    rename: Callable[[str], str],
-    prefix_dir: Path,
-    log_fh: TextIOWrapper,
-) -> list[Path]:
-
-    renamed = []
-    for fq_path in files:
-        new_name = rename(fq_path.name)
-        # if "barcode_unambiguous=true" not in fq_path.name:
-        #     continue
-
-        new_path = prefix_dir / new_name
-
-        log_fh.write(f"Renaming {fq_path} to {new_name}\n")
-
-        if fq_path.exists():
-            fq_path.rename(new_path)
-        renamed.append(fq_path)
-
-    return renamed
+#     return successful, temporary
 
 
-def _cleanup(
-    files: list[Path],
-    log_fh: TextIOWrapper,
-):
-    for fq_path in files:
-        if fq_path.exists():
-            log_fh.write(f"Removing intermediate file {fq_path}\n")
-            fq_path.unlink()
+# def _rename_successful(
+#     files: list[Path],
+#     rename: Callable[[str], str],
+#     prefix_dir: Path,
+#     log_fh: TextIOWrapper,
+# ) -> list[Path]:
+
+#     renamed = []
+#     for fq_path in files:
+#         new_name = rename(fq_path.name)
+#         # if "barcode_unambiguous=true" not in fq_path.name:
+#         #     continue
+
+#         new_path = prefix_dir / new_name
+
+#         log_fh.write(f"Renaming {fq_path} to {new_name}\n")
+
+#         if fq_path.exists():
+#             fq_path.rename(new_path)
+#         renamed.append(fq_path)
+
+#     return renamed
+
+
+# def _cleanup(
+#     files: list[Path],
+#     log_fh: TextIOWrapper,
+# ):
+#     for fq_path in files:
+#         if fq_path.exists():
+#             log_fh.write(f"Removing intermediate file {fq_path}\n")
+#             fq_path.unlink()

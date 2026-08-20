@@ -30,8 +30,16 @@ import subprocess
 from pathlib import Path
 from typing import Literal, Mapping
 
-from mmalignments.models.artifacts import ArtifactSet, FastqArtifact, OutputSpec
+from mmalignments.models.artifacts import ArtifactSet, FastqArtifact
 from mmalignments.models.elements import Element, NextGenSample, element
+from mmalignments.models.overlay import (
+    OutputSpec,
+    ExternalRunConfig,
+    PartialElementTag,
+    PartialExternalRunConfig,
+    PartialOutputSpec,
+    from_prior,
+)
 from mmalignments.models.parameters import (
     ParamRegistry,
     Params,
@@ -41,17 +49,14 @@ from mmalignments.models.parameters import (
     render_value,
 )
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
-    PartialElementTag,
     Stage,
     State,
-    from_prior,
 )
 
 from ..externals import (
     External,
-    ExternalRunConfig,
+    # ExternalRunConfig,
     SubroutineIn,
     subroutine,
 )
@@ -371,10 +376,10 @@ class NGmerge(External):
         *,
         mode: str = "stitch",
         compression: Literal["Raw", "Gzip"] = "Gzip",
-        tag: PartialElementTag | ElementTag | None = None,
-        outspec: OutputSpec | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        t: PartialElementTag | None = None,
+        o: PartialOutputSpec | None = None,
+        p: Params | None = None,
+        e: PartialExternalRunConfig | None = None,
     ) -> Element:
         """Merge paired-end reads in a sample.
 
@@ -425,6 +430,16 @@ class NGmerge(External):
         Element
             Element whose artifact ``"tsv"`` is the path to the counts TSV.
         """
+        tag = from_prior(
+            sample.tag,
+            t,
+            stage=Stage.PREP,
+            method=Method.NGMERGE,
+            state=State.MERGED,
+        )
+        out = self.default_output_spec(sample.root).patch(o)
+        params = Params().update(p)
+        cfg = ExternalRunConfig().patch(e)
         if not hasattr(sample, "r1"):
             raise ValueError("Sample element must have 'r1' attribute.")
         if not hasattr(sample, "r2"):
@@ -434,15 +449,7 @@ class NGmerge(External):
 
         fastq_r1 = sample.r1
         fastq_r2 = sample.r2
-        tag = from_prior(
-            sample.tag,
-            tag,
-            stage=Stage.PREP,
-            method=Method.NGMERGE,
-            state=State.MERGED,
-        )
-        spec = self.default_output_spec(sample.root).merge(outspec)
-        output_fastq = spec.path()
+        output_fastq = out.path()
 
         runner = self.run_ngmerge(
             fastq_r1=fastq_r1,
@@ -454,7 +461,7 @@ class NGmerge(External):
             cfg=cfg,
         )
 
-        key, name = self.build_element_name(tag)
+        key = Element.generate_key(tag, "NGmerge", "merge")
         determinants = (mode,) + self.signature_determinants(params)
         inputs = (fastq_r1, fastq_r2) if fastq_r2 is not None else (fastq_r1,)
         artifacts = ArtifactSet(FastqArtifact(output_fastq), primary_name="fastq")
@@ -466,7 +473,6 @@ class NGmerge(External):
             inputs=inputs,
             artifacts=artifacts,
             pres=sample.pres,
-            name=name,
         )
         return source
 

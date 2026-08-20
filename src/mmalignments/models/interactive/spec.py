@@ -207,6 +207,7 @@ class DynamicSelectorSpec:
     objects: list[Any] = field(default_factory=lambda: [])
     names: list[str] | None = None
 
+
 class DynamicPlotState(PlotState):
     """
     Base for PlotState subclasses that need data-driven Selector objects.
@@ -223,9 +224,11 @@ class DynamicPlotState(PlotState):
 
     DYNAMIC_SELECTORS: list[DynamicSelectorSpec] = []
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LayerStateView — a namespaced view of the combined app state for one layer
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class LayerStateView:
     def __init__(self, combined, mapping):
@@ -247,6 +250,7 @@ class LayerStateView:
 
     def __getattr__(self, name):
         return self.resolve(name)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BasePlot — the plot class contract
@@ -305,7 +309,7 @@ class BasePlot:
         df: pd.DataFrame,
         layer: PlotLayer,
         layer_state_view: LayerStateView,
-        state: PlotState,   # now the combined plot state
+        state: PlotState,  # now the combined plot state
         processor: "TraceProcessor",
         fig=None,
     ) -> go.Figure:

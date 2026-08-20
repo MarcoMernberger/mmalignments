@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,7 +14,6 @@ from mmalignments.models.elements import (
     element,
     generate_element_key_name,
 )
-from mmalignments import __version__
 from mmalignments.models.externals import Runnable
 from mmalignments.models.parameters import Params
 from mmalignments.models.tags import (
@@ -126,7 +124,7 @@ class MutationalLoadReport:
 
     output_dir: Path = Path("results/report")
     name: str = "MutationalLoadReport"
-    version: str = __version__
+    version: str = "0.1.0"
 
     ############################################################################
     # Helpers
