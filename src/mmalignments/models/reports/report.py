@@ -17,11 +17,13 @@ from mmalignments.models.elements import (
 from mmalignments.models.externals import Runnable
 from mmalignments.models.parameters import Params
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
-    PartialElementTag,
     Stage,
     State,
+)
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
     from_prior,
 )
 from mmalignments.services.io import from_json, write_json
@@ -526,7 +528,7 @@ class MutationalLoadReport:
             stage=Stage.SUMMARY,
             method=Method.CUSTOM,
             state=State.REPORT,
-            param=param,
+            flag=param,
             ext="png",
         )
         out_plot_group = out_dir / tag.default_output

@@ -43,7 +43,7 @@ import pandas as pd  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
 
 from mmalignments.core.annotations import ColumnTag, View
-from mmalignments.models.artifacts import ArtifactSet, OutputSpec
+from mmalignments.models.artifacts import ArtifactSet
 from mmalignments.models.elements import (
     CallSpec,
     Element,
@@ -54,14 +54,16 @@ from mmalignments.models.elements import (
 )
 from mmalignments.models.parameters import Params
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
-    PartialElementTag,
     Stage,
     State,
-    from_prior,
 )
-from mmalignments.models.tags import PartialElementTag as PTag
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
+    from_prior,
+    OutputSpec,
+)
 from mmalignments.services.dependencies import depends
 from mmalignments.services.io import (
     concat_files,
@@ -192,7 +194,7 @@ class Gseapy:
             stage=Stage.ANALYSIS,
             method=Method.GSEA,
             state=State.ENRICHMENT,
-            param="expression",
+            flag="expression",
         )
         output_spec = output_spec or OutputSpec(
             tag.default_output,
@@ -311,7 +313,7 @@ class Gseapy:
             method=Method.GSEA,
             state=State.ENRICHMENT,
             ext="tsv",
-            param="gsea",
+            flag="gsea",
         )
         output_spec = output_spec or self.default_output_spec("gsea", tag)
         artifacts, output = ArtifactSet.generate_file_artifacts(
@@ -426,7 +428,7 @@ class Gseapy:
             method=Method.GSEA,
             state=State.ENRICHMENT,
             root=ranking.tag.root,
-            param="prerank",
+            flag="prerank",
         )
         output_spec = output_spec or self.default_output_spec("prerank", tag)
         artifacts, output = ArtifactSet.generate_file_artifacts(
@@ -445,6 +447,7 @@ class Gseapy:
             str(seed),
             str(name),
         )
+
         @depends(_run_prerank)
         def _run():
             return _run_prerank(
@@ -539,7 +542,7 @@ class Gseapy:
             method=Method.GSEA,
             state=State.ENRICHMENT,
             ext="tsv",
-            param="enrichr",
+            flag="enrichr",
         )
         output_spec = output_spec or self.default_output_spec("enrichr", tag)
         artifacts, output = ArtifactSet.generate_file_artifacts(
@@ -554,7 +557,8 @@ class Gseapy:
             str(cutoff),
             str(gene_col or ""),
         )
-        #@depends(_run_enrichr)
+
+        # @depends(_run_enrichr)
         def _run():
             return _run_enrichr(
                 gene_list_element=gene_list,
@@ -1220,7 +1224,7 @@ def _run_prerank(
         outdir=str(outdir),
         seed=seed,
         verbose=True,
-        name=name
+        name=name,
     )
     df = res.res2d
     df["Name"] = name

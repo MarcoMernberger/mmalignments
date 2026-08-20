@@ -27,7 +27,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 from pandas import DataFrame  # type: ignore[import]
 from statsmodels.stats.multitest import multipletests  # type: ignore[import]
 
-from mmalignments.models.artifacts import ArtifactSet, FileSpec, OutputSpec
+from mmalignments.models.artifacts import ArtifactSet
 from mmalignments.models.elements import Element, TableElement, element
 from mmalignments.models.parameters import (
     ParamRegistry,
@@ -39,12 +39,16 @@ from mmalignments.models.parameters import (
     render_value,
 )
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
-    PartialElementTag,
     Stage,
     State,
+)
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
     from_prior,
+    FileSpec,
+    OutputSpec,
 )
 
 from ..externals import External, ExternalRunConfig, SubroutineIn, subroutine
@@ -333,7 +337,7 @@ class Mageck(External):
         self,
         data: Element | Path | str,
         *,
-        preferred_keys: Sequence[str] | None = None
+        preferred_keys: Sequence[str] | None = None,
         # ("tsv", "count_table", "gene_summary", "path"),
     ) -> Path:
         """Resolve an input path from an Element or plain path."""
@@ -459,8 +463,7 @@ class Mageck(External):
             artifacts=artifacts,
             determinants=determinants,
             inputs=tuple(inputs),
-            pres=(list_seq,)
-            + ((count_table,) if count_table is not None else ()),
+            pres=(list_seq,) + ((count_table,) if count_table is not None else ()),
             name=name,
         )
 
@@ -548,7 +551,7 @@ class Mageck(External):
             raise ValueError("Provide exactly one of control_ids or day0_label")
 
         count_table_path = self._resolve_path(
-            counts#, preferred_keys=("count_table", "tsv", "path")
+            counts  # , preferred_keys=("count_table", "tsv", "path")
         )
 
         tag = from_prior(
@@ -566,11 +569,11 @@ class Mageck(External):
             outdir=self.default_output_dir(tag.root),
             additional_output={
                 "sgrna_summary": FileSpec("sgrna_summary", "txt"),
-            }
+            },
         ).merge(output_spec)
 
-        prefix_path = outspec.outdir / outspec.prefix   # type: ignore[union-attr]
-        gene_summary = outspec.outdir / f"{outspec.prefix}.gene_summary.txt"    # type: ignore[union-attr]
+        prefix_path = outspec.outdir / outspec.prefix  # type: ignore[union-attr]
+        gene_summary = outspec.outdir / f"{outspec.prefix}.gene_summary.txt"  # type: ignore[union-attr]
         sgrna_summary = outspec.outdir / f"{outspec.prefix}.sgrna_summary.txt"  # type: ignore[union-attr]
 
         runner = self.run_test(
@@ -582,7 +585,7 @@ class Mageck(External):
             params=params,
             cfg=cfg,
         )
-        treatment=",".join(treatment_ids)
+        treatment = ",".join(treatment_ids)
         key, name = self.build_element_name(tag, "test", treatment=treatment)
         determinants = self.signature_determinants(params, subroutine="test")
         determinants += (f"treatment_id={treatment}",)
@@ -919,7 +922,7 @@ class Mageck(External):
     ) -> Element:
         """Run ``mageck pathway`` and return pathway summary table."""
         ranking_path = self._resolve_path(gene_ranking)
-        #, preferred_keys=("gene_summary", "tsv", "path")
+        # , preferred_keys=("gene_summary", "tsv", "path")
         gmt_path = self._resolve_path(gmt_file)
         # , preferred_keys=("gmt", "path", "tsv"))
 
@@ -948,7 +951,7 @@ class Mageck(External):
             outdir=self.default_output_dir(tag.root),
         ).merge(output_spec)
 
-        prefix_path = outspec.outdir / tag.default_name   # type: ignore[union-attr]
+        prefix_path = outspec.outdir / tag.default_name  # type: ignore[union-attr]
         artifacts = ArtifactSet.generate(
             tag=tag,
             spec=outspec,
@@ -1027,7 +1030,7 @@ def calculate_onesided_fdr(
 
     def _calculate_fdr(df: DataFrame) -> DataFrame:
         df[column_name] = multipletests(df[p_column], method=method)[1]
-        return df[[column_name]]    # type: ignore[return-value]
+        return df[[column_name]]  # type: ignore[return-value]
 
     return _calculate_fdr
 

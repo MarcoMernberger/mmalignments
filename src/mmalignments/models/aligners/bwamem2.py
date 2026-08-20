@@ -479,7 +479,7 @@ class BWAMem2(External):
             state=State.MAP,
             omics=Omics.DNA,
             ext="bam",
-            param=index.root,
+            flag=index.root,
         )
         outdir = Path(outdir or self.default_aligned_dir(sample.name, index.tag.root))
         filename = filename or tag.default_output

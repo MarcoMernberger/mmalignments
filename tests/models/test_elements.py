@@ -7,13 +7,26 @@ import typing
 import re
 from pathlib import Path
 
-import pytest
+import pytest  # type: ignore[import]
 
 # We import modules through lightweight namespace package shims so these tests
 # can run in isolation, even if package-level imports elsewhere are broken.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = PROJECT_ROOT / "src"
 MMALIGNMENTS_ROOT = SRC_ROOT / "mmalignments"
+
+
+print("=== BEFORE IMPORT ===")
+print("elements in sys.modules:", "mmalignments.models.elements" in sys.modules)
+
+elements_module = importlib.import_module("mmalignments.models.elements")
+
+print("=== AFTER IMPORT ===")
+print("elements file:", elements_module.__file__)
+print("Source:", elements_module.Source)
+print("Source id:", id(elements_module.Source))
+print("Source protocol:", elements_module.Source._is_protocol)
+print("Source runtime:", elements_module.Source._is_runtime_protocol)
 
 
 def _ensure_namespace_package(name: str, path: Path) -> None:
@@ -39,6 +52,7 @@ elements_module = importlib.import_module("mmalignments.models.elements")
 registry_module = importlib.import_module("mmalignments.models.registry")
 specs_module = importlib.import_module("mmalignments.models.specs")
 tags_module = importlib.import_module("mmalignments.models.tags")
+overlay_module = importlib.import_module("mmalignments.models.overlay")
 
 ArtifactSet = artifacts_module.ArtifactSet
 FastqArtifact = artifacts_module.FastqArtifact
@@ -61,10 +75,10 @@ CallSpec = specs_module.CallSpec
 Runnable = specs_module.Runnable
 ValidationPolicy = specs_module.ValidationPolicy
 
-ElementTag = tags_module.ElementTag
+ElementTag = overlay_module.ElementTag
 Method = tags_module.Method
 Omics = tags_module.Omics
-PartialElementTag = tags_module.PartialElementTag
+PartialElementTag = overlay_module.PartialElementTag
 Stage = tags_module.Stage
 State = tags_module.State
 
@@ -369,7 +383,7 @@ def test_nextgensample_properties_via_manual_instance_wiring(
     ng = NextGenSample.__new__(NextGenSample)
     ng.source = src
     ng._artifacts = src.artifacts
-    ng._tag = src.tag.merge(PartialElementTag(root="NG"))
+    ng._tag = src.tag.patch(PartialElementTag(root="NG"))
     ng._key = "manual_key"
     ng.read_group = "RG1"
     ng.reverse_reads = True
@@ -433,7 +447,7 @@ def test_element_validate_fields_output_and_input_type_assertions(
     # We patch output_files to a bad type to hit the output assertion branch.
     monkeypatch.setattr(
         Element,
-        "output_files",
+        "files",
         property(lambda self: (123,)),
         raising=False,
     )
@@ -448,7 +462,7 @@ def test_element_validate_fields_output_and_input_type_assertions(
     # We patch output_files validly, then pass invalid input entries to hit input assertion.
     monkeypatch.setattr(
         Element,
-        "output_files",
+        "files",
         property(lambda self: (tmp_path / "ok.bam",)),
         raising=False,
     )
@@ -1128,21 +1142,24 @@ def test_path_helpers_and_candidate_selection_logic(tmp_path: Path):
     assert elements_module._looks_like_filepath(Path("file.txt")) is True
     assert elements_module._looks_like_filepath(Path("name_without_hint")) is False
 
-    # get_candidates outputs parameter branch.
+    # get_no files if there are none.
     arts = {"a": 1, "b": 2}
-    assert elements_module.get_candidates(arts, outputs="a") == [1]
-    assert elements_module.get_candidates(arts, outputs=["b", "x"]) == [2, None]
+    assert elements_module.get_actual_paths(arts, outputs=["b", "x"]) == []
 
     # get_candidates output_files branch when auto_outputs is enabled.
     out_files = [tmp_path / "x", tmp_path / "y"]
     assert (
-        elements_module.get_candidates(arts, output_files=out_files, auto_outputs=True)
+        elements_module.get_actual_paths(
+            arts, output_files=out_files, auto_outputs=True
+        )
         == out_files
     )
 
     # Fallback branch should return an empty candidate list.
     assert (
-        elements_module.get_candidates(arts, output_files=out_files, auto_outputs=False)
+        elements_module.get_actual_paths(
+            arts, output_files=out_files, auto_outputs=False
+        )
         == []
     )
 
@@ -1344,6 +1361,11 @@ def test_element_decorator_source_without_producer_skips_intern(
         @property
         def files(self):
             return ()
+
+    print("SOURCE:", Source)
+    print("IS PROTOCOL:", Source._is_protocol)
+    print("IS RUNTIME:", Source._is_runtime_protocol)
+    print("MODULE:", Source.__module__)
 
     @elements_module.element(auto_outputs=False)
     def build_dummy_source_none():

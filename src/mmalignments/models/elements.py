@@ -17,6 +17,7 @@ from typing import (
     cast,
     overload,
     runtime_checkable,
+    Protocol,
 )
 
 from mmalignments.models.data import Pairing
@@ -39,12 +40,13 @@ from .specs import CallSpec, Runnable, ValidationPolicy  # type: ignore[import]
 from .tags import (
     Method,
     Omics,
-    PartialElementTag,
     Stage,
     State,
 )
 from mmalignments.models.overlay import (
     ElementTag,
+    PartialElementTag,
+    TagType,
 )
 
 
@@ -88,7 +90,7 @@ RunType: TypeAlias = (
 
 
 @runtime_checkable
-class Prerequisite(Signifiable):
+class Prerequisite(Signifiable, Protocol):
     """Source for input files"""
 
     @cached_property
@@ -102,8 +104,13 @@ class Prerequisite(Signifiable):
     """the provenance string for this source: which steps came before?"""
 
 
+print("DEFINING SOURCE")
+print("runtime_checkable:", runtime_checkable)
+print("Protocol:", Protocol)
+
+
 @runtime_checkable
-class Source(Prerequisite):
+class Source(Prerequisite, Protocol):
     """Source for input files, not necessarily an Element."""
 
     @property
@@ -332,7 +339,7 @@ class FastqSource(Source):
         self,
         fastqs: FastqArtifact | Path | str | Mapping[str, Path],
         *,
-        tag: PartialElementTag | ElementTag | None = None,
+        tag: TagType | None = None,
         is_prefix: bool = False,
     ):
         """
@@ -354,17 +361,17 @@ class FastqSource(Source):
             False.
         """
         self._artifacts = self.normalize(fastqs, is_prefix)
-        tag = ElementTag(
+        fultag = ElementTag(
             root=self._artifacts.primary.stem,
             level=0,
             omics=Omics.DNA,
             stage=Stage.INPUT,
             method=Method.CHECK,
             state=State.RAW,
-        ).merge(tag)
-        self._tag = tag
+        ).patch(tag)
+        self._tag = fultag
         self._key = f"FastqSource:{self._tag}" + "::".join(
-            ff for ff in self.artifacts.primary
+            [str(ff) for ff in self.artifacts.primary]
         )
 
     ############################################################################
@@ -537,7 +544,7 @@ class NextGenSample(Source):
         self._key = f"{self._tag.default_name}" + "::".join(
             [str(filepath) for filepath in self._artifacts.primary]
         )
-        self._tag = self.source.tag.merge(tag).merge(
+        self._tag = self.source.tag.patch(tag).patch(
             PartialElementTag(root=root)
         )  # noqa: E501
         self.cache_dir = (
@@ -1492,7 +1499,7 @@ class FastqConcat(Element):
         output_folder: Path = Path("cache/fastq"),
         *,
         selector: type[FastqSelector] = NovogeneSelector,
-        tag: ElementTag | PartialElementTag | None = None,
+        tag: TagType | None = None,
     ):
         """
         Initialize a FastqConcat element.
@@ -1512,22 +1519,22 @@ class FastqConcat(Element):
         selector : type[FastqSelector], optional
             The selector class to use for identifying FASTQ files, by default
             NovogeneSelector
-        tag : ElementTag | PartialElementTag | None, optional
+        tag : TagType | None, optional
             An optional tag for the element, by default None
         """
         # Creates FastqArtifacts by concatenation
         self.path = Path(folder).resolve()
         self.selector = selector(self.path)
         self.output_folder = output_folder
-        tag = ElementTag(
+        fultag = ElementTag(
             root=name,
             level=0,
             omics=Omics.DNA,
             stage=Stage.INPUT,
             method=Method.CUSTOM,
             state=State.RAW,
-        ).merge(tag)
-        key = Element.generate_key(tag, "FastqConcat")
+        ).patch(tag)
+        key = Element.generate_key(fultag, "FastqConcat")
         normalized, files_to_merge = self.setup_normalization()
         artifacts = ArtifactSet(FastqArtifact(normalized["R1"], normalized.get("R2")))
         run = self.normalize(files_to_merge)
@@ -1535,7 +1542,7 @@ class FastqConcat(Element):
         super().__init__(
             key,
             run,
-            tag,
+            fultag,
             artifacts,
             pres=(),
         )  # Element
@@ -1747,6 +1754,23 @@ R = TypeVar("R", bound=Element)
 
 
 def _as_path(x: Any) -> Path | None:
+    """
+    Converts the input to a Path object if possible.
+
+    If the input is already a Path, it is returned as is.
+    If the input is a non-empty string, it is converted to a Path.
+    Otherwise, None is returned.
+
+    Parameters
+    ----------
+    x : Any
+        The input to be converted to a Path.
+
+    Returns
+    -------
+    Path | None
+        A Path object if the input can be converted, otherwise None.
+    """
     if isinstance(x, Path):
         return x
     if isinstance(x, str) and x.strip():
@@ -1755,22 +1779,60 @@ def _as_path(x: Any) -> Path | None:
 
 
 def _looks_like_filepath(p: Path) -> bool:
+    """
+    Determines if the given Path likely represents a file path.
+
+    This is a heuristic check based on the presence of directory separators
+    or a file extension.
+
+    Parameters
+    ----------
+    p : Path
+        The Path object to be checked.
+
+    Returns
+    -------
+    bool
+        True if the Path likely represents a file, False otherwise.
+    """
     s = str(p)
-    # relativ oder absolut mit "/" oder Windows "\" -> likely a path
+    # relative or absolute with "/" or Windows "\" -> likely a path
     if ("/" in s) or ("\\" in s):
         return True
-    # oder hat eine Endung -> likely a file
+    # or has a suffix -> likely a file
     if p.suffix:
         return True
     return False
 
 
-def get_candidates(
+def get_actual_paths(
     arts: Mapping[str, Any],
     outputs: str | Iterable[str] | None = None,
     output_files: Iterable[Path] | None = None,
     auto_outputs: bool = True,
-) -> list[Any]:
+) -> list[Path]:
+    """
+    Retrieves candidate artifacts based on the specified outputs and output files.
+
+    This function looks up artifacts in the provided mapping and also considers
+    output files if auto_outputs is enabled.
+
+    Parameters
+    ----------
+    arts : Mapping[str, Any]
+        The mapping of artifact names to their corresponding objects.
+    outputs : str | Iterable[str] | None, optional
+        The output keys to look for in the artifacts mapping, by default None.
+    output_files : Iterable[Path] | None, optional
+        The output files to consider if auto_outputs is enabled, by default None.
+    auto_outputs : bool, optional
+        Whether to automatically consider output files, by default True.
+
+    Returns
+    -------
+    list[Path]
+        The list of actual file paths based on the specified outputs and output files.
+    """
     if outputs is not None:
         keys = [outputs] if isinstance(outputs, str) else list(outputs)
         candidates = [arts.get(k) for k in keys]
@@ -1780,7 +1842,14 @@ def get_candidates(
         )  # your Element.output_files uses artifacts Paths
     else:
         candidates = []
-    return candidates
+    out_paths: list[Path] = []
+    for c in candidates:
+        p = _as_path(c)
+        if p is None:
+            continue
+        if _looks_like_filepath(p):
+            out_paths.append(p)
+    return out_paths
 
 
 @overload
@@ -1802,13 +1871,25 @@ def element(
     auto_outputs: bool = True,
 ) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """
-        Usable as:
-          @element
-          def builder(...): ...
-    Callable[[], CompletedProcess | None | bool | Any] | Runnable
-        or:
-          @element(outputs="bam")
-          def builder(...): ...
+    Decorator to mark a function as an element.
+
+    This decorator can be used with or without arguments. When used without arguments,
+    it simply marks the function as an element. When used with the `outputs` argument,
+    it specifies the expected output artifacts of the element.
+
+    Parameters
+    ----------
+    fn : Callable[P, R] | None, optional
+        The function to be marked as an element, by default None.
+    outputs : str | Iterable[str] | None, optional
+        The output keys to look for in the element's artifacts, by default None.
+    auto_outputs : bool, optional
+        Whether to automatically consider output files, by default True.
+
+    Returns
+    -------
+    Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]
+        The decorated function or a decorator, depending on how `element` is used.
     """
 
     def deco(func: Callable[P, R]) -> Callable[P, R]:
@@ -1827,16 +1908,7 @@ def element(
             arts = e.artifacts
             output_files = e.files
 
-            candidates = get_candidates(arts, outputs, output_files, auto_outputs)
-
-            out_paths: list[Path] = []
-            for c in candidates:
-                p = _as_path(c)
-                if p is None:
-                    continue
-                if _looks_like_filepath(p):
-                    out_paths.append(p)
-
+            out_paths = get_actual_paths(arts, outputs, output_files, auto_outputs)
             if out_paths:
                 parents(*out_paths)
 

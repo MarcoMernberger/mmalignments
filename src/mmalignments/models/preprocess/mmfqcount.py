@@ -30,14 +30,33 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Mapping
 
-import numpy as np
-import pandas as pd
-from pandas import DataFrame, Series
+import matplotlib.pyplot as plt  # type: ignore[import]
+import numpy as np  # type: ignore[import]
+import pandas as pd  # type: ignore[import]
+from matplotlib.patches import Rectangle  # type: ignore[import]
+from pandas import DataFrame, Series  # type: ignore[import]
 
+from mmalignments.core.biopython import (  # type: ignore[import]
+    analyze_read_with_predefined,
+    # build_mutation_lookup,
+    build_sequence_profile_lookup,
+    create_aligner,
+    dataframe_to_igv_bam,
+)
 from mmalignments.models.artifacts import (
     ArtifactSet,
+    TableArtifact,
+)
+from mmalignments.models.overlay import (
     FileSpec,
+    OutType,
+    ParType,
+    TagType,
+    ExtType,
+    Out,
     OutputSpec,
+    Par,
+    from_prior,
 )
 from mmalignments.models.elements import (
     CallSpec,
@@ -49,25 +68,29 @@ from mmalignments.models.elements import (
 )
 from mmalignments.models.parameters import (
     ParamRegistry,
-    Params,
     ParamSet,
     ParamSpec,
     render_value,
 )
 from mmalignments.models.tags import (
-    ElementTag,
+    # ElementTag,
     Method,
-    PartialElementTag,
+    # PartialElementTag,
     Stage,
     State,
-    from_prior,
 )
 from mmalignments.services.dependencies import function_hash
-from mmalignments.services.io import parents, read_frame, write_frames
+from mmalignments.services.io import (
+    parents,
+    read_frame,
+    save_figure,
+    write_frame,
+    write_frames,
+)
 
 from ..externals import (
     External,
-    ExternalRunConfig,
+    # ExternalRunConfig,
     Runnable,
     SubroutineIn,
     subroutine,
@@ -197,7 +220,7 @@ class MmFqCount(External):
 
         count_el = counter.count(
             sample,
-            params=Params(trim_start="ACGT", trim_length=20),
+            params=Par(trim_start="ACGT", trim_length=20),
         )
     """
 
@@ -308,10 +331,10 @@ class MmFqCount(External):
         self,
         sample: Element | NextGenSample,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outspec: OutputSpec | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
     ) -> Element:
         """Count all unique read sequences (or read pairs) in a sample.
 
@@ -328,12 +351,12 @@ class MmFqCount(External):
         sample : Element | NextGenSample
             Input sample. Both single-end and paired-end samples are handled
             automatically.
-        tag : PartialElementTag | ElementTag | None
+        tag : TagType | None
             Optional tag override.
-        outspec : OutputSpec | None
+        outspec : OutType | None
             Output specification; defaults to
             ``results/counts/<version>/<sample.name>`` with extension ``tsv``.
-        params : Params | None
+        params : ParType | None
             Trimming parameters.  Recognised keys:
 
             ``trim_start`` (str)
@@ -344,7 +367,7 @@ class MmFqCount(External):
             ``trim_length`` (int)
                 Keep at most this many bases after trimming.
 
-        cfg : ExternalRunConfig | None
+        cfg : ExtType |None
             Subprocess configuration.
 
         Returns
@@ -364,8 +387,8 @@ class MmFqCount(External):
             ext="tsv",
         )
 
-        spec = self.default_output(sample.root).merge(outspec)
-        output_file = spec.path(tag.default_name)
+        outspec = self.default_output(tag.default_name).patch(out)
+        output_file = outspec.file
 
         runner = self.run_count(
             fastq_r1=fastq_r1,
@@ -379,7 +402,7 @@ class MmFqCount(External):
         determinants = self.signature_determinants(params, subroutine="count")
         inputs = (fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,)
         pres = (sample,) if isinstance(sample, Element) else sample.pres
-        artifacts = ArtifactSet(output_file, primary_name=spec.ext)
+        artifacts = ArtifactSet(output_file, primary_name=out.ext)
         return Element(
             key,
             runner,
@@ -388,7 +411,6 @@ class MmFqCount(External):
             artifacts=artifacts,
             inputs=inputs,
             pres=pres,
-            name=name,
         )
 
     # -----------------------------------------------------------------------
@@ -402,8 +424,8 @@ class MmFqCount(External):
         fastq_r2: Path | None,
         output_file: Path,
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
     ) -> SubroutineIn:
         """Low-level wrapper for ``mmfqcount count``.
 
@@ -415,10 +437,10 @@ class MmFqCount(External):
             R2 FASTQ file (plain or gzip), or *None* for single-end.
         output_file : Path | str
             Destination path for the counts TSV.
-        params : Params | None
+        params : ParType | None
             Trimming parameters (``trim_start``, ``trim_stop``,
             ``trim_length``).
-        cfg : ExternalRunConfig | None
+        cfg : ExtType |None
             Subprocess configuration.
 
         Returns
@@ -461,10 +483,10 @@ class MmFqCount(External):
         seq_col: str = "Sequence",
         r2_col: str | None = None,
         id_col: str = "Name",
-        tag: PartialElementTag | ElementTag | None = None,
-        outspec: OutputSpec | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
     ) -> Element:
         """Match counted sequences against a predefined-sequences table.
 
@@ -493,15 +515,15 @@ class MmFqCount(External):
         id_col : str
             Column in the predefined TSV holding the sequence identifier.
             Default: ``"Name"``.
-        tag : PartialElementTag | ElementTag | None
+        tag : TagType | None
             Optional tag override.
-        outspec : OutputSpec | None
+        outspec : OutType | None
             Output specification.
-        params : Params | None
+        params : ParType | None
             Additional ``match`` parameters (``seq_col``, ``r2_col``,
             ``id_col`` can also be supplied here as ``Params`` overrides
             instead of keyword arguments).
-        cfg : ExternalRunConfig | None
+        cfg : ExtType |None
             Subprocess configuration.
 
         Returns
@@ -525,13 +547,13 @@ class MmFqCount(External):
                 f"predefined must be an Element or FileSource, got {type(predefined)}"
             )
         # Merge column settings: explicit kwargs take priority over params
-        merged_params = Params(
+        merged_params = Par(
             seq_col=seq_col,
             id_col=id_col,
             **({"r2_col": r2_col} if r2_col else {}),
         )
         if params:
-            merged_params = merged_params.override(**params.to_dict())
+            merged_params = merged_params.patch(**params.to_dict())
         tag = from_prior(
             counts.tag,
             tag,
@@ -539,7 +561,7 @@ class MmFqCount(External):
             method=Method.MMFQCOUNT,
             state=State.ANNOTATED,
         )
-        spec = self.default_output(outdir=counts_file.parent).merge(outspec)
+        spec = self.default_output(outdir=counts_file.parent).patch(outspec)
         spec = spec.add_output(
             "unmatched", FileSpec(tag.default_name + ".unmatched", ext=spec.ext)
         )
@@ -580,8 +602,8 @@ class MmFqCount(External):
         matched_tsv: Path | str,
         unmatched_tsv: Path | str,
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
     ) -> SubroutineIn:
         """Low-level wrapper for ``mmfqcount match``.
 
@@ -595,9 +617,9 @@ class MmFqCount(External):
             Output path for matched sequences.
         unmatched_tsv : Path | str
             Output path for unmatched sequences.
-        params : Params | None
+        params : ParType | None
             Match parameters (``seq_col``, ``r2_col``, ``id_col``).
-        cfg : ExternalRunConfig | None
+        cfg : ExtType |None
             Subprocess configuration.
 
         Returns
@@ -623,7 +645,7 @@ class MmFqCount(External):
         ]
 
         # Append column flags from params
-        params = params or Params()
+        params = params or Par()
         # cli_extras = self.to_cli(params, subroutine="match")
         # arguments += cli_extras
         return (
@@ -649,10 +671,10 @@ class MmFqCount(External):
         score: Callable[[Series, Series], Series] | None = None,
         keys: list[str] | None = ["R2", "Annotation"],
         filter: Callable[[pd.DataFrame], pd.DataFrame] | bool = True,
-        tag: PartialElementTag | ElementTag | None = None,
-        outspec: OutputSpec | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
         mode: str = "both",
     ) -> Element:
         """
@@ -668,7 +690,7 @@ class MmFqCount(External):
         threshold (if exclude_score is set).
 
         Parameters
-        ----------
+        ----------st du
         compare : NextGenSampleElement
             Element containing the counts TSV to compare (condition).
         against : NextGenSampleElement
@@ -689,13 +711,13 @@ class MmFqCount(External):
             the filtered score TSV. If a callable is provided, it will be called
             with the score and should return True if the sequence should be
             excluded.
-        tag : PartialElementTag | ElementTag | None
+        tag : TagType | None
             Optional tag override.
-        outspec : OutputSpec | None, optional
+        outspec : OutType | None, optional
             Optional output specification override.
-        params : Params | None, optional
+        params : ParType | None, optional
             Additional parameters, by default None
-        cfg : ExternalRunConfig | None, optional
+        cfg : ExtType |None, optional
             Runtime configuration, by default None
 
         Returns
@@ -741,7 +763,7 @@ class MmFqCount(External):
             state=State.SCORE,
             ext="tsv",
         )
-        params = Params(
+        params = Par(
             count_column="Count",
             freq_column="Frequency",
             annotation_column="Annotation",
@@ -811,11 +833,11 @@ class MmFqCount(External):
         keys: list[str] | None = ["R2", "Annotation"],
         filter: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
         mode: str = "both",
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
     ) -> Runnable:
         """Compare two count TSVs and assign a score to each sequence."""
-        params = Params(
+        params = Par(
             count_column="Count",
             freq_column="Frequency",
             annotation_column="Annotation",
@@ -929,13 +951,13 @@ class MmFqCount(External):
     #     out_tsv: Path | str,
     #     score: Callable[[Series, Series], Series],
     #     *,
-    #     params: Params | None = None,
-    #     cfg: ExternalRunConfig | None = None,
+    #     params: ParType | None = None,
+    #     cfg: ExtType |None = None,
     # ) -> Runnable:
     #     """Compare two count TSVs and assign a score to each sequence."""
     #     keys: list[str] | None = ["R2", "Annotation"]
     #     filter: Callable[[pd.DataFrame], pd.DataFrame] | None = None
-    #     params = Params(
+    #     params = Par(
     #         count_column="Count",
     #         freq_column="Frequency",
     #         annotation_column="Annotation",
@@ -1060,11 +1082,11 @@ class MmFqCount(External):
         seq_col: str = "Sequence",
         r2_col: str | None = None,
         id_col: str = "Name",
-        tag: PartialElementTag | ElementTag | None = None,
-        outspec: OutputSpec | None = None,
-        count_params: Params | None = None,
-        match_params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        count_params: ParType | None = None,
+        match_params: ParType | None = None,
+        cfg: ExtType | None = None,
     ) -> tuple[Element, Element]:
         """Count reads and immediately match against predefined sequences.
 
@@ -1082,15 +1104,15 @@ class MmFqCount(External):
             R2-sequence column for paired matching. *None* for single-end.
         id_col : str
             ID column in the predefined TSV. Default: ``"Name"``.
-        tag : PartialElementTag | ElementTag | None
+        tag : TagType | None
             Tag override (propagated to both elements).
-        outspec : OutputSpec | None
+        outspec : OutType | None
             Output specification overrides.
-        count_params : Params | None
+        count_params : ParType | None
             Trimming parameters for the ``count`` step.
-        match_params : Params | None
+        match_params : ParType | None
             Column parameters for the ``match`` step.
-        cfg : ExternalRunConfig | None
+        cfg : ExtType |None
             Subprocess configuration (shared by both steps).
 
         Returns
@@ -1123,10 +1145,10 @@ class MmFqCount(External):
         self,
         samples: Mapping[str, NextGenSample],
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outspec: OutputSpec | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
     ) -> dict[str, Element]:
         """
         samplecount is a convenience method that takes a mapping of sample names
@@ -1139,14 +1161,14 @@ class MmFqCount(External):
         ----------
         samples : Mapping[str, NextGenSample]
             A mapping of sample names to NextGenSample instances to be counted.
-        tag : PartialElementTag | ElementTag | None, optional
+        tag : TagType | None, optional
             Optional tag override applied to all count elements, by default None.
-        outspec : OutputSpec | None, optional
+        outspec : OutType | None, optional
             Output specification for all count elements, by default None. If None,
             defaults to results/counts/<version>/<sample_name> for each sample.
-        params : Params | None, optional
+        params : ParType | None, optional
             Parameters for the count method, by default None.
-        cfg : ExternalRunConfig | None, optional
+        cfg : ExtType |None, optional
             Configuration for external run, by default None.
 
         Returns
@@ -1167,6 +1189,1690 @@ class MmFqCount(External):
             count_elements[sample_name] = counted
         return count_elements
 
+    @element
+    def profile(
+        self,
+        predefined: Element | FileSource,
+        wt: Element | FileSource,
+        *,
+        id_column: str = "mut_ID",
+        sequence_column: str = "full_sequence",
+        exon_column: str = "exon",
+        profile_column: str = "profile",
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        params: ParType | None = None,
+    ) -> Element:
+        """
+        Creates mutation profile for predefined signatures later used for classification
+        of the reads.
+
+        Parameters
+        ----------
+        predefined : Element | FileSource
+            Element or file containing the predefined sequences.
+        wt : Element | FileSource
+            Element or file containing the wild-type sequence.
+        id_column : str, optional
+            Column name in the predefined TSV that contains the mutation identifiers.
+            Default is "mut_ID".
+        sequence_column : str, optional
+            Column name in the predefined TSV that contains the full sequences.
+            Default is "full_sequence".
+        exon_column : str, optional
+            Column name in the predefined TSV that contains the exon identifiers.
+            Default is "exon".
+        profile_column : str
+            Column name in the output TSV that will contain the mutation profiles.
+            Default is "profile".
+        tag : TagType | None
+            Optional tag override.
+        outspec : OutType | None, optional
+            Optional output specification override.
+        params : ParType | None, optional
+            Additional parameters, by default None
+        cfg : ExtType |None, optional
+            Runtime configuration, by default None
+
+        Returns
+        -------
+        TableElement
+            Element with the alignment results as a TSV file.
+        """
+
+        tag = from_prior(
+            predefined.tag,
+            tag,
+            stage=Stage.ANALYSIS,
+            method=Method.MMFQCOUNT,
+            state=State.MAP,
+        )
+        params = Par().update(params)
+
+        pres = ()
+        predefined_path = predefined.primary.resolve()
+        wt_path = wt.primary.resolve()
+        outfile = (
+            outspec.path(tag.default_name)
+            if outspec
+            else predefined_path.parent / f"{tag.default_name}.tsv"
+        )
+        runner = self.create_predefined_profile(
+            wt_path,
+            predefined_path,
+            outfile,
+            id_column=id_column,
+            exon_column=exon_column,
+            sequence_column=sequence_column,
+            profile_column=profile_column,
+        )
+        determinants = (id_column, sequence_column) + params.determinants()
+        key, name = self.build_element_name(
+            tag,
+            "profile",
+        )
+        artifacts = ArtifactSet(
+            TableArtifact(outfile),
+            primary_name=outfile.suffix,
+        )
+
+        return Element(
+            key,
+            runner,
+            tag=tag,
+            determinants=tuple(determinants),
+            artifacts=artifacts,
+            pres=pres,
+            name=name,
+        )
+
+    def create_predefined_profile(
+        self,
+        wt_path: Path,
+        predefined_path: Path,
+        output_path: Path,
+        id_column: str = "mut_ID",
+        exon_column: str = "exon",
+        sequence_column: str = "full_sequence",
+        profile_column: str = "profile",
+    ) -> Runnable:
+        def call():
+            predefined = read_frame(predefined_path)
+            wt = read_frame(wt_path)
+            sequence_profile_lookup = {}
+            for exon, group in wt.groupby(exon_column):
+                wt_sequence = group[sequence_column].values[0]
+                if len(group) > 1:
+                    raise ValueError(
+                        f"Multiple wild-type sequences found for exon {exon}. "
+                        "Please ensure that the wild-type sequence file contains "
+                        "only one sequence per exon."
+                    )
+                predefined_group = predefined[predefined[exon_column] == exon]
+                predefined_sequences = dict(
+                    zip(
+                        predefined_group[id_column].astype(str),
+                        predefined_group[sequence_column].astype(str),
+                    )
+                )
+                sequence_profile_lookup.update(
+                    build_sequence_profile_lookup(predefined_sequences, wt_sequence)
+                )
+            predefined[profile_column] = predefined["full_sequence"].map(
+                sequence_profile_lookup
+            )
+            write_frame(predefined, output_path)
+
+        return Runnable(
+            call,
+            display=CallSpec(
+                path=(
+                    "MmFqCount",
+                    "create_predefined_profile",
+                ),
+            ).render(),
+        )
+
+    @element
+    def aligncount(
+        self,
+        count: TableElement,
+        wt: Element | FileSource,
+        predefined: Element | FileSource,
+        exon: str,
+        *,
+        top: int = 50,
+        sequence_column: str = "full_sequence",
+        id_column: str = "mut_ID",
+        min_coverage: float = 0.8,
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        params: ParType | None = None,
+    ) -> Element:
+        """
+        Selects the top N sequences from a count table and aligns them to a
+        wild-type sequence, in order to display what sort of sequences we
+        actually have in the top N sequences. This is useful for visualizing the
+        results of our counting. If a read corresponds to a predefined sequence,
+        it will be annotated with the predefined sequence name, no alignment
+        needed.
+
+        Parameters
+        ----------
+        count : TableElement
+            Element containing the counts TSV to process.
+        wt : Element | FileSource
+            Element or file containing the wild-type sequence.
+        predefined : Element | FileSource
+            Element or file containing the predefined sequences.
+        top : int, optional
+            Number of top sequences to select. Default is 50.
+        exon : str
+            Exon to select wt sequence from. Default is "Ex5".
+        sequence_column : str, optional
+            Column name in the predefined TSV that contains the full sequences.
+            Default is "full_sequence".
+        tag : TagType | None
+            Optional tag override.
+        outspec : OutType | None, optional
+            Optional output specification override.
+        params : ParType | None, optional
+            Additional parameters, by default None
+        cfg : ExtType |None, optional
+            Runtime configuration, by default None
+        mode : str, optional
+            Mode of alignment, by default "both"
+        tag : TagType | None
+            Optional tag override.
+        outspec : OutType | None, optional
+            Optional output specification override.
+        params : ParType | None, optional
+            Additional parameters, by default None
+        cfg : ExtType |None, optional
+            Runtime configuration, by default None
+
+        Returns
+        -------
+        TableElement
+            Element with the alignment results as a TSV file.
+        """
+
+        tag = from_prior(
+            count.tag,
+            tag,
+            stage=Stage.ANALYSIS,
+            method=Method.MMFQCOUNT,
+            state=State.MAP,
+        )
+        params = Par().update(params)
+
+        pres = (count, predefined)
+        determinants = params.determinants()
+        outfile = (
+            outspec.path(tag.default_name)
+            if outspec
+            else count.file.parent / f"{tag.default_name}.tsv"
+        )
+        runner = self.align_counts(
+            outpath=outfile,
+            frame_path=count.primary.resolve(),
+            wt_path=wt.primary.resolve(),
+            exon=exon,
+            predefined_path=predefined.primary.resolve(),
+            sequence_column=sequence_column,
+            id_column=id_column,
+            min_coverage=min_coverage,
+            top=top,
+        )
+
+        key, name = self.build_element_name(
+            tag,
+            "aligncount",
+        )
+        artifacts = ArtifactSet(
+            TableArtifact(outfile),
+            primary_name=outfile.suffix,
+        )
+
+        return Element(
+            key,
+            runner,
+            tag=tag,
+            determinants=tuple(determinants),
+            artifacts=artifacts,
+            pres=pres,
+            name=name,
+        )
+
+    def align_counts(
+        self,
+        outpath: Path,
+        frame_path: Path,
+        wt_path: Path,
+        exon: str,
+        predefined_path: Path,
+        sequence_column: str = "full_sequence",
+        id_column: str = "mut_ID",
+        min_coverage: float = 0.8,
+        top: int = 50,
+    ) -> Runnable:
+
+        def call():
+            df = read_frame(frame_path)
+            if top:
+                df = df.nlargest(top, "Count")
+            wt_df = read_frame(wt_path)
+            wt = wt_df[wt_df["exon"] == exon][sequence_column].values[0]
+            predefined = read_frame(predefined_path)
+            predefined_sequences = dict(
+                zip(
+                    predefined[id_column],
+                    predefined[sequence_column],
+                )
+            )
+            aligner = create_aligner()
+            # mutation_lookup = build_mutation_lookup(predefined_sequences, wt)
+
+            results = []
+
+            for _, row in df.iterrows():
+
+                read = row["R1"]
+
+                result = analyze_read_with_predefined(
+                    read=read,
+                    wt=wt,
+                    predefined_sequences=predefined_sequences,
+                    aligner=aligner,
+                    min_coverage=min_coverage,
+                )
+
+                result["count"] = row["Count"]
+
+                # ssresult = classify_against_predefined(result, mutation_lookup)
+
+                results.append(result)
+
+            analysis_df = pd.DataFrame(results)
+
+            write_frame(analysis_df, outpath)
+
+        return Runnable(
+            call,
+            display=CallSpec(
+                path=(
+                    "MmFqCount",
+                    "align_counts",
+                ),
+                kwargs={
+                    "outpath": str(outpath),
+                    "frame_path": str(frame_path),
+                    "wt_path": str(wt_path),
+                    "exon": exon,
+                    "predefined_path": str(predefined_path),
+                    "sequence_column": sequence_column,
+                    "min_coverage": min_coverage,
+                },
+            ).render(),
+        )
+
+    @element
+    def bamaligncount(
+        self,
+        count: TableElement,
+        *,
+        reference_name: str = "WT",
+        min_mapq: int = 60,
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        params: ParType | None = None,
+    ) -> Element:
+        tag = from_prior(
+            count.tag,
+            tag,
+            stage=Stage.ANALYSIS,
+            method=Method.MMFQCOUNT,
+            state=State.PLOT,
+        )
+        outspec = Out(outdir=count.file.parent).merge(outspec)
+        params = Par().update(params)
+
+        pres = (count,)
+        determinants = params.determinants()
+        outfile = (
+            outspec.path(tag.default_name)
+            if outspec
+            else count.file.parent / f"{tag.default_name}.svg"
+        )
+
+        def run():
+            df = read_frame(count.primary.resolve())
+            return dataframe_to_igv_bam(
+                df=df,
+                output_dir=outspec.outdir or count.file.parent,
+                sample_name=tag.default_name,
+                reference_name=reference_name,
+                min_mapq=min_mapq,
+            )
+
+        key, name = self.build_element_name(
+            tag,
+            "bamaligncount",
+        )
+        bam_unsorted = (
+            outspec.outdir or count.file.parent
+        ) / f"{tag.default_name}.unsorted.bam"
+        bam = (outspec.outdir or count.file.parent) / f"{tag.default_name}.bam"
+        bai = Path(str(bam) + ".bai")
+
+        artifacts = (
+            ArtifactSet(bam, primary_name="bam")
+            .with_extra("bai", bai)
+            .with_extra("unsorted_bam", bam_unsorted)
+        )
+
+        return Element(
+            key,
+            run,
+            tag=tag,
+            determinants=tuple(determinants),
+            artifacts=artifacts,
+            pres=pres,
+            name=name,
+        )
+
+    @element
+    def plotaligncount(
+        self,
+        count: TableElement,
+        *,
+        sort_by: str = "count",
+        figsize=None,
+        show_mutation_labels: bool = True,
+        show_count: bool = True,
+        show_coverage: bool = True,
+        show_grid: bool = True,
+        show_classification: bool = True,
+        fontsize: int = 9,
+        start: int | None = None,
+        end: int | None = None,
+        show_position_labels: bool = True,
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        params: ParType | None = None,
+    ) -> Element:
+        tag = from_prior(
+            count.tag,
+            tag,
+            stage=Stage.ANALYSIS,
+            method=Method.MMFQCOUNT,
+            state=State.PLOT,
+        )
+        params = Par().update(params)
+
+        pres = (count,)
+        determinants = params.determinants()
+        outfile = (
+            outspec.path(tag.default_name)
+            if outspec
+            else count.file.parent / f"{tag.default_name}.svg"
+        )
+        runner = self.plot_read_alignments(
+            outfile=outfile,
+            analysis_df_path=count.primary.resolve(),
+            sort_by=sort_by,
+            figsize=figsize,
+            fontsize=fontsize,
+            show_mutation_labels=show_mutation_labels,
+            show_count=show_count,
+            show_classification=show_classification,
+            show_coverage=show_coverage,
+            show_position_labels=show_position_labels,
+            show_grid=show_grid,
+            start=start,
+            end=end,
+        )
+
+        key, name = self.build_element_name(
+            tag,
+            "plotaligncount",
+        )
+        artifacts = ArtifactSet(outfile, primary_name="svg")
+
+        return Element(
+            key,
+            runner,
+            tag=tag,
+            determinants=tuple(determinants),
+            artifacts=artifacts,
+            pres=pres,
+            name=name,
+        )
+
+    def plot_read_alignments(
+        self,
+        outfile: Path,
+        analysis_df_path: Path,
+        sort_by: str = "count",
+        figsize=None,
+        start: int | None = None,
+        end: int | None = None,
+        fontsize: int = 9,
+        show_mutation_labels: bool = True,
+        show_count: bool = True,
+        show_classification: bool = True,
+        show_coverage: bool = False,
+        show_position_labels: bool = True,
+        show_grid: bool = True,
+    ) -> Runnable:
+        """
+        Plot aligned reads base-by-base against the WT sequence.
+
+        Each nucleotide is displayed as a colored cell:
+
+            A = adenine
+            C = cytosine
+            G = guanine
+            T = thymine
+            - = gap/deletion
+
+        Parameters
+        ----------
+        analysis_df_path : Path
+            DataFrame containing at least:
+
+                wt
+                wt_aligned
+                read_aligned
+                count
+
+            Optional:
+
+                classification
+                coverage
+                mutation_profile
+
+        sort_by : str
+            Column used for sorting, usually "count".
+
+        start : int or None
+            First WT position to display (1-based).
+
+        end : int or None
+            Last WT position to display (1-based).
+
+        figsize : tuple or None
+            Figure size.
+
+        fontsize : int
+            Font size for nucleotide letters.
+
+        show_mutation_labels : bool
+            Annotate mutations above the corresponding base.
+
+        show_count : bool
+            Show read count.
+
+        show_classification : bool
+            Show read classification.
+
+        show_coverage : bool
+            Show coverage percentage.
+
+        show_position_labels : bool
+            Show WT coordinate labels.
+
+        Returns
+        -------
+        fig, ax
+        """
+
+        def call(
+            figsize=figsize, sort_by=sort_by, start=start, end=end, fontsize=fontsize
+        ):
+
+            df = read_frame(analysis_df_path)
+
+            if len(df) == 0:
+                raise ValueError("analysis_df is empty.")
+
+            # =========================================================
+            # Validate
+            # =========================================================
+
+            required = {
+                "wt",
+                "wt_aligned",
+                "read_aligned",
+            }
+
+            missing = required - set(df.columns)
+
+            if missing:
+                raise ValueError(f"Missing columns: {sorted(missing)}")
+
+            # =========================================================
+            # Sort
+            # =========================================================
+
+            if sort_by is not None:
+
+                if sort_by not in df.columns:
+                    raise ValueError(f"Column {sort_by!r} not found.")
+
+                df = df.sort_values(
+                    sort_by,
+                    ascending=False,
+                    kind="stable",
+                )
+
+            # =========================================================
+            # WT
+            # =========================================================
+
+            wt = str(df.iloc[0]["wt"]).upper()
+
+            wt_length = len(wt)
+
+            # User coordinates are 1-based
+            if start is None:
+                start = 1
+
+            if end is None:
+                end = wt_length
+
+            if start < 1 or end > wt_length or start > end:
+                raise ValueError(
+                    f"Invalid range: {start}-{end}. " f"WT length = {wt_length}"
+                )
+
+            # Convert to zero-based slicing
+            plot_start = start - 1
+            plot_end = end
+
+            n_positions = end - start + 1
+
+            # =========================================================
+            # Figure
+            # =========================================================
+
+            if figsize is None:
+
+                width = max(
+                    12,
+                    n_positions * 0.32,
+                )
+
+                height = max(
+                    3,
+                    (len(df) + 2) * 0.42,
+                )
+
+                figsize = (
+                    width,
+                    height,
+                )
+
+            fig, ax = plt.subplots(figsize=figsize)
+
+            # =========================================================
+            # Base colors
+            # =========================================================
+
+            base_colors = {
+                "A": "#4C78A8",
+                "C": "#59A14F",
+                "G": "#F28E2B",
+                "T": "#E15759",
+                "-": "#BDBDBD",
+                "N": "#9C9C9C",
+            }
+
+            # =========================================================
+            # Draw cells
+            # =========================================================
+
+            cell_width = 1.0
+            cell_height = 0.85
+
+            # WT is at top
+            wt_y = len(df)
+
+            # ---------------------------------------------------------
+            # WT sequence
+            # ---------------------------------------------------------
+
+            for x, base in enumerate(wt[plot_start:plot_end]):
+
+                color = base_colors.get(
+                    base,
+                    "#CCCCCC",
+                )
+
+                rect = Rectangle(
+                    (
+                        x,
+                        wt_y - cell_height / 2,
+                    ),
+                    cell_width,
+                    cell_height,
+                    facecolor=color,
+                    edgecolor="white",
+                    linewidth=0.5,
+                )
+
+                ax.add_patch(rect)
+
+                ax.text(
+                    x + 0.5,
+                    wt_y,
+                    base,
+                    ha="center",
+                    va="center",
+                    fontsize=fontsize,
+                    fontfamily="monospace",
+                    fontweight="bold",
+                    color="white",
+                )
+
+            # WT label
+            ax.text(
+                -0.5,
+                wt_y,
+                "WT",
+                ha="right",
+                va="center",
+                fontweight="bold",
+            )
+
+            # =========================================================
+            # Helper: aligned strings -> WT-position mapping
+            # =========================================================
+
+            def alignment_to_positions(
+                wt_aligned,
+                read_aligned,
+            ):
+                """
+                Convert alignment columns into WT coordinates.
+
+                Returns
+                -------
+                dict
+                    WT coordinate (0-based) ->
+                    read base / '-' / insertion information
+                """
+
+                if len(wt_aligned) != len(read_aligned):
+                    raise ValueError(
+                        "wt_aligned and read_aligned " "must have identical length."
+                    )
+
+                mapping = {}
+
+                wt_pos = 0
+
+                for wt_base, read_base in zip(
+                    wt_aligned.upper(),
+                    read_aligned.upper(),
+                ):
+
+                    # Insertion relative to WT
+                    if wt_base == "-":
+
+                        # Attach insertion to the preceding WT position
+                        if wt_pos > 0:
+                            mapping.setdefault(wt_pos - 1, {}).setdefault(
+                                "insertions", []
+                            ).append(read_base)
+
+                        continue
+
+                    # Normal WT position
+                    mapping[wt_pos] = {
+                        "wt": wt_base,
+                        "read": read_base,
+                        "insertions": [],
+                    }
+
+                    wt_pos += 1
+
+                return mapping
+
+            # =========================================================
+            # Mutation helper
+            # =========================================================
+
+            def get_mutations(row):
+
+                profile = row.get(
+                    "mutation_profile",
+                    None,
+                )
+
+                if profile is None:
+                    return []
+
+                # Current MutationProfile object
+                if hasattr(profile, "mutations"):
+                    return list(profile.mutations)
+
+                # Already a list
+                if isinstance(
+                    profile,
+                    (list, tuple),
+                ):
+                    return list(profile)
+
+                return []
+
+            # =========================================================
+            # Reads
+            # =========================================================
+
+            for i, (_, row) in enumerate(df.iterrows()):
+
+                y = len(df) - i - 1
+
+                wt_aligned = str(row["wt_aligned"]).upper()
+
+                read_aligned = str(row["read_aligned"]).upper()
+
+                mapping = alignment_to_positions(
+                    wt_aligned,
+                    read_aligned,
+                )
+
+                # -----------------------------------------------------
+                # Read label
+                # -----------------------------------------------------
+
+                label_parts = []
+
+                if show_classification:
+                    label_parts.append(
+                        str(
+                            row.get(
+                                "classification",
+                                "read",
+                            )
+                        )
+                    )
+
+                if show_coverage and "coverage" in row:
+                    if pd.notna(row["coverage"]):
+                        label_parts.append(f"{row['coverage'] * 100:.1f}%")
+
+                if show_count:
+                    label_parts.append(f"n={int(row.get('count', 1))}")
+
+                label = "  ".join(label_parts)
+
+                ax.text(
+                    -0.5,
+                    y,
+                    label,
+                    ha="right",
+                    va="center",
+                    fontsize=9,
+                )
+
+                # -----------------------------------------------------
+                # Draw bases
+                # -----------------------------------------------------
+
+                for wt_pos in range(
+                    plot_start,
+                    plot_end,
+                ):
+
+                    x = wt_pos - plot_start
+
+                    info = mapping.get(wt_pos)
+
+                    if info is None:
+                        continue
+
+                    read_base = info["read"]
+
+                    # ---------------------------------------------
+                    # Deletion
+                    # ---------------------------------------------
+
+                    if read_base == "-":
+
+                        base = "-"
+
+                    else:
+
+                        base = read_base
+
+                    color = base_colors.get(
+                        base,
+                        "#CCCCCC",
+                    )
+
+                    rect = Rectangle(
+                        (
+                            x,
+                            y - cell_height / 2,
+                        ),
+                        cell_width,
+                        cell_height,
+                        facecolor=color,
+                        edgecolor="white",
+                        linewidth=0.5,
+                    )
+
+                    ax.add_patch(rect)
+
+                    ax.text(
+                        x + 0.5,
+                        y,
+                        base,
+                        ha="center",
+                        va="center",
+                        fontsize=fontsize,
+                        fontfamily="monospace",
+                        fontweight="bold",
+                        color="white",
+                    )
+
+                    # ---------------------------------------------
+                    # Insertions
+                    # ---------------------------------------------
+
+                    insertions = info.get(
+                        "insertions",
+                        [],
+                    )
+
+                    if insertions:
+
+                        insertion_text = "".join(insertions)
+
+                        ax.text(
+                            x + 0.5,
+                            y + 0.42,
+                            f"+{insertion_text}",
+                            ha="center",
+                            va="bottom",
+                            fontsize=max(
+                                6,
+                                fontsize - 2,
+                            ),
+                            fontweight="bold",
+                        )
+
+                # =====================================================
+                # Mutation labels
+                # =====================================================
+
+                if show_mutation_labels:
+
+                    mutations = get_mutations(row)
+
+                    for mutation in mutations:
+
+                        mutation_type = mutation.type
+
+                        if mutation_type == "SNV":
+
+                            pos = mutation.position
+
+                            # Assuming mutation positions are 1-based
+                            x = pos - start
+
+                            if 0 <= x < n_positions:
+
+                                ax.text(
+                                    x + 0.5,
+                                    y + 0.48,
+                                    mutation.description,
+                                    ha="center",
+                                    va="bottom",
+                                    fontsize=7,
+                                    rotation=45,
+                                )
+
+                        elif mutation_type == "INS":
+
+                            pos = mutation.position
+
+                            x = pos - start
+
+                            if 0 <= x < n_positions:
+
+                                ax.text(
+                                    x + 0.5,
+                                    y + 0.48,
+                                    mutation.description,
+                                    ha="center",
+                                    va="bottom",
+                                    fontsize=7,
+                                    rotation=45,
+                                )
+
+                        elif mutation_type == "DEL":
+
+                            pos = mutation.position
+
+                            x = pos - start
+
+                            if 0 <= x < n_positions:
+
+                                end_pos = getattr(
+                                    mutation,
+                                    "end",
+                                    pos,
+                                )
+
+                                x2 = end_pos - start
+
+                                ax.plot(
+                                    [
+                                        x + 0.1,
+                                        x2 + 0.9,
+                                    ],
+                                    [
+                                        y,
+                                        y,
+                                    ],
+                                    linewidth=3,
+                                    color="black",
+                                )
+
+            # =========================================================
+            # Position axis
+            # =========================================================
+
+            if show_position_labels:
+
+                tick_step = max(
+                    1,
+                    n_positions // 20,
+                )
+
+                ticks = list(
+                    range(
+                        0,
+                        n_positions,
+                        tick_step,
+                    )
+                )
+
+                ax.set_xticks([x + 0.5 for x in ticks])
+
+                ax.set_xticklabels(
+                    [str(start + x) for x in ticks],
+                    fontsize=8,
+                )
+
+                ax.set_xlabel("WT position")
+
+            else:
+
+                ax.set_xticks([])
+
+            # =========================================================
+            # Limits
+            # =========================================================
+
+            ax.set_xlim(
+                0,
+                n_positions,
+            )
+
+            ax.set_ylim(
+                -1,
+                len(df) + 1.3,
+            )
+
+            ax.set_yticks([])
+
+            # =========================================================
+            # Title
+            # =========================================================
+
+            ax.set_title(
+                f"Read alignments — " f"WT positions {start}-{end}",
+                fontsize=13,
+                fontweight="bold",
+            )
+
+            # =========================================================
+            # Clean axes
+            # =========================================================
+
+            ax.spines["left"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["top"].set_visible(False)
+
+            ax.tick_params(
+                axis="x",
+                length=0,
+            )
+
+            # =========================================================
+            # Legend
+            # =========================================================
+
+            legend_elements = []
+
+            for base in ["A", "C", "G", "T", "-"]:
+
+                legend_elements.append(
+                    Rectangle(
+                        (0, 0),
+                        1,
+                        1,
+                        facecolor=base_colors[base],
+                        edgecolor="none",
+                        label=base,
+                    )
+                )
+
+            ax.legend(
+                handles=legend_elements,
+                title="Base",
+                loc="upper right",
+                ncol=5,
+                frameon=False,
+            )
+
+            plt.tight_layout()
+            save_figure(fig, outfile)
+            return fig, ax
+
+        return Runnable(
+            call,
+            display=CallSpec(
+                path=(
+                    "MmFqCount",
+                    "plot_read_alignments",
+                ),
+                kwargs={
+                    "outfile": str(outfile),
+                    "analysis_df_path": str(analysis_df_path),
+                    "sort_by": sort_by,
+                    "figsize": figsize,
+                    "show_mutation_labels": show_mutation_labels,
+                    "show_coverage": show_coverage,
+                    "show_grid": show_grid,
+                },
+            ).render(),
+        )
+
+    def plot_read_alignments_first(
+        self,
+        outfile: Path,
+        analysis_df_path: Path,
+        sort_by: str = "count",
+        figsize=None,
+        show_mutation_labels: bool = True,
+        show_coverage: bool = True,
+        show_grid: bool = True,
+    ) -> Runnable:
+        """
+        Plot read alignments relative to WT coordinates.
+
+        Parameters
+        ----------
+        analysis_df_path : Path
+            Path to the DataFrame returned by the read-analysis workflow.
+
+            Expected columns:
+                - wt
+                - wt_start / wt_end
+                - read_start / read_end
+                - count
+                - coverage
+                - classification
+                - mutation_profile
+
+        sort_by : str
+            Column used for sorting. Usually "count".
+
+        figsize : tuple or None
+            Matplotlib figure size. If None, calculated automatically.
+
+        show_mutation_labels : bool
+            Show mutation descriptions next to mutations.
+
+        show_coverage : bool
+            Show coverage percentage in the read label.
+
+        show_grid : bool
+            Show vertical WT coordinate grid.
+        """
+
+        def call(figsize=figsize, sort_by=sort_by):
+            df = read_frame(analysis_df_path)
+            if len(df) == 0:
+                raise ValueError("analysis_df is empty.")
+
+            # ---------------------------------------------------------
+            # Sort
+            # ---------------------------------------------------------
+
+            if sort_by is not None:
+                if sort_by not in df.columns:
+                    raise ValueError(f"Column {sort_by!r} not found in analysis_df.")
+
+                df = df.sort_values(
+                    sort_by,
+                    ascending=False,
+                    kind="stable",
+                )
+
+            # ---------------------------------------------------------
+            # WT length
+            # ---------------------------------------------------------
+
+            wt_length = len(df.iloc[0]["wt"])
+
+            # ---------------------------------------------------------
+            # Figure size
+            # ---------------------------------------------------------
+
+            if figsize is None:
+                figsize = (
+                    16,
+                    max(4, 0.55 * (len(df) + 2)),
+                )
+
+            fig, ax = plt.subplots(figsize=figsize)
+
+            # ---------------------------------------------------------
+            # Y positions
+            # ---------------------------------------------------------
+
+            y_wt = len(df)
+
+            # ---------------------------------------------------------
+            # WT reference
+            # ---------------------------------------------------------
+
+            ax.plot(
+                [1, wt_length],
+                [y_wt, y_wt],
+                linewidth=7,
+                solid_capstyle="butt",
+            )
+
+            ax.text(
+                -0.02 * wt_length,
+                y_wt,
+                "WT",
+                ha="right",
+                va="center",
+                fontweight="bold",
+            )
+
+            # ---------------------------------------------------------
+            # Helper: extract mutations
+            # ---------------------------------------------------------
+
+            def get_mutations(row):
+
+                profile = row.get("mutation_profile", None)
+
+                if profile is None:
+                    return []
+
+                # Your current MutationProfile dataclass
+                if hasattr(profile, "mutations"):
+                    return list(profile.mutations)
+
+                # In case the profile is already a list/tuple
+                if isinstance(profile, (list, tuple)):
+                    return list(profile)
+
+                return []
+
+            # ---------------------------------------------------------
+            # Reads
+            # ---------------------------------------------------------
+
+            for i, (_, row) in enumerate(df.iterrows()):
+
+                y = len(df) - i - 1
+
+                wt_start = row.get("wt_start")
+                wt_end = row.get("wt_end")
+
+                if wt_start is None or wt_end is None:
+                    continue
+
+                # -----------------------------------------------------
+                # Read coverage
+                # -----------------------------------------------------
+
+                ax.plot(
+                    [wt_start, wt_end],
+                    [y, y],
+                    linewidth=7,
+                    solid_capstyle="butt",
+                    alpha=0.8,
+                )
+
+                # -----------------------------------------------------
+                # Read label
+                # -----------------------------------------------------
+
+                classification = row.get(
+                    "classification",
+                    "",
+                )
+
+                count = row.get(
+                    "count",
+                    1,
+                )
+
+                if show_coverage and "coverage" in row:
+                    coverage = row["coverage"] * 100
+
+                    label = (
+                        f"{classification}   "
+                        f"coverage={coverage:.1f}%   "
+                        f"n={count}"
+                    )
+                else:
+                    label = f"{classification}   " f"n={count}"
+
+                ax.text(
+                    -0.02 * wt_length,
+                    y,
+                    label,
+                    ha="right",
+                    va="center",
+                    fontsize=9,
+                )
+
+                # -----------------------------------------------------
+                # Mutations
+                # -----------------------------------------------------
+
+                mutations = get_mutations(row)
+
+                for mutation in mutations:
+
+                    mutation_type = mutation.type
+
+                    # -------------------------------------------------
+                    # SNV
+                    # -------------------------------------------------
+
+                    if mutation_type == "SNV":
+
+                        pos = mutation.position
+
+                        ax.scatter(
+                            pos,
+                            y,
+                            s=55,
+                            zorder=5,
+                        )
+
+                        if show_mutation_labels:
+
+                            ax.text(
+                                pos,
+                                y + 0.18,
+                                mutation.description,
+                                ha="center",
+                                va="bottom",
+                                fontsize=8,
+                                rotation=45,
+                            )
+
+                    # -------------------------------------------------
+                    # INSERTION
+                    # -------------------------------------------------
+
+                    elif mutation_type == "INS":
+
+                        pos = mutation.position
+
+                        ax.scatter(
+                            pos,
+                            y,
+                            marker="^",
+                            s=70,
+                            zorder=5,
+                        )
+
+                        if show_mutation_labels:
+
+                            ax.text(
+                                pos,
+                                y + 0.18,
+                                mutation.description,
+                                ha="center",
+                                va="bottom",
+                                fontsize=8,
+                                rotation=45,
+                            )
+
+                    # -------------------------------------------------
+                    # DELETION
+                    # -------------------------------------------------
+
+                    elif mutation_type == "DEL":
+
+                        start = mutation.position
+                        end = mutation.end
+
+                        ax.plot(
+                            [start, end],
+                            [y, y],
+                            linewidth=10,
+                            alpha=0.5,
+                            solid_capstyle="butt",
+                            zorder=4,
+                        )
+
+                        if show_mutation_labels:
+
+                            ax.text(
+                                (start + end) / 2,
+                                y + 0.18,
+                                mutation.description,
+                                ha="center",
+                                va="bottom",
+                                fontsize=8,
+                            )
+
+            # ---------------------------------------------------------
+            # Axes
+            # ---------------------------------------------------------
+
+            ax.set_xlim(
+                1,
+                wt_length,
+            )
+
+            ax.set_ylim(
+                -1,
+                len(df) + 1,
+            )
+
+            ax.set_xlabel(
+                "WT position",
+                fontsize=11,
+            )
+
+            ax.set_yticks([])
+
+            # ---------------------------------------------------------
+            # Grid
+            # ---------------------------------------------------------
+
+            if show_grid:
+
+                ax.grid(
+                    axis="x",
+                    linestyle=":",
+                    alpha=0.4,
+                )
+
+            # ---------------------------------------------------------
+            # Title
+            # ---------------------------------------------------------
+
+            ax.set_title(
+                f"Read alignments ({len(df)} reads)",
+                fontsize=13,
+                fontweight="bold",
+            )
+
+            # ---------------------------------------------------------
+            # Clean frame
+            # ---------------------------------------------------------
+
+            ax.spines["left"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["top"].set_visible(False)
+
+            plt.tight_layout()
+            save_figure(fig, outfile)
+            return fig, ax
+
+        return Runnable(
+            call,
+            display=CallSpec(
+                path=(
+                    "MmFqCount",
+                    "plot_read_alignments",
+                ),
+                kwargs={
+                    "outfile": str(outfile),
+                    "analysis_df_path": str(analysis_df_path),
+                    "sort_by": sort_by,
+                    "figsize": figsize,
+                    "show_mutation_labels": show_mutation_labels,
+                    "show_coverage": show_coverage,
+                    "show_grid": show_grid,
+                },
+            ).render(),
+        )
+
+
+# def align_reads_to_wt(
+#     self,
+#     df: DataFrame,
+#     predefined: DataFrame,
+#     wt_df: DataFrame,
+# ) -> DataFrame:
+#     """
+#     Align all unique sequences in a dataframe.
+
+#     Required columns:
+#         R1
+#         Count
+
+#     Optional columns:
+#         Frequency
+#         Annotation
+#     """
+#     sequence_col = "R1"
+#     results = []
+
+#     for _, row in df.iterrows():
+#         if row[sequence_col] in predefined["sequence"].values:
+#             # If the sequence is in the predefined sequences, we can skip alignment
+#             annotation = predefined.loc[
+#                 predefined["sequence"] == row[sequence_col], "mut_id"
+#             ].values[0]
+#             results.append(
+#                 {
+#                     "sequence": row[sequence_col],
+#                     "count": row["Count"],
+#                     "frequency": row.get("Frequency", np.nan),
+#                     "annotation": annotation,
+#                     "aligned_read": row[sequence_col],
+#                     "wt_start": 0,
+#                     "wt_end": len(row[sequence_col]),
+#                     "aligned_length": len(row[sequence_col]),
+#                     "alignment_score": np.nan,
+#                     "insertions": [],
+#                 }
+#             )
+#             continue
+#         if row[sequence_col] in wt_df["sequence"].values:
+#             # If the sequence is in the wild-type sequences, we can skip alignment
+#             wt_row = wt_df.loc[wt_df["sequence"] == row[sequence_col]].iloc[0]
+#             results.append(
+#                 {
+#                     "sequence": row[sequence_col],
+#                     "count": row["Count"],
+#                     "frequency": row.get("Frequency", np.nan),
+#                     "annotation": "WT",
+#                     "aligned_read": row[sequence_col],
+#                     "wt_start": 0,
+#                     "wt_end": len(row[sequence_col]),
+#                     "aligned_length": len(row[sequence_col]),
+#                     "alignment_score": np.nan,
+#                     "insertions": [],
+#                 }
+#             )
+#             continue
+#         best_score = -np.inf
+#         result = None
+#         for _, wtrow in wt_df.iterrows():
+#             wt_sequence = wtrow["sequence"]
+#             flank_5 = wtrow.get("5_flank", "")
+#             flank_3 = wtrow.get("3_flank", "")
+#             tmp = align_read_to_wt(
+#                 read=row[sequence_col],
+#                 wt_sequence=wt_sequence,
+#                 flank_5=flank_5,
+#                 flank_3=flank_3,
+#                 name=row.get("name", ""),
+#             )
+#             if tmp["alignment_score"] > best_score:
+#                 best_score = tmp["alignment_score"]
+#                 result = tmp
+
+#         results.append(
+#             {
+#                 "sequence": row[sequence_col],
+#                 "count": row["Count"],
+#                 "frequency": row.get("Frequency", np.nan),
+#                 "annotation": result["annotation"],
+#                 "aligned_read": result["aligned_read"],
+#                 "wt_start": result["wt_start"],
+#                 "wt_end": result["wt_end"],
+#                 "aligned_length": result["aligned_length"],
+#                 "alignment_score": result["alignment_score"],
+#                 "insertions": result["insertions"],
+#                 "has_flank_5": result["has_flank_5"],
+#                 "has_flank_3": result["has_flank_3"],
+#                 "flank_5_start": result["flank_5_start"],
+#                 "flank_5_end": result["flank_5_end"],
+#                 "flank_3_start": result["flank_3_start"],
+#                 "flank_3_end": result["flank_3_end"],
+#                 "flank_annotation": result["flank_annotation"],
+#             }
+#         )
+
+#     wt_row = pd.DataFrame(
+#         [
+#             {
+#                 "sequence": wt_sequence,
+#                 "count": np.nan,
+#                 "frequency": np.nan,
+#                 "annotation": "WT",
+#                 "aligned_read": wt_sequence,
+#                 "wt_start": 0,
+#                 "wt_end": len(wt_sequence),
+#                 "aligned_length": len(wt_sequence),
+#                 "alignment_score": np.nan,
+#                 "insertions": [],
+#             }
+#         ]
+#     )
+#     alignment_df = pd.DataFrame(results)
+#     alignment_df = pd.concat([wt_row, alignment_df], ignore_index=True)
+#     return alignment_df
+
+# def plot_sequence_alignment(alignment_df, wt_sequence, top_n=20, figsize=(14, 8)):
+#     """
+#     Plot sequencing variants aligned to a WT sequence.
+
+#     Parameters
+#     ----------
+#     alignment_df : pandas.DataFrame
+#         Output from align_reads_to_wt().
+#     wt_sequence : str
+#         WT/reference sequence.
+#     top_n : int
+#         Number of variants to display.
+#     figsize : tuple
+#         Figure size.
+#     """
+
+#     # Separate WT and reads
+#     wt_length = len(wt_sequence)
+
+#     reads = alignment_df[alignment_df["annotation"] != "WT"].copy()
+
+#     # Sort by abundance
+#     reads = reads.sort_values("count", ascending=False).head(top_n)
+
+#     # WT first
+#     plot_rows = []
+
+#     plot_rows.append(
+#         {
+#             "label": "WT",
+#             "sequence": wt_sequence,
+#             "aligned_read": wt_sequence,
+#             "count": np.nan,
+#             "annotation": "WT",
+#         }
+#     )
+
+#     for i, (_, row) in enumerate(reads.iterrows()):
+
+#         plot_rows.append(
+#             {
+#                 "label": f"Variant {i+1}",
+#                 "sequence": row["sequence"],
+#                 "aligned_read": row["aligned_read"],
+#                 "count": row["count"],
+#                 "annotation": row["annotation"],
+#             }
+#         )
+
+#     fig, ax = plt.subplots(figsize=figsize)
+
+#     row_height = 0.6
+
+#     for y, row in enumerate(plot_rows):
+
+#         aligned = row["aligned_read"]
+
+#         # Draw sequence positions
+#         for x, base in enumerate(aligned):
+
+#             if base == ".":
+#                 continue
+
+#             if base == "-":
+#                 # deletion
+#                 ax.plot([x, x + 1], [y, y], linewidth=3)
+
+#             else:
+#                 # sequence present
+#                 ax.add_patch(Rectangle((x, y - row_height / 2), 1, row_height))
+
+#     # Labels
+#     labels = []
+
+#     for row in plot_rows:
+
+#         if pd.isna(row["count"]):
+#             labels.append(row["label"])
+#         else:
+#             labels.append(f'{row["label"]} ({int(row["count"]):,})')
+
+#     ax.set_yticks(range(len(plot_rows)))
+#     ax.set_yticklabels(labels)
+
+#     ax.set_xlim(0, wt_length)
+#     ax.invert_yaxis()
+
+#     ax.set_xlabel("Position in WT sequence")
+#     ax.set_ylabel("Sequence")
+
+#     ax.set_title("Sequencing variants aligned to WT")
+
+#     plt.tight_layout()
+
+#     return fig, ax
+
 
 # ---------------------------------------------------------------------------
 # Internal helper
@@ -1180,3 +2886,1139 @@ def _build_param_registry_as_mapping() -> dict:
     super().__init__() call.
     """
     return {}
+
+
+class AmpliconQC(External):
+    """Wrapper for the ``amplicon-wc`` Rust CLI tool.
+
+    ``amplicon-wc`` is a Rust command-line tool for counting the lengths of
+    inserts between flanking sequences in FASTQ files.
+    """
+
+    def __init__(
+        self,
+        name: str = "amplicon-qc",
+        primary_binary: str = "amplicon-qc",
+        version: str | None = None,
+        source: str = "https://github.com/MarcoMernberger/ampolicon-qc",
+        parameters: Mapping[str, ParamSet] | ParamSet | None = None,
+    ) -> None:
+        """Initialise the AmpliconQC wrapper.
+
+        Parameters
+        ----------
+        name : str
+            Logical tool name, default ``"amplicon-qc"``.
+        primary_binary : str
+            Executable name on ``$PATH``, default ``"amplicon-qc"``.
+        version : str | None
+            Optional version string override; auto-detected when *None*.
+        source : str
+            Documentation / source URL.
+        parameters : Mapping[str, ParamSet] | ParamSet | None
+            Parameter sets for invocations.  When *None*, the built-in
+            parameter registry (derived from the stable CLI) is used.
+        """
+        # Build parameters from the known CLI instead of a JSON file
+        resolved_parameters: Mapping[str, ParamSet] | ParamSet = (
+            parameters if parameters is not None else _build_param_registry_as_mapping()
+        )
+        super().__init__(
+            name=name,
+            primary_binary=primary_binary,
+            version=version,
+            source=source,
+            parameters=resolved_parameters,
+        )
+        # Overwrite param_registry with our richer version (includes
+        # per-subcommand ParamSets) regardless of how External.__init__
+        # processes the mapping.
+        self.param_registry = _build_param_registry_amplicon_qc()
+
+    # -----------------------------------------------------------------------
+    # Version detection
+    # -----------------------------------------------------------------------
+
+    def get_version(self, fallback: str | None = None) -> str | None:
+        """Return the mmfqcount version string.
+
+        Runs ``mmfqcount --version`` and extracts the semver token.  The
+        output format is stable because we own the Rust source
+        (clap auto-generates ``mmfqcount X.Y.Z``).
+
+        Parameters
+        ----------
+        fallback : str | None
+            Value returned when the version cannot be determined.
+
+        Returns
+        -------
+        str | None
+            Version string (e.g. ``"0.1.0"``) or *fallback*.
+        """
+        if self._version:
+            return self._version
+        if not self.primary_binary or not self.ensure_binary():
+            return fallback
+        try:
+            cp = subprocess.run(
+                [self.primary_binary, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if cp.returncode == 0 and cp.stdout:
+                # clap output: "mmfqcount 0.1.0\n"
+                m = re.search(r"(\d+\.\d+\.\d+)", cp.stdout)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        return fallback
+
+    # -----------------------------------------------------------------------
+    # Default paths
+    # -----------------------------------------------------------------------
+
+    def default_output_dir(self, sample_name: str) -> Path:
+        """Return the default output directory for a given sample."""
+        return Path("results") / "qc" / self.version_name / sample_name
+
+    def default_output(
+        self, sample_name: str = "", outdir: Path | None = None, ext: str = "tsv"
+    ) -> OutputSpec:
+        """Return the default output spec for a given sample."""
+        return Out(
+            outdir=outdir or self.default_output_dir(sample_name),
+            ext=ext,
+        )
+
+    # -----------------------------------------------------------------------
+    # amplicon-wc
+    # -----------------------------------------------------------------------
+
+    @element
+    def flankinserts(
+        self,
+        sample: Element | NextGenSample,
+        flank_start: FileSource,
+        flank_end: FileSource,
+        *,
+        max_hamming: int = 1,
+        limit: int = 10000,
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
+    ) -> Element:
+        """Counts the read lengths between flanks, in other words, what remains
+        after trimming for trouvleshooting.
+
+        Runs ``amplicon-qc`` on the FASTQ file(s) of *sample* and writes
+        a TSV table with lengths and categories.
+
+        Parameters
+        ----------
+        sample : Element | NextGenSample
+            Input sample. Both single-end and paired-end samples are handled
+            automatically.
+        flank_start : FileSource
+            5' flank sequence file (FASTA).
+        flank_end : FileSource
+            3' flank sequence file (FASTA).
+        max_hamming : int
+            Maximum Hamming distance for flank matching. Default: 1.
+        limit : int
+            Maximum number of reads to process. Default: 10000.
+        tag : TagType | None
+            Optional tag override.
+        outspec : OutType | None
+            Output specification; defaults to
+            ``results/counts/<version>/<sample.name>`` with extension ``tsv``.
+        params : ParType | None
+            Additional parameters for the count step. Default: None.
+
+        cfg : ExtType |None
+            Subprocess configuration.
+
+        Returns
+        -------
+        Element
+            Element whose artifact ``"tsv"`` is the path to the counts TSV.
+        """
+        fastq_r1 = sample.primary.r1
+        fastq_r2 = sample.primary.r2 if hasattr(sample.primary, "r2") else None
+
+        tag = from_prior(
+            sample.tag,
+            tag,
+            stage=Stage.QC,
+            method=Method.MMFQCOUNT,
+            state=State.COUNT,
+            ext="tsv",
+        )
+
+        spec = self.default_output(sample.root).merge(outspec)
+        output_file = spec.path(tag.default_name)
+        len_file = output_file.with_name(output_file.stem + "_lengths.tsv")
+        categories_file = output_file.with_name(output_file.stem + "_categories.tsv")
+
+        runner = self.check_flank_insert(
+            fastq_r1=fastq_r1,
+            fastq_r2=fastq_r2,
+            flank_start=flank_start.artifacts.primary.resolve(),
+            flank_end=flank_end.artifacts.primary.resolve(),
+            max_hamming=max_hamming,
+            limit=limit,
+            output_file=output_file,
+            len_file=len_file,
+            categories_file=categories_file,
+            params=params,
+            cfg=cfg,
+        )
+
+        key, name = self.build_element_name(tag, "count")
+        determinants = self.signature_determinants(params, subroutine="count")
+        inputs = (fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,)
+        pres = (sample,) if isinstance(sample, Element) else sample.pres
+        artifacts = ArtifactSet(output_file, primary_name=spec.ext)
+        artifacts = artifacts.with_extra("lengths", value=len_file).with_extra(
+            "categories", value=categories_file
+        )
+        return Element(
+            key,
+            runner,
+            tag=tag,
+            determinants=determinants,
+            artifacts=artifacts,
+            inputs=inputs,
+            pres=pres,
+            name=name,
+        )
+
+    # -----------------------------------------------------------------------
+    # count — low-level @subroutine
+    # -----------------------------------------------------------------------
+
+    @subroutine
+    def check_flank_insert(
+        self,
+        output_file: Path,
+        fastq_r1: Path,
+        fastq_r2: Path,
+        flank_start: Path,
+        flank_end: Path,
+        *,
+        len_file: Path | None = None,
+        categories_file: Path | None = None,
+        max_hamming: int = 1,
+        limit: int = 10000,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
+    ) -> SubroutineIn:
+        """Low-level wrapper for ``amplicon-qc``.
+
+        Parameters
+        ----------
+        fastq_r1 : Path | str
+            R1 FASTQ file (plain or gzip).
+        fastq_r2 : Path | str | None
+            R2 FASTQ file (plain or gzip), or *None* for single-end.
+        flank_start : Path | str
+            Path to the 5' flank sequence file (FASTA).
+        flank_end : Path | str
+            Path to the 3' flank sequence file (FASTA).
+        output_file : Path | str
+            Destination path for the counts TSV.
+        params : ParType | None
+            Trimming parameters (``trim_start``, ``trim_stop``,
+            ``trim_length``).
+        cfg : ExtType |None
+            Subprocess configuration.
+
+        Returns
+        -------
+        SubroutineIn
+            Tuple consumed by the ``@subroutine`` decorator.
+        """
+        len_file = len_file or output_file.with_name(output_file.stem + "_lengths.tsv")
+        categories_file = categories_file or output_file.with_name(
+            output_file.stem + "_categories.tsv"
+        )
+        arguments = [
+            "--r1",
+            str(fastq_r1),
+            "--start-flanks",
+            str(flank_start),
+            "--end-flanks",
+            str(flank_end),
+            "--max-hamming",
+            str(max_hamming),
+            "--output",
+            str(output_file),
+            "--histogram",
+            len_file,
+            "--categories",
+            categories_file,
+            "--limit",
+            str(limit),
+        ]
+        if fastq_r2 is not None:
+            arguments += ["--r2", str(fastq_r2)]
+        in_paths = [fastq_r1] + ([fastq_r2] if fastq_r2 else [])
+        out_paths = [output_file, len_file, categories_file]
+
+        return (
+            arguments,
+            "count",
+            in_paths,
+            out_paths,
+            None,  # no piped output
+            None,  # no pre-hook
+            None,  # no post-hook
+        )
+
+    @element
+    def plotflankdist(
+        self,
+        histogram: TableElement,
+        *,
+        figsize: dict[str, tuple[int, int]] = {
+            "hist": (14, 7),
+            "cat": (10, 6),
+            "pos": (10, 6),
+        },
+        tag: TagType | None = None,
+        outspec: OutType | None = None,
+        params: ParType | None = None,
+    ) -> Element:
+        """
+        Plots the histogram calculated by amplicon-qc.
+
+        Parameters
+        ----------
+        histogram : TableElement
+            Element containing the histogram TSV to process.
+        figsize : tuple[int, int], optional
+            Size of the figure. Default is (14, 7).
+        tag : TagType | None
+            Optional tag override.
+        outspec : OutType | None, optional
+            Optional output specification override.
+        params : ParType | None, optional
+            Additional parameters, by default None
+
+        Returns
+        -------
+        Element
+            Element with the histogram plot as an SVG file.
+        """
+        outspec = Out(outdir=histogram.primary.resolve().parent, ext="svg").merge(
+            outspec
+        )
+        tag = from_prior(
+            histogram.tag,
+            tag,
+            stage=Stage.ANALYSIS,
+            method=Method.MMFQCOUNT,
+            state=State.PLOT,
+        )
+        params = Par().update(params)
+
+        pres = (histogram,)
+        determinants = params.determinants()
+        outfile = (
+            outspec.path(tag.default_name)
+            if outspec
+            else histogram.file.parent / f"{tag.default_name}.svg"
+        )
+        cat_file = outfile.with_name(outfile.stem + "_categories.svg")
+        hist_file = outfile.with_name(outfile.stem + "_lengths.svg")
+        runner = self.plot_flank_lengths(
+            output_hist_file=hist_file,
+            output_category_file=cat_file,
+            output_position_file=outfile,
+            position_file=histogram.primary.resolve(),
+            histogram_path=histogram.artifacts["lengths"].resolve(),
+            category_path=histogram.artifacts["categories"].resolve(),
+            figsize=figsize,
+        )
+
+        key, name = self.build_element_name(
+            tag,
+            "plotflankdist",
+        )
+        artifacts = ArtifactSet(
+            outfile,
+            primary_name=outfile.suffix,
+        ).with_extra("categories", value=cat_file)
+
+        return Element(
+            key,
+            runner,
+            tag=tag,
+            determinants=tuple(determinants),
+            artifacts=artifacts,
+            pres=pres,
+            name=name,
+        )
+
+    def plot_flank_lengths(
+        self,
+        output_hist_file: Path,
+        output_category_file: Path,
+        output_position_file: Path,
+        position_file: Path,
+        histogram_path: Path,
+        category_path: Path,
+        figsize: dict[str, tuple[int, int]] = {
+            "hist": (14, 7),
+            "cat": (10, 6),
+            "pos": (10, 6),
+        },
+    ) -> Runnable:
+
+        def call():
+
+            plot_histogram(
+                histogram_file=str(histogram_path),
+                output_svg=str(output_hist_file),
+                figsize=figsize["hist"],
+            )
+            plot_pair_categories(
+                categories_file=str(category_path),
+                output_svg=str(output_category_file),
+                figsize=figsize["cat"],
+            )
+            plot_flank_positions(
+                tsv_file=str(position_file),
+                output_svg=str(output_position_file),
+                figsize=figsize["pos"],
+            )
+
+        return Runnable(
+            call,
+            display=CallSpec(
+                path=(
+                    "MmFqCount",
+                    "align_counts",
+                ),
+                kwargs={
+                    "output_hist_file": str(output_hist_file),
+                    "output_category_file": str(output_category_file),
+                    "output_position_file": str(output_position_file),
+                    "position_file": str(position_file),
+                    "histogram_path": str(histogram_path),
+                    "category_path": str(category_path),
+                    "figsize": {
+                        "hist": figsize["hist"],
+                        "cat": figsize["cat"],
+                        "pos": figsize["pos"],
+                    },
+                },
+            ).render(),
+        )
+
+
+def _build_param_registry_amplicon_qc() -> ParamRegistry:
+    """Parameter registry for amplicon-qc.
+
+    Defined here in Python because we own and maintain the Rust source —
+    the CLI is stable and there is no need to parse --help output or maintain
+    a separate JSON file.  If the CLI ever grows new flags, add them here.
+    """
+    specs: dict[str, ParamSpec] = {
+        "r1": ParamSpec(
+            "r1",
+            "--r1",
+            str,
+            render=render_value,
+            description="R1 read file.",
+        ),
+        "r2": ParamSpec(
+            "r2",
+            "--r2",
+            str,
+            render=render_value,
+            description="R2 read file.",
+        ),
+        "start_flanks": ParamSpec(
+            "start-flanks",
+            "--start-flanks",
+            str,
+            render=render_value,
+            description="File with start flanking sequences.",
+        ),
+        "end_flanks": ParamSpec(
+            "end-flanks",
+            "--end-flanks",
+            str,
+            render=render_value,
+            description="File with end flanking sequences.",
+        ),
+        "max_hamming": ParamSpec(
+            "max-hamming",
+            "--max-hamming",
+            int,
+            render=render_value,
+            description="Maximum allowed Hamming distance.",
+        ),
+        "output": ParamSpec(
+            "output",
+            "--output",
+            str,
+            render=render_value,
+            description="Per-read TSV output.",
+        ),
+        "histogram": ParamSpec(
+            "histogram",
+            "--histogram",
+            str,
+            render=render_value,
+            description="Aggregated histogram output.",
+        ),
+        "categories": ParamSpec(
+            "categories",
+            "--categories",
+            str,
+            render=render_value,
+            description="Pair-category count output.",
+        ),
+        "limit": ParamSpec(
+            "limit",
+            "--limit",
+            int,
+            render=render_value,
+            description="Optional maximum number of read pairs to process.",
+        ),
+    }
+    return ParamRegistry(default=ParamSet(specs, "amplicon-qc", "default"))
+
+
+################################################################################
+
+
+def plot_histogram(
+    histogram_file: str | Path,
+    output_svg: str | Path,
+    figsize=(14, 7),
+    include_none_none=False,
+):
+    """
+    Plot paired R1/R2 length distributions from the pairwise
+    histogram TSV.
+
+    Input format:
+
+        pair_category    r1_length    r2_length    count
+
+    The input contains counts for individual R1/R2 length pairs.
+
+    Example:
+
+        end_only__end_only    23    22    10
+        end_only__end_only    23    23    250
+        end_only__end_only    24    23    40
+        end_only__end_only    24    24    220
+
+    The figure contains two panels:
+
+        LEFT  = R1 length distribution
+        RIGHT = R2 length distribution
+
+    Each pair_category gets one color, which is used consistently
+    in both panels.
+
+    The R1 and R2 lengths are NOT added together.
+
+    Since the input contains pairwise R1/R2 combinations, the
+    marginal distributions are calculated by summing count over
+    the opposite read:
+
+        R1 distribution:
+            sum over r2_length
+
+        R2 distribution:
+            sum over r1_length
+
+    By default, the "none__none" category is excluded from the
+    plotted distributions because it usually represents complete
+    reads and can have a much larger count than the flank-positive
+    categories. This prevents the other distributions from being
+    visually compressed.
+
+    Set include_none_none=True to include it.
+    """
+
+    histogram_file = Path(histogram_file)
+    output_svg = Path(output_svg)
+
+    # ------------------------------------------------------------
+    # Read histogram
+    # ------------------------------------------------------------
+
+    df = pd.read_csv(
+        histogram_file,
+        sep="\t",
+    )
+
+    required_columns = {
+        "pair_category",
+        "r1_length",
+        "r2_length",
+        "count",
+    }
+
+    missing = required_columns - set(df.columns)
+
+    if missing:
+        raise ValueError(f"Missing columns in histogram file: {sorted(missing)}")
+
+    # ------------------------------------------------------------
+    # Ensure numeric columns have the correct type
+    # ------------------------------------------------------------
+
+    df["r1_length"] = pd.to_numeric(
+        df["r1_length"],
+        errors="raise",
+    )
+
+    df["r2_length"] = pd.to_numeric(
+        df["r2_length"],
+        errors="raise",
+    )
+
+    df["count"] = pd.to_numeric(
+        df["count"],
+        errors="raise",
+    )
+
+    # ------------------------------------------------------------
+    # Categories
+    # ------------------------------------------------------------
+
+    all_categories = sorted(df["pair_category"].unique())
+
+    # Keep track of none__none separately.
+    none_none_category = "none__none"
+
+    if include_none_none:
+        categories = all_categories
+    else:
+        categories = [
+            category for category in all_categories if category != none_none_category
+        ]
+
+    # ------------------------------------------------------------
+    # One color per category
+    # ------------------------------------------------------------
+
+    cmap = plt.get_cmap("tab20")
+
+    category_colors = {
+        category: cmap(i % cmap.N) for i, category in enumerate(all_categories)
+    }
+
+    # ------------------------------------------------------------
+    # Calculate marginal R1/R2 distributions
+    # ------------------------------------------------------------
+
+    r1_distribution = df.groupby(
+        [
+            "pair_category",
+            "r1_length",
+        ],
+        as_index=False,
+    )["count"].sum()
+
+    r2_distribution = df.groupby(
+        [
+            "pair_category",
+            "r2_length",
+        ],
+        as_index=False,
+    )["count"].sum()
+
+    # ------------------------------------------------------------
+    # Calculate none__none information
+    # ------------------------------------------------------------
+
+    none_none_count = df.loc[
+        df["pair_category"] == none_none_category,
+        "count",
+    ].sum()
+
+    # ------------------------------------------------------------
+    # Figure
+    # ------------------------------------------------------------
+
+    fig, (ax_r1, ax_r2) = plt.subplots(
+        1,
+        2,
+        figsize=figsize,
+        sharey=True,
+    )
+
+    # ------------------------------------------------------------
+    # R1
+    # ------------------------------------------------------------
+
+    for category in categories:
+
+        subset = r1_distribution[
+            r1_distribution["pair_category"] == category
+        ].sort_values("r1_length")
+
+        ax_r1.plot(
+            subset["r1_length"],
+            subset["count"],
+            label=category,
+            color=category_colors[category],
+            linewidth=2,
+        )
+
+    ax_r1.set_title("R1")
+    ax_r1.set_xlabel("R1 observed length")
+    ax_r1.set_ylabel("Read-pair count")
+
+    ax_r1.grid(
+        True,
+        alpha=0.25,
+    )
+
+    # ------------------------------------------------------------
+    # R2
+    # ------------------------------------------------------------
+
+    for category in categories:
+
+        subset = r2_distribution[
+            r2_distribution["pair_category"] == category
+        ].sort_values("r2_length")
+
+        ax_r2.plot(
+            subset["r2_length"],
+            subset["count"],
+            label=category,
+            color=category_colors[category],
+            linewidth=2,
+        )
+
+    ax_r2.set_title("R2")
+    ax_r2.set_xlabel("R2 observed length")
+
+    ax_r2.grid(
+        True,
+        alpha=0.25,
+    )
+
+    # ------------------------------------------------------------
+    # Shared title
+    # ------------------------------------------------------------
+
+    if include_none_none:
+        title = "Observed length distributions by paired-read category"
+    else:
+        title = (
+            "Observed length distributions by paired-read category"
+            "\n"
+            f"none__none excluded from plot ({none_none_count:,} read pairs)"
+        )
+
+    fig.suptitle(
+        title,
+        fontsize=16,
+    )
+
+    # ------------------------------------------------------------
+    # One shared legend
+    # ------------------------------------------------------------
+
+    handles, labels = ax_r1.get_legend_handles_labels()
+
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            title="Pair category",
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.5),
+        )
+
+    # ------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------
+
+    fig.tight_layout(
+        rect=(0, 0, 0.84, 0.92),
+    )
+
+    # ------------------------------------------------------------
+    # Save SVG
+    # ------------------------------------------------------------
+
+    output_svg.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    fig.savefig(
+        output_svg,
+        format="svg",
+        bbox_inches="tight",
+    )
+
+    plt.close(fig)
+
+    print(f"Wrote plot: {output_svg}")
+
+
+def plot_pair_categories(
+    categories_file: str | Path,
+    output_svg: str | Path,
+    figsize=(10, 6),
+):
+    """
+    Plot read-pair category counts as a bar chart.
+
+    Input format:
+
+        pair_category    count
+
+    Example:
+
+        end_only__end_only    5885
+        end_only__none        2847
+
+    The resulting figure is saved as SVG.
+    """
+
+    categories_file = Path(categories_file)
+    output_svg = Path(output_svg)
+
+    # ------------------------------------------------------------
+    # Read category counts
+    # ------------------------------------------------------------
+
+    df = pd.read_csv(
+        categories_file,
+        sep="\t",
+    )
+
+    required_columns = {
+        "pair_category",
+        "count",
+    }
+
+    missing = required_columns - set(df.columns)
+
+    if missing:
+        raise ValueError(f"Missing columns in categories file: {sorted(missing)}")
+
+    df["count"] = pd.to_numeric(
+        df["count"],
+        errors="raise",
+    )
+
+    # Sort by count, largest first.
+    df = df.sort_values(
+        "count",
+        ascending=False,
+    )
+
+    # ------------------------------------------------------------
+    # Figure
+    # ------------------------------------------------------------
+
+    fig, ax = plt.subplots(
+        figsize=figsize,
+    )
+
+    ax.bar(
+        df["pair_category"],
+        df["count"],
+    )
+
+    ax.set_title(
+        "Read-pair categories",
+        fontsize=16,
+    )
+
+    ax.set_xlabel(
+        "Pair category",
+    )
+
+    ax.set_ylabel(
+        "Read-pair count",
+    )
+
+    ax.grid(
+        axis="y",
+        alpha=0.25,
+    )
+
+    # Rotate category labels because they can be long.
+    plt.setp(
+        ax.get_xticklabels(),
+        rotation=45,
+        ha="right",
+    )
+
+    # Add counts above bars.
+    for i, count in enumerate(df["count"]):
+        ax.text(
+            i,
+            count,
+            f"{count:,}",
+            ha="center",
+            va="bottom",
+        )
+
+    fig.tight_layout()
+
+    # ------------------------------------------------------------
+    # Save SVG
+    # ------------------------------------------------------------
+
+    output_svg.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    fig.savefig(
+        output_svg,
+        format="svg",
+        bbox_inches="tight",
+    )
+
+    plt.close(fig)
+
+    print(f"Wrote plot: {output_svg}")
+
+
+def plot_flank_positions(
+    tsv_file: str | Path,
+    output_svg: str | Path,
+    figsize=(14, 10),
+):
+    """
+    Plot flank positions from the per-read TSV.
+
+    The figure contains four panels:
+
+        top-left     = R1 start-flank positions
+        top-right    = R2 start-flank positions
+        bottom-left  = R1 end-flank positions
+        bottom-right = R2 end-flank positions
+
+    Each pair_category gets its own color, consistently across
+    all four panels.
+
+    Only reads where the corresponding flank was actually found
+    are included in the respective panel.
+    """
+
+    tsv_file = Path(tsv_file)
+    output_svg = Path(output_svg)
+
+    # ------------------------------------------------------------
+    # Read TSV
+    # ------------------------------------------------------------
+
+    df = pd.read_csv(
+        tsv_file,
+        sep="\t",
+    )
+
+    required_columns = {
+        "pair_category",
+        "r1_start_position",
+        "r1_end_position",
+        "r2_rev_end_position",
+        "r2_rev_start_position",
+    }
+
+    missing = required_columns - set(df.columns)
+
+    if missing:
+        raise ValueError(f"Missing columns in TSV: {sorted(missing)}")
+
+    # Positions are empty when the flank was not found.
+    position_columns = [
+        "r1_start_position",
+        "r1_end_position",
+        "r2_rev_end_position",
+        "r2_rev_start_position",
+    ]
+
+    for column in position_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
+
+    # ------------------------------------------------------------
+    # Categories
+    # ------------------------------------------------------------
+
+    categories = sorted(df["pair_category"].dropna().unique())
+
+    cmap = plt.get_cmap("tab20")
+
+    category_colors = {
+        category: cmap(i % cmap.N) for i, category in enumerate(categories)
+    }
+
+    # ------------------------------------------------------------
+    # Figure
+    # ------------------------------------------------------------
+
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=figsize,
+        sharex=False,
+        sharey=False,
+    )
+
+    ax_r1_start = axes[0, 0]
+    ax_r2_start = axes[0, 1]
+    ax_r1_end = axes[1, 0]
+    ax_r2_end = axes[1, 1]
+
+    # ------------------------------------------------------------
+    # Helper
+    # ------------------------------------------------------------
+
+    def plot_position_distribution(
+        ax,
+        position_column,
+        title,
+    ):
+        for category in categories:
+
+            subset = df[df["pair_category"] == category][position_column].dropna()
+
+            if subset.empty:
+                continue
+
+            counts = subset.value_counts().sort_index()
+
+            ax.plot(
+                counts.index,
+                counts.values,
+                marker="o",
+                markersize=3,
+                linewidth=1.8,
+                color=category_colors[category],
+            )
+
+        ax.set_title(title)
+        ax.set_xlabel("Flank position")
+        ax.set_ylabel("Read count")
+
+        ax.grid(
+            True,
+            alpha=0.25,
+        )
+
+    # ------------------------------------------------------------
+    # R1 start
+    # ------------------------------------------------------------
+
+    plot_position_distribution(
+        ax_r1_start,
+        "r1_start_position",
+        "R1 start-flank position",
+    )
+
+    # ------------------------------------------------------------
+    # R2 start
+    # ------------------------------------------------------------
+
+    plot_position_distribution(
+        ax_r2_start,
+        "r2_rev_end_position",
+        "R2 end-flank position",
+    )
+
+    # ------------------------------------------------------------
+    # R1 end
+    # ------------------------------------------------------------
+
+    plot_position_distribution(
+        ax_r1_end,
+        "r1_end_position",
+        "R1 end-flank position",
+    )
+
+    # ------------------------------------------------------------
+    # R2 end
+    # ------------------------------------------------------------
+
+    plot_position_distribution(
+        ax_r2_end,
+        "r2_rev_start_position",
+        "R2 start-flank position",
+    )
+
+    # ------------------------------------------------------------
+    # Shared title
+    # ------------------------------------------------------------
+
+    fig.suptitle(
+        "Flank position distributions by paired-read category",
+        fontsize=16,
+    )
+
+    # ------------------------------------------------------------
+    # Shared legend
+    # ------------------------------------------------------------
+
+    legend_handles = [
+        plt.Line2D(
+            [0],
+            [0],
+            color=category_colors[category],
+            linewidth=1.8,
+            marker="o",
+            markersize=3,
+            label=category,
+        )
+        for category in categories
+    ]
+
+    if legend_handles:
+        fig.legend(
+            handles=legend_handles,
+            title="Pair category",
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.5),
+        )
+
+    # ------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------
+
+    fig.tight_layout(
+        rect=(0, 0, 0.84, 0.95),
+    )
+
+    # ------------------------------------------------------------
+    # Save SVG
+    # ------------------------------------------------------------
+
+    output_svg.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    fig.savefig(
+        output_svg,
+        format="svg",
+        bbox_inches="tight",
+    )
+
+    plt.close(fig)
+
+    print(f"Wrote flank-position plot: {output_svg}")

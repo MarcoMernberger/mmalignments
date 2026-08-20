@@ -52,7 +52,10 @@ from mmalignments.models.parameters import Params  # noqa: F401
 # from mmalignments.models.reports.report import MutationalLoadReport  # noqa: F401
 from mmalignments.services import ensure  # , initlog  # noqa: F401
 from mmalignments.models.reports import MutationalLoadReport
-from mmalignments.models.tags import ElementTag  # noqa: F401
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
+)
 
 # from mmalignments.models.differential.deseq2 import DESeq2  # noqa: F401
 # from mmalignments.models.differential.edger import EdgeR  # noqa: F401
@@ -60,35 +63,21 @@ from mmalignments.models.tags import ElementTag  # noqa: F401
 # from .core import ensemblmap  # noqa: F401
 
 __all__ = [
-    # "Bedtools",
-    # "BCFtools",
-    # "BWAMem2",
-    # "FileElement",
-    # "FilesElement",
     "ensure",
     "Executor",
     "Element",
     "ElementTag",
     "ExternalRunConfig",
-    # "FastQC",
-    # "FilesElement",
-    # "ensemblmap",
-    # "GATK",
+    "FastqSource",
+    "FileSource",
     "Genome",
-    # "index_genome",
-    # "initlog",
-    # "jobify",
-    # "MultiQC",
+    "NextGenSample",
+    "Pairing",
+    "Genome",
     "MutationalLoadReport",
-    # "NextGenSampleElement",
     "Params",
-    # "pre_alignment_qc",
-    # "post_mapping_qc_with_multiqc",
+    "PartialElementTag",
     "Sample",
-    # "Samtools",
     "ValidationPolicy",
     "__version__",
-    # "write_lengths",
-    # "DESeq2",
-    # "EdgeR",
 ]

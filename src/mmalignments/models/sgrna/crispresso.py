@@ -25,18 +25,18 @@ from mmalignments.models.tables.frames import (  # type: ignore[import]
     Tables,
 )
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
-    PartialElementTag,
     Stage,
     State,
+)
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
     from_prior,
 )
-
 from ..externals import External
 
 logger = logging.getLogger(__name__)
-
 
 
 class Crispresso(External):
@@ -51,7 +51,7 @@ class Crispresso(External):
         parameters: Mapping[str, ParamSet] | ParamSet | None = None,
     ) -> None:
         resolved_parameters: Mapping[str, ParamSet] | ParamSet = (
-            {}# if parameters is not None else _build_param_registry_as_mapping()
+            {}  # if parameters is not None else _build_param_registry_as_mapping()
         )
         print(resolved_parameters)
         super().__init__(
@@ -249,7 +249,6 @@ def calculate_editing_rate(untreated: str = "None") -> Morph:
         return df_merged
 
     return Morph.from_callable(call)
-
 
 
 def get_substitution_rates_files(

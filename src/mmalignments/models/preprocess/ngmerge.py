@@ -378,7 +378,7 @@ class NGmerge(External):
         compression: Literal["Raw", "Gzip"] = "Gzip",
         t: PartialElementTag | None = None,
         o: PartialOutputSpec | None = None,
-        p: Params | None = None,
+        p: ParType | None = None,
         e: PartialExternalRunConfig | None = None,
     ) -> Element:
         """Merge paired-end reads in a sample.
@@ -406,12 +406,12 @@ class NGmerge(External):
             automatically.
         mode : str
             Mode for merging reads. Options are "stitch" (default) or "adapter-removal".
-        tag : PartialElementTag | ElementTag | None
+        tag : TagType | None
             Optional tag override.
-        outspec: OutputSpec | None
+        outspec: OutType | None
             Optional output specification.  If *None*, a default is derived from the
             sample name.
-        params : Params | None
+        params : ParType | None
             Trimming parameters.  Recognised keys:
 
             ``trim_start`` (str)
@@ -422,7 +422,7 @@ class NGmerge(External):
             ``trim_length`` (int)
                 Keep at most this many bases after trimming.
 
-        cfg : ExternalRunConfig | None
+        cfg : ExtType |None
             Subprocess configuration.
 
         Returns
@@ -465,6 +465,8 @@ class NGmerge(External):
         determinants = (mode,) + self.signature_determinants(params)
         inputs = (fastq_r1, fastq_r2) if fastq_r2 is not None else (fastq_r1,)
         artifacts = ArtifactSet(FastqArtifact(output_fastq), primary_name="fastq")
+        if "l" in params:
+            artifacts = artifacts.with_extra("log", params["l"])
         source = Element(
             key=key,
             run=runner,
@@ -489,8 +491,8 @@ class NGmerge(External):
         mode: str = "stitch",
         compression: Literal["Raw", "Gzip"] = "Gzip",
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        params: ParType | None = None,
+        cfg: ExtType | None = None,
     ) -> SubroutineIn:
         """Low-level wrapper for ``ngmerge``.
 
@@ -504,10 +506,10 @@ class NGmerge(External):
             Destination path for the merged FASTQ.
         mode : str
             Mode for merging reads. Options are "stitch" (default) or "adapter-removal".
-        params : Params | None
+        params : ParType | None
             Trimming parameters (``trim_start``, ``trim_stop``,
             ``trim_length``).
-        cfg : ExternalRunConfig | None
+        cfg : ExtType |None
             Subprocess configuration.
 
         Returns

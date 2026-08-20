@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import gzip
 import importlib
-import io
 import sys
 import types
 import typing
 from pathlib import Path
 
 import pandas as pd
-import pytest
+import pytest  # type: ignore[import]
 
 # Keep imports isolated from package-level issues in this repository.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -38,10 +37,10 @@ elements_module = importlib.import_module("mmalignments.models.elements")
 
 # barcodes.py imports these from artifacts/elements, so provide fallbacks when
 # they are absent in current source layout.
-if not hasattr(artifacts_module, "OutputSpec"):
-    artifacts_module.OutputSpec = overlay_module.OutputSpec
-if not hasattr(artifacts_module, "FileSpec"):
-    artifacts_module.FileSpec = overlay_module.FileSpec
+# if not hasattr(artifacts_module, "OutputSpec"):
+#     artifacts_module.OutputSpec = overlay_module.OutputSpec
+# if not hasattr(artifacts_module, "FileSpec"):
+#     artifacts_module.FileSpec = overlay_module.FileSpec
 if not hasattr(elements_module, "generate_element_key_name"):
     elements_module.generate_element_key_name = lambda *args, **kwargs: ("k", "n")
 
@@ -183,7 +182,9 @@ def test_single_end_frame_builds_expected_columns():
 
 def test_paired_end_frame_handles_uneven_lengths():
     """Ensure paired-end frame pads missing side with None values."""
-    frame = barcodes_module._paired_end_frame("sample", [("A", 3), ("B", 2)], [("X", 1)])
+    frame = barcodes_module._paired_end_frame(
+        "sample", [("A", 3), ("B", 2)], [("X", 1)]
+    )
     assert list(frame.columns) == [
         "input",
         "Sequence (R1)",
@@ -304,11 +305,15 @@ def test_classify_single_end_frame_adds_assignment_columns(
     """Check single-end classification enriches frame with all annotation columns."""
     frame = pd.DataFrame([{"Sequence (R1)": "AA", "Count (R1)": 2}])
     barcodes = pd.DataFrame([{"sample": "S", "b": "AA"}])
-    monkeypatch.setattr(barcodes_module, "_barcode_candidates", lambda *_: [("S", "b", "AA")])
+    monkeypatch.setattr(
+        barcodes_module, "_barcode_candidates", lambda *_: [("S", "b", "AA")]
+    )
     monkeypatch.setattr(
         barcodes_module,
         "_classify_column",
-        lambda *args, **kwargs: tuple(pd.Series([x]) for x in ["S", "S", 0, "b:S:AA", "AA", 2, "||"]),
+        lambda *args, **kwargs: tuple(
+            pd.Series([x]) for x in ["S", "S", 0, "b:S:AA", "AA", 2, "||"]
+        ),
     )
 
     out = barcodes_module._classify_single_end_frame(
@@ -329,14 +334,25 @@ def test_classify_paired_frame_adds_both_r1_and_r2_columns(
 ):
     """Validate paired-end classification adds R1 and R2 annotation fields."""
     frame = pd.DataFrame(
-        [{"Sequence (R1)": "AA", "Count (R1)": 2, "Sequence (R2)": "TT", "Count (R2)": 2}]
+        [
+            {
+                "Sequence (R1)": "AA",
+                "Count (R1)": 2,
+                "Sequence (R2)": "TT",
+                "Count (R2)": 2,
+            }
+        ]
     )
     barcodes = pd.DataFrame([{"sample": "S", "b1": "AA", "b2": "TT"}])
-    monkeypatch.setattr(barcodes_module, "_barcode_candidates", lambda *_: [("S", "b1", "AA")])
+    monkeypatch.setattr(
+        barcodes_module, "_barcode_candidates", lambda *_: [("S", "b1", "AA")]
+    )
     monkeypatch.setattr(
         barcodes_module,
         "_classify_column",
-        lambda *args, **kwargs: tuple(pd.Series([x]) for x in ["S", "S", 0, "b:S:AA", "AA", 2, "||"]),
+        lambda *args, **kwargs: tuple(
+            pd.Series([x]) for x in ["S", "S", 0, "b:S:AA", "AA", 2, "||"]
+        ),
     )
 
     out = barcodes_module._classify_paired_frame(
@@ -360,7 +376,10 @@ def test_format_hit_example_and_flank_queries(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(barcodes_module, "reverse_complement", lambda s: "TGCA")
     assert barcodes_module._flank_queries("ACGT", "forward") == {"fwd": "ACGT"}
     assert barcodes_module._flank_queries("ACGT", "reverse") == {"rev": "TGCA"}
-    assert barcodes_module._flank_queries("ACGT", "both") == {"fwd": "ACGT", "rev": "TGCA"}
+    assert barcodes_module._flank_queries("ACGT", "both") == {
+        "fwd": "ACGT",
+        "rev": "TGCA",
+    }
     with pytest.raises(ValueError, match="direction must be"):
         barcodes_module._flank_queries("ACGT", "invalid")
 
@@ -372,11 +391,9 @@ def test_flank_uniqueness_radius_details_paths(monkeypatch: pytest.MonkeyPatch):
     # No-hit branch via max_distance filter.
     monkeypatch.setattr(barcodes_module, "hamming_early_break", lambda q, w, m: 5)
     radius, examples = barcodes_module._flank_uniqueness_radius_details(
-        "AAAA",
-        "AAAATTTT",
-        max_distance=1,
+        "AAAA", "AAAATTTT", max_distance=1, direction="both"
     )
-    assert radius == -1
+    assert radius == -1  # as we allow one unique match
     assert examples == []
 
     # Cumulative break branch: two exact hits make uniqueness radius -1.
@@ -413,18 +430,24 @@ def test_sample_start_reads_single_end_and_write_frame(
     monkeypatch.setattr(barcodes_module, "Runnable", DummyRunnable)
     monkeypatch.setattr(barcodes_module, "CallSpec", DummyCallSpec)
     monkeypatch.setattr(barcodes_module, "_input_fastq_name", lambda _p: "sample")
-    monkeypatch.setattr(barcodes_module, "_count_fastq_prefixes", lambda *args, **kwargs: [("AA", 2)])
+    monkeypatch.setattr(
+        barcodes_module, "_count_fastq_prefixes", lambda *args, **kwargs: [("AA", 2)]
+    )
     monkeypatch.setattr(
         barcodes_module,
         "_single_end_frame",
-        lambda name, counts: pd.DataFrame([{"input": name, "Sequence (R1)": "AA", "Count (R1)": 2}]),
+        lambda name, counts: pd.DataFrame(
+            [{"input": name, "Sequence (R1)": "AA", "Count (R1)": 2}]
+        ),
     )
 
     wrote = {}
     monkeypatch.setattr(
         barcodes_module,
         "write_frame",
-        lambda frame, path, **kwargs: wrote.update({"frame": frame, "path": path, "kwargs": kwargs}),
+        lambda frame, path, **kwargs: wrote.update(
+            {"frame": frame, "path": path, "kwargs": kwargs}
+        ),
     )
 
     runner = barcodes_module.sample_start_reads(
@@ -455,14 +478,28 @@ def test_sample_start_reads_paired_with_barcodes_and_column_fallbacks(
         barcodes_module,
         "_paired_end_frame",
         lambda name, r1, r2: pd.DataFrame(
-            [{"input": name, "Sequence (R1)": "AA", "Count (R1)": 2, "Sequence (R2)": "TT", "Count (R2)": 2}]
+            [
+                {
+                    "input": name,
+                    "Sequence (R1)": "AA",
+                    "Count (R1)": 2,
+                    "Sequence (R2)": "TT",
+                    "Count (R2)": 2,
+                }
+            ]
         ),
     )
-    monkeypatch.setattr(barcodes_module, "read_frame", lambda _p: pd.DataFrame([{"sample": "S", "b": "AA"}]))
+    monkeypatch.setattr(
+        barcodes_module,
+        "read_frame",
+        lambda _p: pd.DataFrame([{"sample": "S", "b": "AA"}]),
+    )
 
     captured = {}
 
-    def fake_classify(frame, barcodes, sample_col, start_cols, end_cols, *rest, **kwargs):
+    def fake_classify(
+        frame, barcodes, sample_col, start_cols, end_cols, *rest, **kwargs
+    ):
         captured["start"] = start_cols
         captured["end"] = end_cols
         return frame.assign(dummy=1)
@@ -509,12 +546,16 @@ def test_barcode_check_uniqueness_radius_enriches_and_writes(
     def fake_details(flank, genomic, max_hamming, direction):
         return (2, [f"hit:{flank}"])
 
-    monkeypatch.setattr(barcodes_module, "_flank_uniqueness_radius_details", fake_details)
+    monkeypatch.setattr(
+        barcodes_module, "_flank_uniqueness_radius_details", fake_details
+    )
     wrote = {}
     monkeypatch.setattr(
         barcodes_module,
         "write_frame",
-        lambda out_frame, out_path: wrote.update({"frame": out_frame, "path": out_path}),
+        lambda out_frame, out_path: wrote.update(
+            {"frame": out_frame, "path": out_path}
+        ),
     )
 
     out = barcodes_module.barcode_check_uniqueness_radius(
@@ -543,7 +584,9 @@ def test_uniqueness_radius_returns_runnable_invoking_checker(
         called["args"] = args
         return "done"
 
-    monkeypatch.setattr(barcodes_module, "barcode_check_uniqueness_radius", fake_checker)
+    monkeypatch.setattr(
+        barcodes_module, "barcode_check_uniqueness_radius", fake_checker
+    )
     runner = barcodes_module.uniqueness_radius(
         tmp_path / "barcodes.tsv",
         tmp_path / "genome.fa",
@@ -572,30 +615,40 @@ def test_check_flank_code_returns_hits_and_uniqueness(monkeypatch: pytest.Monkey
     assert unique2 is True
 
 
-def test_uniqueness_element_construction(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_uniqueness_element_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
     """Exercise uniqueness element factory wiring using the real element model."""
-    monkeypatch.setattr(barcodes_module, "uniqueness_radius", lambda *args, **kwargs: "runner")
+    monkeypatch.setattr(
+        barcodes_module, "uniqueness_radius", lambda *args, **kwargs: "runner"
+    )
 
     source_path = tmp_path / "barcodes.tsv"
     genomic_path = tmp_path / "genome.fa"
     source_path.write_text("start\nAAA\n", encoding="utf-8")
     genomic_path.write_text(">chr\nAAATTT\n", encoding="utf-8")
 
-    source = elements_module.FileSource(source_path, tag=overlay_module.ElementTag(
-        root="sample",
-        level=0,
-        stage=overlay_module.Stage.INPUT,
-        method=overlay_module.Method.CHECK,
-        state=overlay_module.State.RAW,
-    ))
+    source = elements_module.FileSource(
+        source_path,
+        tag=overlay_module.ElementTag(
+            root="sample",
+            level=0,
+            stage=overlay_module.Stage.INPUT,
+            method=overlay_module.Method.CHECK,
+            state=overlay_module.State.RAW,
+        ),
+    )
     source.pres = ()
-    genomic = elements_module.FileSource(genomic_path, tag=overlay_module.ElementTag(
-        root="genome",
-        level=0,
-        stage=overlay_module.Stage.INPUT,
-        method=overlay_module.Method.CHECK,
-        state=overlay_module.State.RAW,
-    ))
+    genomic = elements_module.FileSource(
+        genomic_path,
+        tag=overlay_module.ElementTag(
+            root="genome",
+            level=0,
+            stage=overlay_module.Stage.INPUT,
+            method=overlay_module.Method.CHECK,
+            state=overlay_module.State.RAW,
+        ),
+    )
     genomic.pres = ()
 
     out = barcodes_module.uniqueness(
@@ -618,7 +671,9 @@ def test_sampleadapters_element_construction_with_optional_barcodes(
     tmp_path: Path,
 ):
     """Validate sampleadapters wiring, determinants, and prereq aggregation."""
-    monkeypatch.setattr(barcodes_module, "sample_start_reads", lambda *args, **kwargs: "runner2")
+    monkeypatch.setattr(
+        barcodes_module, "sample_start_reads", lambda *args, **kwargs: "runner2"
+    )
 
     r1 = tmp_path / "r1.fastq"
     r2 = tmp_path / "r2.fastq"
@@ -694,7 +749,9 @@ def test_sampleadapters_report_element_and_runner_callback(
             method=overlay_module.Method.CHECK,
             state=overlay_module.State.RAW,
         ),
-        artifacts=artifacts_module.ArtifactSet(artifacts_module.TableArtifact(table_path)),
+        artifacts=artifacts_module.ArtifactSet(
+            artifacts_module.TableArtifact(table_path)
+        ),
         pres=(),
     )
 
@@ -704,6 +761,6 @@ def test_sampleadapters_report_element_and_runner_callback(
     assert out.pres == (source,)
     assert called == {}
 
-    result = out.runner()
+    result = out()
     assert result == called["report"]
     assert called["table"] == table_path

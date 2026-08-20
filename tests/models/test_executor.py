@@ -9,7 +9,7 @@ import types
 import typing
 from pathlib import Path
 
-import pytest
+import pytest  # type: ignore[import]
 
 # Keep module imports isolated from package-level side effects in this repository.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -257,7 +257,9 @@ def test_interrupt_and_keyboard_listener_set_stop_event(
 def test_build_context_sets_contextvars_and_external_logger_hooks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Verify build() sets resources/tool-log context and calls External logger hooks."""
+    """
+    Verify build() sets resources/tool-log context and calls External logger hooks.
+    """
     ex = _executor(tmp_path)
     calls: list[str] = []
     monkeypatch.setattr(
@@ -480,7 +482,10 @@ def test_init_pending_and_successors_counts_dependencies(tmp_path: Path):
 def test_run_sequential_skip_run_and_upstream_blocking(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Cover sequential planner for skipped nodes, runnable nodes, and upstream-failed propagation."""
+    """
+    Cover sequential planner for skipped nodes, runnable nodes, and upstream-failed
+    propagation.
+    """
     ex = _executor(tmp_path)
     monkeypatch.setattr(executor_module, "PipelineError", DummyPipelineError)
 

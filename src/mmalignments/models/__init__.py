@@ -27,17 +27,18 @@ from .parameters import Params  # noqa: F401
 # from .reports.report import MutationalLoadReport  # noqa
 # from .resources import ResourceConfig  # type: ignore[import]
 from .tags import (  # noqa: F401
-    ElementTag,
     Method,
     Omics,
-    PartialElementTag,
     Stage,
     State,
 )
-from .tables.frames import Tables  # noqa: F401
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
+    from_prior,
+)
+
 from .interactive.apps import Interactive  # noqa: F401
-from .parameters import Params  # noqa: F401
-from .externals import ExternalRunConfig  # noqa: F401
 from .resources import ResourceConfig  # type: ignore[import]
 
 __all__ = [

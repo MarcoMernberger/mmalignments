@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, replace
 from functools import cached_property
 from pathlib import Path
-from typing import Any, IO, Mapping, Iterator
+from typing import Any, IO, Mapping, Iterator, Generic, TypeVar
 from mmalignments.models.resources import ResourceConfig
 from mmalignments.models.tags import (
     Method,
@@ -12,9 +12,13 @@ from mmalignments.models.tags import (
     State,
 )
 
+from typing import Self  # # type: ignore[import] Python 3.11+
+
+TPartial = TypeVar("TPartial", bound="Overlay")
+
 
 @dataclass(frozen=True)
-class Overlay:
+class Overlay(Generic[TPartial]):
     """
     Base class for immutable configuration overlays.
     """
@@ -85,7 +89,7 @@ class Overlay:
         """
         return replace(self, **kwargs)
 
-    def patch(self, other: Overlay | None):
+    def patch(self, other: Self | TPartial | None) -> Self:
         """
         Patch the current overlay with another overlay.
 
@@ -95,7 +99,7 @@ class Overlay:
 
         Parameters
         ----------
-        other : Overlay | None
+        other : Self | TPartial | None
             The overlay instance to patch with, or None.
 
         Returns
@@ -110,10 +114,16 @@ class Overlay:
 
         return replace(self, **values)
 
-    def resolve(self, *patches: Overlay | None) -> Overlay:
-        raise NotImplementedError(
-            "Subclasses must implement the resolve method to apply patches."
-        )
+    # def resolve(self, *patches: Overlay | None) -> Overlay:
+    #     raise NotImplementedError(
+    #         "Subclasses must implement the resolve method to apply patches."
+    #     )
+
+    def resolve(self, *patches: Self | TPartial | None) -> Self:
+        result = self
+        for patch in patches:
+            result = result.patch(patch)
+        return result
 
 
 ################################################################################
@@ -122,7 +132,20 @@ class Overlay:
 
 
 @dataclass(frozen=True)
-class ElementTag(Overlay):
+class PartialElementTag(Overlay):
+    """Partial ElementTag, allowing for optional overrides of the ElementTag fields."""
+
+    root: str | None = None
+    level: int | None = None
+    stage: Stage | None = None
+    method: Method | None = None
+    state: State | None = None
+    omics: Omics | None = None
+    flag: str | None = None
+
+
+@dataclass(frozen=True)
+class ElementTag(Overlay[PartialElementTag]):
     """
     ElementTag tags element in the overlay, describing the current step in the pipeline.
 
@@ -138,7 +161,7 @@ class ElementTag(Overlay):
     )
     state: State  # the state of the element, e.g. "raw", "trimmed", "aligned", "sorted"
     omics: Omics | None = None  # the omics type, e.g. "DNA", "RNA", "proteome"
-    param: str | None = (
+    flag: str | None = (
         None  # optional parameter flags, e.g. "trimmed", "deduped", "filtered"
     )
 
@@ -196,8 +219,8 @@ class ElementTag(Overlay):
                 self.state,
             ]
         )
-        if self.param:
-            to_join.append(self.param)
+        if self.flag:
+            to_join.append(self.flag)
         return ".".join(to_join)
 
     def resolve(self, *patches: PartialElementTag | ElementTag | None) -> ElementTag:
@@ -234,87 +257,20 @@ class ElementTag(Overlay):
             ensemblmap(element, tag=PartialElementTag(root="sample"))
         """
         base = PartialElementTag(
-            root=prior.root,  #   default to same root as prior since usually the same sample, but can be overridden if needed
+            root=prior.root,  # default to same root as prior since usually same sample
             level=prior.level
-            + 1,  # default to one level higher than prior since usually the next step in the pipeline, but can be overridden if needed
-            stage=prior.stage,  # default to same stage as prior since often the same stage, but can be overridden if needed
+            + 1,  # default to one level higher than prior since usually is  next step
+            stage=prior.stage,  # default to same stage as prior
             state=None,  # default to None since state often changes at each step
-            method=prior.method,  # default to same method as prior since often the same method, but can be overridden if needed
-            omics=prior.omics,  # default to same omics as prior since usually the same sample, but can be overridden if needed
-            param=None,  # parameter flags are unlikely to be inherited, so default to None
+            method=prior.method,  # default to same method as prior
+            omics=prior.omics,  # default to same omics as prior
+            flag=None,  # flag are unlikely to be inherited, so default to None
         )
 
         patched = prior.resolve(base, tag)
         # override with kwargs
         patched = patched.patch(PartialElementTag(**kwargs))
         return patched
-
-
-@dataclass(frozen=True)
-class PartialElementTag(Overlay):
-    """Partial ElementTag, allowing for optional overrides of the fields of an ElementTag."""
-
-    root: str | None = None
-    level: int | None = None
-    stage: Stage | None = None
-    method: Method | None = None
-    state: State | None = None
-    omics: Omics | None = None
-    param: str | None = None
-
-
-################################################################################
-# Params
-################################################################################
-
-
-@dataclass(frozen=True)
-class Params(Overlay, Mapping[str, Any]):
-    _params: dict[str, Any] = field(default_factory=dict)
-
-    def __init__(self, **kwargs: Any):
-        object.__setattr__(
-            self,
-            "_params",
-            dict(kwargs),
-        )
-
-    def __getitem__(self, key: str):
-        return self._params[key]
-
-    def __iter__(self):
-        return iter(self._params)
-
-    def __len__(self):
-        return len(self._params)
-
-    def to_dict(self, drop_none=True):
-        if drop_none:
-            return {k: v for k, v in self._params.items() if v is not None}
-
-        return dict(self._params)
-
-    def patch(self, other: Params | None):
-        if other is None:
-            return self
-
-        return Params(
-            **{
-                **self._params,
-                **other._params,
-            }
-        )
-
-    def get(self, key, default=None):
-        return self._params.get(key, default)
-
-    def resolve(self, *patches: Params | None):
-        result = self
-
-        for patch in patches:
-            result = result.patch(patch)
-
-        return result
 
 
 ################################################################################
@@ -331,14 +287,29 @@ class FileSpec:
 
 
 @dataclass(frozen=True)
-class OutputSpec(Overlay):
+class PartialOutputSpec(Overlay["PartialOutputSpec"]):
+    """
+    Partial specification for the output of an Element, allowing for optional overrides.
+    """
+
+    stem: str | None = None
+    outdir: Path | None = None
+    prefix: str | None = None
+    suffix: str | None = None
+    ext: str | None = None
+    exts: tuple[str, ...] | None = None
+    additional_output: dict[str, FileSpec] | None = None
+
+
+@dataclass(frozen=True)
+class OutputSpec(Overlay[PartialOutputSpec]):
     """
     A specification for the output of an Element, including the output directory,
     file name, and extension. Used to generate default names and paths for output files,
     and to override defaults specifically.
     """
 
-    stem: str
+    stem: str | None = None
     outdir: Path | None = None
     prefix: str = ""
     suffix: str = ""
@@ -346,7 +317,7 @@ class OutputSpec(Overlay):
     exts: tuple[str, ...] | None = None
     additional_output: dict[str, FileSpec] = field(
         default_factory=dict
-    )  # files in addition to primary output, e.g. {"tsv": FileSpec(name="results", ext="tsv")}
+    )  # files in addition to primary output, e.g. {"tsv": FileSpec(name="results", ext="tsv")} # noqa: E501
 
     _REQUIRED = (
         "stem",
@@ -458,28 +429,30 @@ class OutputSpec(Overlay):
         return self._make_path(filename)
 
 
-@dataclass(frozen=True)
-class PartialOutputSpec(Overlay):
-    """
-    Partial specification for the output of an Element, allowing for optional overrides.
-    """
-
-    stem: str | None = None
-    outdir: Path | None = None
-    prefix: str | None = None
-    suffix: str | None = None
-    ext: str | None = None
-    exts: tuple[str, ...] | None = None
-    additional_output: dict[str, FileSpec] | None = None
-
-
 ########################################################################################
 # ExternalRunConfig
 ########################################################################################
 
 
 @dataclass(frozen=True)
-class ExternalRunConfig(Overlay):
+class PartialExternalRunConfig(Overlay["PartialExternalRunConfig"]):
+    """Partial configuration for running an External tool."""
+
+    cwd: Path | None = None
+    env: dict[str, str] | None = None
+    pipe_output: bool | None = None
+    check: bool | None = None
+    timeout: float | None = None
+    threads: int | None = None
+    multi: bool | None = None
+    stdout: Path | None | IO = None
+    stderr: Path | None | IO = None
+    append: bool | None = None
+    log_dir: Path | None = None
+
+
+@dataclass(frozen=True)
+class ExternalRunConfig(Overlay[PartialExternalRunConfig]):
     """Configuration for running an External tool."""
 
     cwd: Path | None = None
@@ -515,37 +488,81 @@ class ExternalRunConfig(Overlay):
         return result
 
 
+################################################################################
+# Params
+################################################################################
+
+
 @dataclass(frozen=True)
-class PartialExternalRunConfig(Overlay):
-    """Partial configuration for running an External tool."""
+class Params(Overlay["Params"], Mapping[str, Any]):
+    _params: dict[str, Any] = field(default_factory=dict)
 
-    cwd: Path | None = None
-    env: dict[str, str] | None = None
-    pipe_output: bool | None = None
-    check: bool | None = None
-    timeout: float | None = None
-    threads: int | None = None
-    multi: bool | None = None
-    stdout: Path | None | IO = None
-    stderr: Path | None | IO = None
-    append: bool | None = None
-    log_dir: Path | None = None
+    def __init__(self, **kwargs: Any):
+        object.__setattr__(
+            self,
+            "_params",
+            dict(kwargs),
+        )
 
+    def __getitem__(self, key: str):
+        return self._params[key]
 
-def from_prior(
-    prior: ElementTag,
-    tag: PartialElementTag | ElementTag | None = None,
-    **kwargs,
-) -> ElementTag:
-    """Compatibility wrapper for modules that import from_prior from the overlay layer."""
-    return ElementTag.from_prior(prior, tag=tag, **kwargs)
+    def __iter__(self):
+        return iter(self._params)
+
+    def __len__(self):
+        return len(self._params)
+
+    def to_dict(self, drop_none=True):
+        if drop_none:
+            return {k: v for k, v in self._params.items() if v is not None}
+
+        return dict(self._params)
+
+    def patch(self, other: Params | None):
+        if other is None:
+            return self
+
+        return Params(
+            **{
+                **self._params,
+                **other._params,
+            }
+        )
+
+    def get(self, key, default=None):
+        return self._params.get(key, default)
+
+    def resolve(self, *patches: Params | None):
+        result = self
+
+        for patch in patches:
+            result = result.patch(patch)
+
+        return result
 
 
 ########################################################################################
 # Shortcuts
 ########################################################################################
 
-T = PartialElementTag
-O = PartialOutputSpec
-P = Params
-E = PartialExternalRunConfig
+Tag = PartialElementTag
+Out = PartialOutputSpec
+Par = Params
+Ext = PartialExternalRunConfig
+
+TagType = ElementTag | PartialElementTag
+OutType = OutputSpec | PartialOutputSpec
+ParType = Params
+ExtType = ExternalRunConfig | PartialExternalRunConfig
+
+
+def from_prior(
+    prior: ElementTag,
+    tag: TagType | None = None,
+    **kwargs,
+) -> ElementTag:
+    """
+    Compatibility wrapper for modules that import from_prior from the overlay layer.
+    """
+    return ElementTag.from_prior(prior, tag=tag, **kwargs)

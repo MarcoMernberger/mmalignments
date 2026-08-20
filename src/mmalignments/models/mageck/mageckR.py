@@ -21,13 +21,16 @@ from typing import Sequence
 
 from mmalignments.models.elements import Element, element
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
-    PartialElementTag,
     Stage,
     State,
+)
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
     from_prior,
 )
+
 from mmalignments.r.r_integration import RScriptExternal
 
 logger = logging.getLogger(__name__)

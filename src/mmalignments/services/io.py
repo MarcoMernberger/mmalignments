@@ -10,6 +10,7 @@ from typing import IO, TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 import pandas as pd  # type: ignore[import]
 import pyarrow.parquet as pq  # type: ignore[import]
+from matplotlib.figure import Figure  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
 
 if TYPE_CHECKING:
@@ -467,3 +468,23 @@ def concat_fastq(inputs: tuple[Path, ...], output: Path) -> None:
             stdout=out,
             check=True,
         )
+
+
+def save_figure(fig: Figure, outfile: Path) -> None:
+    """
+    Save a matplotlib figure to a file.
+
+    Parameters
+    ----------
+    fig : Figure
+        The matplotlib figure to save.
+    outfile : Path
+        The path to the output file.
+    """
+    parents(outfile)
+
+    fig.savefig(
+        str(outfile),
+        format=outfile.suffix[1:],
+        bbox_inches="tight",
+    )

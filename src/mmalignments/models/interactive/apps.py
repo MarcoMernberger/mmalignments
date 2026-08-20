@@ -43,6 +43,7 @@ Or from within Python:
     app = build_app_from_config("path/to/element.app.json")
     app.panel().show()
 """
+
 from __future__ import annotations
 
 import json
@@ -58,11 +59,12 @@ from mmalignments.models.elements import (
     generate_element_key_name,
 )
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
-    PartialElementTag,
-    Stage,
     State,
+)
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
     from_prior,
 )
 
@@ -158,7 +160,9 @@ class Interactive:
             panel_app_script=self.panel_app_script,
         )
 
-        key, name = generate_element_key_name(resolved_tag, "Interactive", "app_element")
+        key, name = generate_element_key_name(
+            resolved_tag, "Interactive", "app_element"
+        )
 
         return Element(
             key,

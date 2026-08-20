@@ -284,7 +284,7 @@ class FastQC(External):
             method=Method.FASTQC,
             state=State.REPORT,
             omics=sample.tag.omics,
-            param=label,
+            flag=label,
         ).merge(tag)
 
         # Prepare output folder

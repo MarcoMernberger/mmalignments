@@ -414,7 +414,7 @@ class STAR(External):
             state=State.MAP,
             omics=Omics.RNA,
             ext="bam",
-            param=index.tag.root,
+            flag=index.tag.root,
         )
 
         outdir = Path(outdir or self.default_aligned_dir(sample_name, index.tag.root))

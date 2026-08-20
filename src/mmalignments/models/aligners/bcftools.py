@@ -19,11 +19,13 @@ from mmalignments.models.elements import (
     generate_element_key_name,
 )
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
-    PartialElementTag,
     Stage,
     State,
+)
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
     from_prior,
 )
 from mmalignments.services.errors import PipelineError
@@ -1013,7 +1015,7 @@ class BCFtools(External):
         filtered = self.filter(
             view,
             include_expr=include_expr,
-            tag=tags.get("filter") if tags else PartialElementTag(param="hard"),
+            tag=tags.get("filter") if tags else PartialElementTag(flag="hard"),
             outdir=outdir,
             filename=filename,
             params=params.get("filter") if params else None,
