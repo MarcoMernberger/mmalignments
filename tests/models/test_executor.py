@@ -168,6 +168,11 @@ class DummyNode:
     def skip(self, cached_signature=None, cached_sig_data=None):
         return self.skip_result
 
+    def is_done(self, cached_signature=None, cached_sig_data=None):
+        return self.skip(
+            cached_signature=cached_signature, cached_sig_data=cached_sig_data
+        )
+
     def sig_data(self):
         return dict(self._sig_data)
 
@@ -1523,3 +1528,86 @@ def test_capture_store_state_additional_reason_paths(
     ex.capture_store_state(outstore, accept_existing=True)
     data = json.loads(outstore.read_text(encoding="utf-8"))
     assert data["mm"] == n_mismatch_raise.signature
+
+
+def test_executor_does_not_rerun_unchanged_element(tmp_path: Path):
+    """Ensure an unchanged element is skipped on a consecutive executor run."""
+    ex = _executor(tmp_path)
+
+    class StableNode:
+        def __init__(self, output_file: Path):
+            self.key = "stable-node"
+            self.name = "stable-node"
+            self.pres = ()
+            self.files = (output_file,)
+            self.artifacts = {"primary": "artifact"}
+            self.tag = DummyTag(default_name="stable-node")
+            self.provenance = "stable-node"
+            self.creation_trace = "trace"
+            self.called = 0
+            self._signature_data = {
+                "key": self.key,
+                "determinants": "",
+                "inputs": [],
+                "artifacts": "artifact-signature",
+                "pre_sigs": [],
+            }
+            self._signature = "stable-signature"
+
+        @property
+        def signature(self):
+            return self._signature
+
+        @property
+        def signature_data(self):
+            return dict(self._signature_data)
+
+        def describe(self):
+            return "stable-node"
+
+        def __call__(self):
+            self.called += 1
+            self.files[0].parent.mkdir(parents=True, exist_ok=True)
+            self.files[0].write_text("result\n", encoding="utf-8")
+            return True
+
+        def outputs_ok(self):
+            p = self.files[0]
+            return (p.exists() and p.stat().st_size > 0), "Output files are OK"
+
+        def is_done(self, cached_signature=None, cached_sig_data=None):
+            if cached_signature is None:
+                return False, "First run"
+            if cached_signature != self.signature:
+                return False, "Cached signature does not match"
+            return self.outputs_ok()
+
+    node = StableNode(tmp_path / "out" / "stable.txt")
+
+    failures, _ = ex._run_sequential(
+        [node],
+        cache={},
+        reporter=None,
+        continue_on_error=True,
+        failures=[],
+        dry_run=False,
+        log_run_only=False,
+        verbose=False,
+    )
+    assert failures == []
+    assert node.called == 1
+
+    # Simulate a second pipeline invocation using persisted cache/signature data.
+    cache2 = ex.load_cache(ex.signature_store_path)
+    failures2, _ = ex._run_sequential(
+        [node],
+        cache=cache2,
+        reporter=None,
+        continue_on_error=True,
+        failures=[],
+        dry_run=False,
+        log_run_only=False,
+        verbose=False,
+    )
+    assert failures2 == []
+    assert node.called == 1

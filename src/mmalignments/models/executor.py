@@ -290,37 +290,37 @@ class Executor:
         message: str,
         level: str = "INFO",
     ) -> None:
-        """If we have a reporter for live progress, we cannot log directly"""
+        """Log to file logger and optionally mirror to the live reporter pane."""
+        self.msg(message, level=level)
         if reporter:
-            # Route through the live display only — suppress StreamHandler out
             reporter.push_log(f"[{level}] {message}")
-        else:
-            self.msg(message, level=level)
 
-    def compose_element_message(self, skip, node, reason, verbose) -> str:
+    def compose_element_message(self, is_done, node, reason, verbose, threads) -> str:
         """for dry runs or runs without ProgressReporter"""
-        if not skip:
+        t = ""
+        if not is_done:
             status = "RUN "
-            t = f"  [{node.threads}t]" if hasattr(node, "threads") else ""
+            if threads is not None:
+                t = f"  [{threads}t]"
         else:
             status = "SKIP"
-            t = ""
         message = f"{status} {node.name}  ({reason}){t}"
         if verbose:
             message += f"\n  key: {node.key}"
-            message += f"\n  actual output: {node.output_files}"
+            message += f"\n  tag: {node.tag}"
+            message += f"\n  actual output: {node.files}"
             message += f"\n  artifacts: {node.artifacts}"
             message += f"\n  tag: {node.tag}"
             message += f"\n  pre: {node.pres}"
             cmd = getattr(node.run, "command", None)
             display = getattr(node.run, "command_display", None)
-            if not skip:
+            if not is_done:
                 command = shlex.join(cmd) if cmd else "<no command available>"
                 message += f"\n  cmd:  {command}"
                 if display and display != command:
                     message += f"\n  display:  {display}"
                     message += f"\n  prov: {node.provenance}"
-                message += f"\n  default output: {node.default_output_file}"
+                message += f"\n  output: {node.files}"
         return message
 
     # def initlog(self, console: bool = False) -> Logger:
@@ -385,6 +385,7 @@ class Executor:
         nodes = self.collect(targets)
 
         order = self.toposort(nodes)
+        # here
         self.registry.write_registry(self.elements_file)
         self.check_duplicate_outputs(nodes)
         self.write_dot(nodes, dot_path or self.dot_path)
@@ -536,14 +537,17 @@ class Executor:
         self, node, cache, cached_sig_data: dict | None = None
     ) -> tuple[bool, str]:
         cached_sig = cache.get(node.key)
-        skip, reason = node.skip(
+        is_done, reason = node.is_done(
             cached_signature=cached_sig, cached_sig_data=cached_sig_data
         )
-        return skip, reason
+        return is_done, reason
 
-    def _log_node(self, node, reporter, skip, reason, log_run_only, verbose) -> str:
-        message = self.compose_element_message(skip, node, reason, verbose)
-        if (not skip) or (not log_run_only):
+    def _log_node(
+        self, node, reporter, is_done, reason, log_run_only, verbose, threads
+    ) -> str:
+        message = self.compose_element_message(is_done, node, reason, verbose, threads)
+        # log_run_only=True means: only show nodes that must run.
+        if (not is_done) or (not log_run_only):
             self.log(reporter, message, level="INFO")
         return message
 
@@ -551,9 +555,39 @@ class Executor:
         cache[node.key] = node.signature
         self.save_cache(self.signature_store_path, cache)
 
+    def _invalidate_signature_caches(self, node: Element) -> None:
+        """Drop cached signature properties so they are recomputed post-run.
+
+        Signatures may be materialized before execution (e.g., for planning). If
+        outputs are created during ``node()``, those cached values become stale and
+        can trigger a false rerun on the next pipeline invocation.
+        """
+
+        def _drop_cached(obj: Any, attrs: tuple[str, ...]) -> None:
+            d = getattr(obj, "__dict__", None)
+            if not isinstance(d, dict):
+                return
+            for attr in attrs:
+                d.pop(attr, None)
+
+        # Element-level cached properties.
+        _drop_cached(node, ("signature", "signature_data"))
+
+        arts = getattr(node, "artifacts", None)
+        if arts is None:
+            return
+
+        # ArtifactSet-level cached properties.
+        _drop_cached(arts, ("signature", "signature_data", "files"))
+
+        # Per-artifact cached signatures/files.
+        for artifact in arts.values():
+            _drop_cached(artifact, ("signature", "files"))
+
     def _run_node(self, node, cache, reporter, continue_on_error, failures):
         try:
             node()
+            self._invalidate_signature_caches(node)
             # update cache immediately after each node finishes, so we don't lose progress if the pipeline crashes later  # noqa: E501
             self.update_cache(cache, node)
             if reporter:
@@ -617,16 +651,17 @@ class Executor:
         need_to_run: list[Element] = []
         skipped: set[str] = set()
         for node in order:
-            sigdata = dict(node.sig_data())
-            sigstore[node.key] = sigdata
-            self.save_sigstore(self.signature_data_path, sigstore)
             # check if the node must run or skipped
             cached_sig_data = old_sigstore.get(node.key)
-            skip, reason = self._evaluate_node(node, cache, cached_sig_data)
-            if skip:
+            is_done, reason = self._evaluate_node(node, cache, cached_sig_data)
+            if is_done:
+                sigstore[node.key] = dict(node.signature_data)
+                self.save_sigstore(self.signature_data_path, sigstore)
                 skipped.add(node.key)
                 # log skipped node
-                self._log_node(node, reporter, skip, reason, log_run_only, verbose)
+                self._log_node(
+                    node, reporter, is_done, reason, log_run_only, verbose, threads=None
+                )
                 if reporter:
                     reporter.mark_skip(node.key, reason)
                 continue
@@ -642,14 +677,26 @@ class Executor:
             if upstream_failed and not dry_run:
                 blocked_keys.add(node.key)
                 self._log_node(
-                    node, reporter, True, "upstream failed", log_run_only, verbose
+                    node,
+                    reporter,
+                    True,
+                    "upstream failed",
+                    log_run_only,
+                    verbose,
+                    threads=None,
                 )
                 if reporter:
                     reporter.mark_upstream_failed(node.key, "upstream failed")
                 continue
             # log running node
             self._log_node(
-                node, reporter, False, reasons_to_run[node.key], log_run_only, verbose
+                node,
+                reporter,
+                False,
+                reasons_to_run[node.key],
+                log_run_only,
+                verbose,
+                threads=1,
             )
             if dry_run:
                 continue
@@ -659,6 +706,10 @@ class Executor:
             cache, reporter, failures = self._run_node(
                 node, cache, reporter, continue_on_error, failures
             )
+            # Only persist current signature data for successfully executed nodes.
+            if not failures or failures[-1][1] != node.key:
+                sigstore[node.key] = dict(node.signature_data)
+                self.save_sigstore(self.signature_data_path, sigstore)
             # If the node just failed, add it to blocked_keys so its
             # dependents are skipped with UPSTREAM_FAILED.
             if failures and failures[-1][1] == node.key:
@@ -755,42 +806,50 @@ class Executor:
                 if abort.is_set():
                     return
                 node = by_key[key]
-                cached_sig_data = old_sigstore.get(node.key)
-                skip, reason = self._evaluate_node(node, cache, cached_sig_data)
-                self._log_node(node, reporter, skip, reason, log_run_only, verbose)
-                if skip:
-                    if reporter:
-                        reporter.mark_skip(node.key, reason)
-                else:
-                    if reporter:
-                        reporter.mark_start(node.key)
-                    try:
+                try:
+                    cached_sig_data = old_sigstore.get(node.key)
+                    is_done, reason = self._evaluate_node(node, cache, cached_sig_data)
+                    self._log_node(
+                        node,
+                        reporter,
+                        is_done,
+                        reason,
+                        log_run_only,
+                        verbose,
+                        threads=len(pool._threads),
+                    )
+                    if is_done:
+                        if reporter:
+                            reporter.mark_skip(node.key, reason)
+                    else:
+                        if reporter:
+                            reporter.mark_start(node.key)
                         node()
+                        self._invalidate_signature_caches(node)
                         with cache_lock:
-                            cache[node.key] = node.signature
-                            self.save_cache(self.signature_store_path, cache)
-                        sigdata = dict(node.sig_data())
+                            self.update_cache(cache, node)
+                        sigdata = dict(node.signature_data)
                         with sigstore_lock:
                             sigstore[node.key] = sigdata
                             self.save_sigstore(self.signature_data_path, sigstore)
                         if reporter:
                             reporter.mark_done(node.key)
-                    except Exception as e:
-                        if not isinstance(e, PipelineError):
-                            e = PipelineError(e, phase="EXECUTION")
-                        failures.append((node.name, node.key, e))
+                except Exception as e:
+                    if not isinstance(e, PipelineError):
+                        e = PipelineError(e, phase="EXECUTION")
+                    failures.append((node.name, node.key, e))
 
-                        if reporter:
-                            reporter.mark_failed(node.key)
-                        self.log(reporter, f"Error: {node.name}: {e}", level="ERROR")
-                        # Mark all transitive successors as upstream-failed.
-                        with lock:
-                            blocked_keys.add(key)
-                            _mark_successors_blocked(key)
-                            if len(completed) + len(active) - 1 >= len(order):
-                                done_event.set()
-                        if not continue_on_error:
-                            abort.set()
+                    if reporter:
+                        reporter.mark_failed(node.key)
+                    self.log(reporter, f"Error: {node.name}: {e}", level="ERROR")
+                    # Mark all transitive successors as upstream-failed.
+                    with lock:
+                        blocked_keys.add(key)
+                        _mark_successors_blocked(key)
+                        if len(completed) + len(active) - 1 >= len(order):
+                            done_event.set()
+                    if not continue_on_error:
+                        abort.set()
                         return
 
                 # unblock successors
@@ -841,7 +900,7 @@ class Executor:
         seen: dict[Path, str] = {}
         conflicts: list[str] = []
         for node in nodes:
-            for path in node.output_files or ():
+            for path in node.files or ():
                 owner = seen.get(path)
                 if owner is None:
                     seen[path] = node.key
@@ -880,7 +939,10 @@ class Executor:
 
             if existing is None:
                 by_key[e.key] = e
-                stack.extend(e.pres)
+                if hasattr(e, "pres") and e.pres:
+                    for prereq in e.pres:
+                        if isinstance(prereq, Element):
+                            stack.append(prereq)
                 continue
 
             if existing is e:
@@ -1020,7 +1082,7 @@ class Executor:
         for node in order:
             cached_sig = cache.get(node.key)
             skip, reason = node.skip(cached_signature=cached_sig)
-            sigdata = dict(node.sig_data())  #
+            sigdata = dict(node.signature_data)  #
             sigdata["name"] = node.tag.default_name
             data_cache[node.key] = sigdata
             self.save_sigstore(sig_data_store, data_cache)

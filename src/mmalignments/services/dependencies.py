@@ -108,9 +108,9 @@ def short_hash(signature: str, n: int = 8) -> str:
 def combined_signature(*args) -> str:
     sigs = []
     for arg in args:
-        if hasattr(arg, "signature"):
+        if isinstance(arg, Signifiable):
             sigs.append(arg.signature)  # all Signifiable
-        elif isinstance(arg, Path):  # all paths
+        elif isinstance(arg, Path) and arg.is_file():  # all paths
             sigs.append(file_signature(arg))
         elif callable(arg):  # Callable, runnable and functions
             sigs.append(function_hash(arg))
@@ -120,7 +120,8 @@ def combined_signature(*args) -> str:
             sigs.append(arg.signature)
         else:
             sigs.append(stable_hash(arg))
-    return stable_hash(sigs)
+    sig = stable_hash(sigs)
+    return sig
 
 
 def _compute_signature(self) -> str:

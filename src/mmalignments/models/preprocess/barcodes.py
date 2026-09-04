@@ -22,17 +22,20 @@ from mmalignments.models.elements import (
     generate_element_key_name,
 )
 from mmalignments.models.externals import Runnable
+from mmalignments.models.overlay import (
+    ElementTag,
+    FileSpec,
+    OutputSpec,
+    OutType,
+    TagType,
+    from_prior,
+)
 from mmalignments.models.reports import write_sampleadapters_report
 from mmalignments.models.tags import (
     Method,
     Omics,
     Stage,
     State,
-)
-from mmalignments.models.overlay import (
-    FileSpec,
-    OutputSpec,
-    from_prior,
 )
 from mmalignments.services.genomic import (
     hamming_early_break,
@@ -49,7 +52,7 @@ def uniqueness(
     genomic: Element | FileSource,
     *,
     max_hamming: int = 5,
-    barcode_columns: list[str] = ["used_start_barcode", "used_end_barcode"],
+    barcode_columns: list[str] = ["start_barcode", "end_barcode"],
     direction: Literal["forward", "reverse", "both"] = "both",
     tag: TagType | None = None,
     outspec: OutType | None = None,
@@ -94,7 +97,7 @@ def uniqueness(
     """
     fasta_path = genomic.artifacts.primary.resolve()
     frame_path = source.artifacts.primary.resolve()
-    tag = from_prior(
+    resolved_tag: ElementTag = from_prior(
         source.tag,
         tag,
         root=source.root,
@@ -105,13 +108,12 @@ def uniqueness(
         flag="uniqueness",
     )
     spec = OutputSpec(
-        tag.default_name,
+        resolved_tag.default_name,
         Path("cache/barcodes"),
         ext="tsv",
     ).patch(outspec)
     outfile = spec.path()
-    pres = source.pres if isinstance(source, FileSource) else (source,)
-    pres += genomic.pres if isinstance(genomic, FileSource) else (genomic,)
+    pres = (source, genomic)
     determinants = tuple(barcode_columns) + (str(max_hamming),)
     runner = uniqueness_radius(
         frame_path,
@@ -122,7 +124,7 @@ def uniqueness(
         direction=direction,
     )
     key, name = generate_element_key_name(
-        tag,
+        resolved_tag,
         "barcodes",
         subcommand="uniqueness",
     )
@@ -134,7 +136,7 @@ def uniqueness(
     return Element(
         key,
         runner,
-        tag=tag,
+        tag=resolved_tag,
         artifacts=artifacts,
         determinants=determinants,
         pres=pres,
@@ -203,7 +205,7 @@ def sampleadapters(
         the specified output file.
     """
     fastq = source.artifacts.primary
-    tag = from_prior(
+    resolved_tag: ElementTag = from_prior(
         source.tag,
         tag,
         root=source.root,
@@ -216,16 +218,16 @@ def sampleadapters(
     r1 = fastq.r1
     r2 = fastq.r2  # may be None
     spec = OutputSpec(
-        tag.default_name,
+        resolved_tag.default_name,
         Path("results/barcodes"),
         ext="tsv",
     ).patch(outspec)
     outfile = spec.path()
-    pres = source.pres if isinstance(source, FastqSource) else (source,)
+    pres = (source,) if isinstance(source, Element) else ()
     barcode_path = None
     if barcodes is not None:
         barcode_path = barcodes.artifacts.primary.resolve()
-        pres += barcodes.pres if isinstance(barcodes, FileSource) else (barcodes,)
+        pres += (barcodes,)
 
     determinants = (
         str(start_length),
@@ -252,7 +254,7 @@ def sampleadapters(
         leven=leven,
     )
     key, name = generate_element_key_name(
-        tag,
+        resolved_tag,
         "barcodes",
         subcommand="sampleadapters",
     )
@@ -260,7 +262,7 @@ def sampleadapters(
     return Element(
         key,
         runner,
-        tag=tag,
+        tag=resolved_tag,
         artifacts=artifacts,
         determinants=determinants,
         pres=pres,
@@ -281,7 +283,7 @@ def sampleadapters_report(
     keeps the detailed assignments and the report as separate nodes.
     """
     table_path = source.artifacts.primary.resolve()
-    tag = from_prior(
+    resolved_tag: ElementTag = from_prior(
         source.tag,
         tag,
         stage=Stage.SUMMARY,
@@ -291,16 +293,16 @@ def sampleadapters_report(
         flag="barcodes_report",
     )
     spec = OutputSpec(
-        tag.default_name,
+        resolved_tag.default_name,
         Path("results/barcodes"),
         ext="tsv",
     ).patch(outspec)
     spec = spec.add_output(
         "html",
-        FileSpec(spec.stem or tag.default_name, "html"),
+        FileSpec(spec.stem or resolved_tag.default_name, "html"),
     )
     summary_path = spec.path()
-    report_path = spec.files["html"]
+    report_path = spec.path("html")
 
     pres = source.pres if isinstance(source, FileSource) else (source,)
 
@@ -328,7 +330,7 @@ def sampleadapters_report(
         },
     ).render()
     key, name = generate_element_key_name(
-        tag,
+        resolved_tag,
         "barcodes",
         subcommand="sampleadapters_report",
     )
@@ -341,7 +343,7 @@ def sampleadapters_report(
     return Element(
         key,
         Runnable(__call, display=display),
-        tag=tag,
+        tag=resolved_tag,
         artifacts=artifacts,
         determinants=(),
         pres=pres,
@@ -902,7 +904,7 @@ def _flank_queries(
     raise ValueError("direction must be 'forward', 'reverse', or 'both'")
 
 
-def _flank_uniqueness_radius_details(
+def _flank_uniqueness_radius_details(  # noqa: C901
     flank: str,
     genomic: str,
     max_distance: int | None = None,
@@ -973,8 +975,8 @@ def _flank_uniqueness_radius_details(
         #
         # For "forward" / "reverse" this loop contains only one query.
         # For "both", we use the smaller distance of the two orientations.
-        best_distance = None
-        best_label = None
+        best_distance: int | None = None
+        best_label: str | None = None
 
         for label, query in queries:
             distance = hamming_early_break(
@@ -1007,6 +1009,7 @@ def _flank_uniqueness_radius_details(
             examples = distance_examples[best_distance]
 
             if len(examples) < example_limit:
+                assert best_label is not None
                 examples.append(
                     _format_hit_example(
                         best_label,
@@ -1076,6 +1079,15 @@ def barcode_check_uniqueness_radius(
 
     Results are written to ``outfile`` and returned as a DataFrame.
     """
+
+    def map_to_uniqueness_radius(barcode: str) -> tuple[int, list[str]]:
+        return _flank_uniqueness_radius_details(
+            barcode,
+            genomic_sequence,
+            max_hamming,
+            direction,
+        )
+
     if max_hamming < 0:
         raise ValueError("max_hamming must be >= 0")
 
@@ -1085,14 +1097,7 @@ def barcode_check_uniqueness_radius(
     genomic_sequence = str(record.seq).upper()
 
     for column in barcode_columns:
-        results = barcodes[column].map(
-            lambda barcode: _flank_uniqueness_radius_details(
-                barcode,
-                genomic_sequence,
-                max_hamming,
-                direction,
-            )
-        )
+        results = barcodes[column].map(map_to_uniqueness_radius)
 
         barcodes[f"Unique radius ({column})"] = results.str[0]
 

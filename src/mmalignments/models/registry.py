@@ -35,11 +35,11 @@ class ElementRegistry:
         self._by_key: Dict[str, Element] = {}
 
     def intern(self, e: Element) -> Element:
-        """Register *e* and return the canonical instance for its key.
+        """Register *e* and return it if the key is unique.
 
-        If an Element with the same key already exists, the existing instance
-        is returned (and a signature check is performed).  Otherwise *e* is
-        stored and returned as-is.
+        If an Element with the same key already exists, registration is only
+        accepted when the exact same object is passed again. Registering a
+        different Element object under an existing key raises immediately.
 
         Parameters
         ----------
@@ -49,14 +49,23 @@ class ElementRegistry:
         Raises
         ------
         ValueError
-            If a key collision with a different signature is detected.
+            If a different Element object is registered with an existing key.
         """
         existing = self._by_key.get(e.key)
         if existing is None:
             self._by_key[e.key] = e
             return e
 
-        return existing
+        if existing is e:
+            return e
+
+        raise ValueError(
+            "Duplicate key collision in ElementRegistry.intern:\n"
+            f"  key: {e.key!r}\n"
+            f"  existing element: {existing!r}\n"
+            f"  new element:      {e!r}\n"
+            "Element keys must be unique per distinct Element object."
+        )
 
     def keys(self) -> Iterator[str]:
         """Iterate over all registered Element keys."""

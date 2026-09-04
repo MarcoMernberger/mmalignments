@@ -317,8 +317,10 @@ class ColumnTag:
 
 class ColumnSchema(Mapping[str, ColumnTag]):
     """
-    A schema that describes the columns in a DataFrame using ColumnTags.
-    Provides methods for selecting and deselecting columns based on their tags.
+    A Mapping of column names to ColumnTags that describes the columns in a
+    DataFrame using ColumnTags.
+    Provides methods for selecting and deselecting columns based on their tags
+    and supports selection via Views.
     """
 
     __slots__ = ("_tags", "_index_column")

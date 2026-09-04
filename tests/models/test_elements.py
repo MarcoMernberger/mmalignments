@@ -1445,8 +1445,9 @@ def test_callspec_render_and_registry_helpers(
     e1 = TinyElement("k1")
     e2 = TinyElement("k1")
     assert reg.intern(e1) is e1
-    # Same key should return existing canonical instance.
-    assert reg.intern(e2) is e1
+    # Same key on a different object must fail.
+    with pytest.raises(ValueError, match="Duplicate key collision"):
+        reg.intern(e2)
     assert reg.get("k1") is e1
     assert list(reg.keys()) == ["k1"]
 

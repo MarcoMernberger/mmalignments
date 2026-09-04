@@ -1051,11 +1051,11 @@ def test_element_sig_includes_pre_sigs():
 
 
 # ---------------------------------------------------------------------------
-# element_build_context with registry intern (key collision, same sig)
+# element_build_context with registry intern (strict key uniqueness)
 # ---------------------------------------------------------------------------
 
 
-def test_registry_intern_same_element():
+def test_registry_intern_same_key_different_element_raises():
     tag = make_tag()
     registry = ElementRegistry()
 
@@ -1063,11 +1063,10 @@ def test_registry_intern_same_element():
     def build():
         return Element(key="shared_key", run=lambda: None, tag=tag)
 
-    with element_build_context(registry):
-        e1 = build()
-        e2 = build()
-
-    assert e1 is e2  # same instance returned
+    with pytest.raises(ValueError, match="Duplicate key collision"):
+        with element_build_context(registry):
+            build()
+            build()
 
 
 def test_registry_intern_key_collision_different_sig():
@@ -1075,7 +1074,7 @@ def test_registry_intern_key_collision_different_sig():
     tag2 = make_tag(root="r2")
     registry = ElementRegistry()
 
-    with pytest.raises(ValueError, match="Key collision"):
+    with pytest.raises(ValueError, match="Duplicate key collision"):
         with element_build_context(registry):
             e1 = Element(key="collision", run=lambda: None, tag=tag1)
             registry.intern(e1)

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Mapping
 
+from mmalignments.models.overlay import Params
 from mmalignments.models.resources import ResourceConfig  # type: ignore[import]
 from mmalignments.services.io import load_param_json
 
@@ -12,70 +13,70 @@ from mmalignments.services.io import load_param_json
 ###############################################################################
 
 
-@dataclass(frozen=True)
-class Params(Mapping[str, Any]):
-    _override_params: Mapping[str, Any] = field(default_factory=dict)
+# @dataclass(frozen=True)
+# class Params(Mapping[str, Any]):
+#     _override_params: Mapping[str, Any] = field(default_factory=dict)
 
-    def __init__(self, **kwargs: Any) -> None:
-        object.__setattr__(self, "_override_params", dict(kwargs))
+#     def __init__(self, **kwargs: Any) -> None:
+#         object.__setattr__(self, "_override_params", dict(kwargs))
 
-    @classmethod
-    def of(cls, **kwargs: Any) -> Params:
-        return cls(**kwargs)
+#     @classmethod
+#     def of(cls, **kwargs: Any) -> Params:
+#         return cls(**kwargs)
 
-    def __getitem__(self, key: str) -> Any:
-        return self._override_params[key]
+#     def __getitem__(self, key: str) -> Any:
+#         return self._override_params[key]
 
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._override_params)
+#     def __iter__(self) -> Iterator[str]:
+#         return iter(self._override_params)
 
-    def __len__(self) -> int:
-        return len(self._override_params)
+#     def __len__(self) -> int:
+#         return len(self._override_params)
 
-    def to_dict(self, *, drop_none: bool = True) -> dict[str, Any]:
-        if not drop_none:
-            return dict(self._override_params)
-        return {k: v for k, v in self._override_params.items() if v is not None}
+#     def to_dict(self, *, drop_none: bool = True) -> dict[str, Any]:
+#         if not drop_none:
+#             return dict(self._override_params)
+#         return {k: v for k, v in self._override_params.items() if v is not None}
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._override_params.get(key, default)
+#     def get(self, key: str, default: Any = None) -> Any:
+#         return self._override_params.get(key, default)
 
-    def items(self) -> Iterator[tuple[str, Any]]:
-        return iter(self._override_params.items())
+#     def items(self) -> Iterator[tuple[str, Any]]:
+#         return iter(self._override_params.items())
 
-    def __contains__(self, key: str) -> bool:
-        return key in self._override_params
+#     def __contains__(self, key: str) -> bool:
+#         return key in self._override_params
 
-    def override(self, **kwargs: Any) -> Params:
-        return Params(**{**self._override_params, **kwargs})
+#     def override(self, **kwargs: Any) -> Params:
+#         return Params(**{**self._override_params, **kwargs})
 
-    def __repr__(self) -> str:
-        return f"Params({self._override_params})"
+#     def __repr__(self) -> str:
+#         return f"Params({self._override_params})"
 
-    def __str__(self) -> str:
-        return self.__repr__()
+#     def __str__(self) -> str:
+#         return self.__repr__()
 
-    def __getattr__(self, key: str) -> Any:
-        try:
-            return self._override_params[key]
-        except KeyError:
-            raise AttributeError(f"Params has no attribute '{key}'")
+#     def __getattr__(self, key: str) -> Any:
+#         try:
+#             return self._override_params[key]
+#         except KeyError:
+#             raise AttributeError(f"Params has no attribute '{key}'")
 
-    def update(self, partial_params: Params | None) -> Params:
-        if partial_params is None:
-            return self
-        return self.override(**partial_params.to_dict())
+#     def update(self, partial_params: Params | None) -> Params:
+#         if partial_params is None:
+#             return self
+#         return self.override(**partial_params.to_dict())
 
-    def determinants(self) -> tuple[str, ...]:
-        if len(self._override_params) == 0:
-            return ()
-        dets = tuple(
-            [
-                f"{k}={v}" if v is not None else f"{k}=None"
-                for k, v in sorted(self._override_params.items())
-            ]
-        )
-        return dets
+#     def determinants(self) -> tuple[str, ...]:
+#         if len(self._override_params) == 0:
+#             return ()
+#         dets = tuple(
+#             [
+#                 f"{k}={v}" if v is not None else f"{k}=None"
+#                 for k, v in sorted(self._override_params.items())
+#             ]
+#         )
+#         return dets
 
 
 ###############################################################################
@@ -404,7 +405,7 @@ def _paramsets_from_json(tool_name: str, obj: dict[str, Any]) -> dict[str, Param
             if not isinstance(key, str):
                 raise ValueError(f"Param keys in '{subroutine}' must be strings.")
             if not isinstance(spec, dict):
-                raise ValueError(f"Spec for '{subroutine}.{key}' must be an object.")
+                raise ValueError(f"Spec for '{subroutine}.{key}' must be an object, was {type(spec)}.")
 
             flag = spec.get("flag", None)
             if flag is not None and not isinstance(flag, str):

@@ -10,17 +10,25 @@ from typing import (
     Callable,
     Iterable,
     Iterator,
+    Literal,
     Mapping,
     ParamSpec,
+    Protocol,
     TypeAlias,
     TypeVar,
     cast,
     overload,
     runtime_checkable,
-    Protocol,
 )
 
+from pandas import DataFrame
+
 from mmalignments.models.data import Pairing
+from mmalignments.models.overlay import (
+    ElementTag,
+    PartialElementTag,
+    TagType,
+)
 from mmalignments.services.dependencies import (
     Signifiable,
     combined_signature,
@@ -42,11 +50,6 @@ from .tags import (
     Omics,
     Stage,
     State,
-)
-from mmalignments.models.overlay import (
-    ElementTag,
-    PartialElementTag,
-    TagType,
 )
 
 
@@ -102,11 +105,6 @@ class Prerequisite(Signifiable, Protocol):
     def provenance(self) -> str: ...
 
     """the provenance string for this source: which steps came before?"""
-
-
-print("DEFINING SOURCE")
-print("runtime_checkable:", runtime_checkable)
-print("Protocol:", Protocol)
 
 
 @runtime_checkable
@@ -183,7 +181,7 @@ class FileSource(Source):  # the new FileElement for existing files
     @cached_property
     def signature(self) -> str:
         """The signature of the source used for invalidation."""
-        return self.artifacts.primary.signature()
+        return self.artifacts.signature
 
     @cached_property
     def key(self) -> str:
@@ -211,6 +209,11 @@ class FileSource(Source):  # the new FileElement for existing files
     def artifacts(self) -> ArtifactSet:
         """The set of artifacts (files) associated with this Source."""
         return self._artifacts
+
+    @property
+    def file(self) -> Path:
+        """The primary file associated with this Source."""
+        return self.artifacts.primary.resolve()  # (e.g. FastqArtifact)
 
     ############################################################################
     # Initalization
@@ -321,15 +324,48 @@ class FileSource(Source):  # the new FileElement for existing files
             source.artifacts["toml"]
             source.artifacts["parquet"]
         """
-        artifacts = object.__getattribute__(self, "_artifacts")
+        try:
+            artifacts = object.__getattribute__(self, "_artifacts")
+        except AttributeError:
+            raise AttributeError(name) from None
 
-        if name in artifacts:
+        try:
             return artifacts[name]
+        except KeyError:
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {name!r}"
+            ) from None
 
-        raise AttributeError(
-            f"{type(self).__name__!s} has no attribute {name!r} "
-            f"and no artifact with that name exists"
+
+class TableSource(Source):
+
+    def __init__(
+        self,
+        path: Path | str | TableArtifact | Mapping[str, Path | TableArtifact],
+        *,
+        tag: PartialElementTag | ElementTag | None = None,
+        index_column: str | None = None,
+    ):
+        self._artifacts = FileSource.normalize(path, is_prefix=False)
+        self._tag = ElementTag(
+            root=self._artifacts.primary.stem,
+            level=0,
+            omics=Omics.DNA,
+            stage=Stage.INPUT,
+            method=Method.CHECK,
+            state=State.RAW,
+        ).patch(tag)
+        self._key = f"TableSource:{self._tag}" + "::".join(
+            sorted(self._artifacts.keys())
         )
+        self.index_column = index_column
+
+    @cached_property
+    def frame(self) -> DataFrame:
+        frame = self.artifacts.primary.frame
+        if self.index_column:
+            frame = frame.set_index(self.index_column)
+        return frame
 
 
 class FastqSource(Source):
@@ -338,6 +374,7 @@ class FastqSource(Source):
     def __init__(
         self,
         fastqs: FastqArtifact | Path | str | Mapping[str, Path],
+        producer: Prerequisite | None = None,
         *,
         tag: TagType | None = None,
         is_prefix: bool = False,
@@ -354,6 +391,8 @@ class FastqSource(Source):
         fastqs : FastqArtifact | Path | str | Mapping[str, Path]
             The FASTQ files to normalize. Can be a directory prefix, individual
             file, or a mapping of artifact names to paths.
+        producer : Prerequisite | None, optional
+            The prerequisite producer for this FastqSource, by default None.
         tag : PartialElementTag | ElementTag | None, optional
             The element tag for the FastqSource, by default None.
         is_prefix : bool, optional
@@ -373,6 +412,7 @@ class FastqSource(Source):
         self._key = f"FastqSource:{self._tag}" + "::".join(
             [str(ff) for ff in self.artifacts.primary]
         )
+        self.producer = producer
 
     ############################################################################
     # Properties
@@ -398,7 +438,7 @@ class FastqSource(Source):
     @cached_property
     def signature(self) -> str:
         """The signature of the source used for invalidation."""
-        return self.artifacts.primary.signature()
+        return self.artifacts.signature
 
     # Source protocol ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 
@@ -541,12 +581,10 @@ class NextGenSample(Source):
         """
         self.source = source
         self._artifacts = source.artifacts
+        self._tag = self.source.tag.bump().resolve(PartialElementTag(root=root))
         self._key = f"{self._tag.default_name}" + "::".join(
             [str(filepath) for filepath in self._artifacts.primary]
         )
-        self._tag = self.source.tag.patch(tag).patch(
-            PartialElementTag(root=root)
-        )  # noqa: E501
         self.cache_dir = (
             cache_dir or Path(f"cache/samples/{self._tag.root}").resolve()
         )  # noqa: E501
@@ -766,6 +804,14 @@ class Element(Prerequisite):
                         f"Input file '{path}' does not exist or is not a valid path."  # noqa: E501
                     )
 
+    def ex(self, exection: Literal["skip", "force", "check"] = "check") -> None:
+        if exection == "skip":
+            self.validation_policy = ValidationPolicy.FORCE_SKIP
+        elif exection == "force":
+            self.validation_policy = ValidationPolicy.FORCE_RUN
+        else:
+            self.validation_policy = ValidationPolicy.CHECK
+
     ############################################################################
     # Properties
     ############################################################################
@@ -789,7 +835,9 @@ class Element(Prerequisite):
     @cached_property
     def signature(self) -> str:
         "The signature used to invalidate this Element and triggerr a re-run."
-        return combined_signature(*self.signature_data.values())
+        signature_data = self.signature_data
+        signature = combined_signature(*signature_data.values())
+        return signature
 
     @cached_property
     def signature_data(self) -> Mapping[str, Any]:
@@ -871,8 +919,10 @@ class Element(Prerequisite):
             yield filepath
 
     @property
-    def file(self) -> Path | None:
+    def file(self) -> Path:
         "Short for the primary file path, assuming there is such a thing."
+        if not self.artifacts or "primary" not in self.artifacts:
+            raise AttributeError(f"{self.__class__.__name__} has no primary artifact.")
         return self.artifacts["primary"].resolve()
 
     @property
@@ -902,12 +952,19 @@ class Element(Prerequisite):
         AttributeError
             Raised if the attribute is not found among the artifacts.
         """
-        artifacts = self.__dict__.get("artifacts", {})
-        if name in artifacts:
+        try:
+            artifacts = object.__getattribute__(self, "artifacts")
+        except AttributeError:
+            raise AttributeError(
+                f"{type(self).__name__} has no attribute {name!r}"
+            ) from None
+
+        try:
             return artifacts[name]
-        raise AttributeError(
-            f"{self.__class__.__name__} has no attribute '{name}'"
-        )  # noqa: E501
+        except KeyError:
+            raise AttributeError(
+                f"{type(self).__name__} has no attribute {name!r}"
+            ) from None
 
     ############################################################################
     # builder - run once
@@ -929,7 +986,8 @@ class Element(Prerequisite):
             prefix = self.pres[0].provenance + "->"
         else:
             prefix = "(" + ",".join(p.provenance for p in self.pres) + ")->"
-        return prefix + f"{self.name}"
+        prov = prefix + f"{self.name}"
+        return prov
 
     def collect_sig_data(self) -> Mapping[str, Any]:
         """
@@ -1172,11 +1230,12 @@ class Element(Prerequisite):
         return (
             f"{self.__class__.__name__}:\n"
             f"  key:          {self.key}\n"
-            f"  threads:      {self.threads}\n"
+            f"  tag:          {self.tag}\n"
+            # f"  threads:      {self.threads}\n"
+            f"  pres:         {[p.key for p in self.pres]}\n"
             f"  determinants: {', '.join(self.determinants)}\n"
             f"  inputs:       {[str(p) for p in self.inputs]}\n"
             f"  artifacts:    {{ {', '.join(artifactlist)}}}\n"
-            f"  pres:         {[p.key for p in self.pres]}\n"
         )
 
     def __repr__(self) -> str:
@@ -1184,7 +1243,7 @@ class Element(Prerequisite):
         return (
             f"{self.__class__.__name__}("
             f"key='{self.key}', "
-            f"provenience={self.provenience}, "
+            f"provenance={self.provenance}, "
             f"inputs={len(self.inputs)}, "
             f"artifacts={list(self.artifacts.keys())}"
             f")"
@@ -1494,8 +1553,9 @@ class FastqConcat(Element):
 
     def __init__(
         self,
-        name: str,
+        library_name: str,
         folder: Path | str,
+        prefix: str | None = None,
         output_folder: Path = Path("cache/fastq"),
         *,
         selector: type[FastqSelector] = NovogeneSelector,
@@ -1509,10 +1569,14 @@ class FastqConcat(Element):
 
         Parameters
         ----------
-        name : str
+        library_name : str
             The name of the FastqConcat element.
         folder : Path | str
             The folder containing the input FASTQ files.
+        file_prefix : str | None, optional
+            An optional prefix to filter the FASTQ files, by default None. If
+            provided, only files starting with this prefix will be considered for
+            concatenation.
         output_folder : Path, optional
             The folder to store the concatenated FASTQ files, by default
             Path("cache/fastq").
@@ -1527,7 +1591,7 @@ class FastqConcat(Element):
         self.selector = selector(self.path)
         self.output_folder = output_folder
         fultag = ElementTag(
-            root=name,
+            root=library_name,
             level=0,
             omics=Omics.DNA,
             stage=Stage.INPUT,
@@ -1535,10 +1599,12 @@ class FastqConcat(Element):
             state=State.RAW,
         ).patch(tag)
         key = Element.generate_key(fultag, "FastqConcat")
-        normalized, files_to_merge = self.setup_normalization()
+        self.library_name = library_name
+        normalized, files_to_merge = self.setup_normalization(
+            prefix or self.library_name
+        )
         artifacts = ArtifactSet(FastqArtifact(normalized["R1"], normalized.get("R2")))
         run = self.normalize(files_to_merge)
-
         super().__init__(
             key,
             run,
@@ -1548,12 +1614,12 @@ class FastqConcat(Element):
         )  # Element
 
     def resolve_output_filename(self, read: str, suffix: str) -> str:
-        if self.type == "illumina":
-            return f"{self.name}_{read}_001.{suffix}"
-        elif self.type == "novogene":
-            return f"{self.name}_{read}.{suffix}"
+        if isinstance(self.selector, IlluminaSelector):
+            return f"{self.library_name}_{read}_001.{suffix}"
+        elif isinstance(self.selector, NovogeneSelector):
+            return f"{self.library_name}_{read}.{suffix}"
         else:
-            raise ValueError(f"Unsupported type: {self.type}")
+            raise ValueError(f"Unsupported type: {type(self.selector)}")
 
     def r1(self) -> Path:
         return self.artifacts["r1"]
@@ -1572,21 +1638,21 @@ class FastqConcat(Element):
 
         display = CallSpec(
             path=("FastqSource", "normalize", "__run"),
-            kwargs={"name": self.name, "folder": self.path, "type": self.type},
+            kwargs={"files_to_merge": files_to_merge},
         ).render()
 
         return Runnable(__run, display=display)
 
-    def setup_normalization(self):
-        files_to_concat = self.selector.select(self.name)
+    def setup_normalization(self, prefix: str):
+        files_to_concat = self.selector.select(prefix)
         if not files_to_concat:
-            raise FileNotFoundError(f"No files found for sample '{self.name}'")
+            raise FileNotFoundError(f"No files found for sample '{self.library_name}'")
         normalized: dict[str, Path] = {}
         files_to_merge: dict[Path, list[Path]] = {}
         for key, tuple_of_files in files_to_concat.items():
             if not tuple_of_files:
                 raise FileNotFoundError(
-                    f"No files found for key '{key}' in sample '{self.name}'"
+                    f"No files found for key '{key}' in sample '{self.library_name}'"
                 )
             if len(tuple_of_files) == 1:
                 normalized[key] = tuple_of_files[0]

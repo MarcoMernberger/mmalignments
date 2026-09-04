@@ -37,8 +37,8 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import IO, Any, Callable, Iterable, Mapping, Sequence, TypeAlias
 
+from mmalignments.models.overlay import Params
 from mmalignments.models.parameters import (
-    Params,
     ParamSet,
     ToolThreadSpec,
     initialize_param_registry,
@@ -951,6 +951,7 @@ class External:
                 # Execute the main subprocess command
 
                 # execute main call
+                print(" ".join(cmd))
                 cp = self.run_process(cmd, cfg, call_logger)
 
                 # Execute post-callback if there is one
@@ -1046,7 +1047,7 @@ def subroutine(
         bound.apply_defaults()
 
         # get cfg and params supplied and make sure they are not None
-        params = bound.arguments.get("params", None)
+        params = bound.arguments.get("par", None)
         params = params or Params()
         cfg = bound.arguments.get("cfg", None)
         cfg = cfg or ExternalRunConfig()

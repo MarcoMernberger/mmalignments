@@ -8,9 +8,37 @@ from Bio.Seq import Seq  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
 from scipy.spatial.distance import hamming
 
+DNA_BASES = set("ACGT")
+IUPAC_BASES = set("ACGTRYSWKMBDHVN")
+
 
 def reverse_complement(seq: str) -> str:
     return str(Seq(seq).reverse_complement())
+
+
+def normalize_sequence(
+    sequence: str,
+    allow_ambiguous: bool = False,
+) -> str:
+    """
+    Normalize a DNA sequence.
+
+    - uppercase
+    - U -> T
+    - remove whitespace
+
+    By default only A/C/G/T are accepted.
+    """
+    sequence = re.sub(r"\s+", "", sequence).upper().replace("U", "T")
+
+    allowed = IUPAC_BASES if allow_ambiguous else DNA_BASES
+
+    invalid = set(sequence) - allowed
+
+    if invalid:
+        raise ValueError(f"Invalid nucleotide(s): {sorted(invalid)}")
+
+    return sequence
 
 
 def longest_common_prefix(a: str, b: str) -> int:

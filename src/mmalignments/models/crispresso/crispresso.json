@@ -1,0 +1,115 @@
+{
+    "default": {
+        "fastq_output": {
+            "flag": "--fastq_output",
+            "dtype": "bool",
+            "default": false,
+            "required": false,
+            "affects_output": true,
+            "render": "flag",
+            "description": "Enable fastq output."
+        },
+        "write_detailed_allele_table": {
+            "flag": "--write_detailed_allele_table",
+            "dtype": "bool",
+            "default": false,
+            "required": false,
+            "affects_output": true,
+            "render": "flag",
+            "description": "Enable writing of the detailed allele table."
+        },
+        "quantification_window_size": {
+            "flag": "--quantification_window_size",
+            "dtype": "int",
+            "default": 1,
+            "aliases": ["-w", "--window_around_sgrna"],
+            "required": false,
+            "affects_output": true,
+            "render": "value",
+            "description": "Defines the size in bp of the quantification window extending from the quantification window center. Mutations within this distance are used to classify reads as modified or unmodified. A value of 0 disables the window so indels in the entire amplicon are considered."
+        },
+        "quantification_window_center": {
+            "flag": "--quantification_window_center",
+            "aliases": ["-wc", "--cleavage_offset"],
+            "dtype": "int",
+            "default": -3,
+            "required": false,
+            "affects_output": true,
+            "render": "value",
+            "description": "Defines the center of the quantification window relative to the 3' end of the sgRNA. The default -3 is suitable for Cas9."
+        },
+        "quantification_window_coordinates": {
+            "flag": "--quantification_window_coordinates",
+            "aliases": ["-qwc"],
+            "dtype": "str",
+            "default": null,
+            "required": false,
+            "affects_output": true,
+            "render": "value",
+            "description": "Specifies bp coordinates in the amplicon that form the quantification window. Coordinates are 0-based and can be specified as ranges such as 5-10. Multiple ranges can be separated with underscores. A value of 0 disables the quantification-window filter."
+        },
+        "exclude_bp_from_left": {
+            "flag": "--exclude_bp_from_left",
+            "dtype": "int",
+            "default": 15,
+            "required": false,
+            "affects_output": true,
+            "render": "value",
+            "description": "Exclude this number of bp from the left side of the amplicon when quantifying indels."
+        },
+        "exclude_bp_from_right": {
+            "flag": "--exclude_bp_from_right",
+            "dtype": "int",
+            "default": 15,
+            "required": false,
+            "affects_output": true,
+            "render": "value",
+            "description": "Exclude this number of bp from the right side of the amplicon when quantifying indels."
+        },
+        "ignore_substitutions": {
+            "flag": "--ignore_substitutions",
+            "dtype": "bool",
+            "default": false,
+            "required": false,
+            "affects_output": true,
+            "render": "flag",
+            "description": "Ignore substitution events for quantification and visualization."
+        },
+        "ignore_insertions": {
+            "flag": "--ignore_insertions",
+            "dtype": "bool",
+            "default": false,
+            "required": false,
+            "affects_output": true,
+            "render": "flag",
+            "description": "Ignore insertion events for quantification and visualization."
+        },
+        "ignore_deletions": {
+            "flag": "--ignore_deletions",
+            "dtype": "bool",
+            "default": false,
+            "required": false,
+            "affects_output": true,
+            "render": "flag",
+            "description": "Ignore deletion events for quantification and visualization."
+        },
+        "discard_indel_reads": {
+            "flag": "--discard_indel_reads",
+            "dtype": "bool",
+            "default": false,
+            "required": false,
+            "affects_output": true,
+            "render": "flag",
+            "description": "Discard reads containing indels in the quantification window from the analysis."
+        },
+        "use_legacy_insertion_quantification": {
+            "flag": "--use_legacy_insertion_quantification",
+            "dtype": "bool",
+            "default": false,
+            "required": false,
+            "affects_output": true,
+            "render": "flag",
+            "description": "Use the legacy insertion quantification method."
+        }
+    }
+}

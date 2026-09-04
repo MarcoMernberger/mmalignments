@@ -103,6 +103,9 @@ class Method(str, Enum):
     TABLES = "tables"
     SKLEARN = "sklearn"
     CRISPRESSO = "crispresso"
+    VEP = "vep"
+    BIO = "biopython"
+    HAPLO = "haplo"
 
 
 def level(level: int) -> str:

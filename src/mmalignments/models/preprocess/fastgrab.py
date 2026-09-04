@@ -1,4 +1,6 @@
-"""Module contains an interface for fastqgrab (fastqrab), a FASTQ processing tool."""
+"""
+Module contains an interface for fastqgrab (fastqrab), a FASTQ processing tool.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ from io import TextIOWrapper
 from pathlib import Path
 from typing import Callable, Literal, Mapping, Sequence
 
-import pandas as pd
+import pandas as pd  # type: ignore[import]
 from tomlkit import (  # type: ignore[import]
     TOMLDocument,
     document,
@@ -24,16 +26,6 @@ from mmalignments.models.artifacts import (
     ArtifactSet,
     FastqArtifact,
 )
-from mmalignments.models.overlay import (
-    FileSpec,
-    Out,
-    Par,
-    TagType,
-    OutType,
-    ParType,
-    ExtType,
-    from_prior,
-)
 from mmalignments.models.elements import (
     CallSpec,
     Element,
@@ -44,6 +36,19 @@ from mmalignments.models.elements import (
     NextGenSample,
     TableElement,
     element,
+)
+from mmalignments.models.overlay import (
+    CfgType,
+    FileSpec,
+    Out,
+    OutSpec,
+    OutType,
+    Params,
+    ParType,
+    SpecValues,
+    TagType,
+    from_prior,
+    pick_spec,
 )
 from mmalignments.models.tags import (
     Method,
@@ -75,7 +80,10 @@ logger = logging.getLogger(__name__)
 def collect_undetermined_fastqs(
     folder: Path, prefix: str, ext: str, read: str = "read1"
 ) -> list[Path]:
-    """Collect undetermined FASTQ files in a folder with a given prefix and extension."""
+    """
+    Collect undetermined FASTQ files in a folder with a given prefix and
+    extension.
+    """
     return list(folder.glob(f"{prefix}*_nobarcode*_{read}.{ext}"))
 
 
@@ -192,22 +200,22 @@ class FastGrab(External):
     # Helpers
     # -----------------------------------------------------------------------
 
-    def default_config_dir(self, sample_name: str) -> Path:
+    def config_dir(self, library_name: str) -> Path:
         """Return the default directory for configuration files."""
         return (
-            Path("cache") / "demultiplex" / self.version_name / "config" / sample_name
+            Path("cache") / "demultiplex" / self.version_name / "config" / library_name
         )
 
-    def default_output_dir(self, sample_name: str) -> Path:
+    def output_dir(self, library_name: str) -> Path:
         """Return the default directory for demultiplexed outputs."""
-        return Path("results") / "demultiplex" / self.version_name / sample_name
+        return Path("results") / "demultiplex" / self.version_name / library_name
 
-    def default_output(self, sample_name: str) -> Out:
-        """Return the default output specification for demultiplexed outputs."""
-        return Out(
-            sample_name,
-            self.default_output_dir(sample_name),
-        )
+    # def default_output(self, sample_name: str) -> OutSpec:
+    #     """Return the default output specification for demultiplexed outputs."""
+    #     return OutSpec(
+    #         sample_name,
+    #         self.default_output_dir(sample_name),
+    #     )
 
     # -----------------------------------------------------------------------
     # Configuration (high-level @element + low-level @subroutine)
@@ -224,9 +232,9 @@ class FastGrab(External):
         config_dir: Path | None = None,
         compression: Literal["Raw", "Gzip"] = "Gzip",
         tag: TagType | None = None,
-        outspec: OutType | None = None,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Create an Element that writes a fastqgrab TOML configuration file.
 
@@ -266,7 +274,7 @@ class FastGrab(External):
             Optional output specification for the configuration file.
         params : ParType | None
             Unused; kept for API symmetry.
-        cfg : ExtType |None
+        cfg : CfgType |None
             Unused; kept for API symmetry.
 
         Returns
@@ -275,7 +283,7 @@ class FastGrab(External):
             Element whose artifact ``"toml"`` is the path to the written TOML
             configuration file.
         """
-        params = params or Par()
+        params = Params().patch(par)
         fastq_r1, fastq_r2 = sample.r1, sample.r2
         tag = from_prior(
             sample.tag,
@@ -286,18 +294,16 @@ class FastGrab(External):
             state=State.CONFIG,
             omics=Omics.DNA,
         )
-        spec = Out(
+        out = OutSpec(
             tag.default_name,
-            config_dir or self.default_config_dir(sample.root),
+            config_dir or self.config_dir(sample.root),
             ext="toml",
-        ).patch(outspec)
+        ).patch(out)
         # output_dir = Path(outdir or self.default_config_dir(sample.root))
         # config_file = filename or tag.default_output
         # config_path = output_dir / config_file
-        config_path = spec.path()
-        demultiplex_destination = demultiplex_dir or self.default_output_dir(
-            sample.root
-        )
+        config_path = out.file
+        demultiplex_destination = demultiplex_dir or self.output_dir(sample.root)
         pres = sample.pres
         template_sources = [template] if isinstance(template, FileSource) else template
         template_paths = []
@@ -307,7 +313,7 @@ class FastGrab(External):
                     f"template must be a FileSource or a sequence of FileSource objects, was {type(template)}."  # noqa: E501
                 )
             template_paths.append(temp.artifacts.primary.resolve())
-            pres += temp.pres
+            pres += (temp,)
         determinants = None
         barcodes_map: Mapping[str, Path] | Mapping[str, dict[str, str]] = {}
         if callable(barcodes):
@@ -334,12 +340,15 @@ class FastGrab(External):
             output_prefix=str(demultiplex_destination / sample.root),
         )
         key, name = self.build_element_name(tag, "configure")
-        artifacts = {
-            "toml": config_path,
-            "prefix": demultiplex_destination,
-            "library_name": sample.root,
-            "suffix": "fq" if compression == "Raw" else "fq.gz",
-        }
+        artifacts = ArtifactSet.from_any(
+            {
+                "toml": config_path,
+                "prefix": demultiplex_destination,
+                "library_name": sample.root,
+                "suffix": "fq" if compression == "Raw" else "fq.gz",
+            },
+            "toml",
+        )
         inputs = (
             tuple(template_paths) + (fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,)
         )
@@ -444,8 +453,8 @@ class FastGrab(External):
         config: Element,
         *,
         tag: TagType | None = None,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        par: Params | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Create an Element that runs ``fastqrab process <config.toml>``.
 
@@ -463,9 +472,9 @@ class FastGrab(External):
             ``"toml"`` artifact is used as the configuration file path.
         tag : TagType | None
             Optional tag override.
-        params : ParType | None
+        par : Params | None
             Additional CLI parameters for the ``process`` sub-command.
-        cfg : ExtType | None
+        cfg : CfgType | None
             Optional subprocess configuration (working directory, threads, …).
 
         Returns
@@ -477,21 +486,25 @@ class FastGrab(External):
         """
         runner = self.process_config(config_path=config.toml)
 
-        tag = from_prior(
-            config.tag,
-            tag,
+        tag = config.tag.bump(
             stage=Stage.PREP,
             method=Method.FASTQGRAB,
             state=State.DEMULTIPLEX,
-            ext="html",
+            flag="process",
+        ).resolve(tag)
+        out = OutSpec.from_tag(
+            tag,
+            Out(
+                folder=config.prefix,
+                stem=config.library_name,
+                ext="html",
+                exts=("json",),
+            ),
         )
-        spec = Out(config.library_name, config.prefix, ext="json", exts=("html",))
-        key, name = self.build_element_name(tag, "process")
-        determinants = self.signature_determinants(params, subroutine="process")
+        key = Element.generate_key(tag, "process")
+        determinants = self.signature_determinants(par, subroutine="process")
 
-        artifacts = ArtifactSet(
-            spec.files["json"], primary_name="json", html=spec.files["html"]
-        )
+        artifacts = ArtifactSet.from_outspec(out)
         # this does not include the fastqs themselves, because its hidden in the toml
         return Element(
             key,
@@ -502,7 +515,6 @@ class FastGrab(External):
             inputs=(config.toml,),
             pres=(config,),
             empty_ok=True,
-            name=name,
         )
 
     @subroutine
@@ -511,7 +523,7 @@ class FastGrab(External):
         config_path: Path | str,
         *,
         params: ParType | None = None,
-        cfg: ExtType | None = None,
+        cfg: CfgType | None = None,
     ) -> tuple:
         """Low-level wrapper for ``fastgrab process <config.toml>``.
 
@@ -521,7 +533,7 @@ class FastGrab(External):
             Path to the TOML configuration file.
         params : ParType | None
             Extra CLI flags for the ``process`` sub-command.
-        cfg : ExtType | None
+        cfg : CfgType | None
             Subprocess configuration.
 
         Returns
@@ -611,17 +623,17 @@ class FastGrab(External):
             Element with artifacts for each consolidated sample FASTQ and
             the undetermined FASTQs.
         """
-        tag = from_prior(
-            process.tag,
-            tag,
+        tag = process.tag.bump(
             stage=Stage.PREP,
             method=Method.FASTQGRAB,
             state=State.DEMULTIPLEX,
-        )
+            flag="consolidate",
+        ).resolve(tag)
+
         names = list(names) if isinstance(names, Iterator) else names
         if len(names) == 0:
             raise ValueError("No sample names provided for consolidation.")
-        key, name = self.build_element_name(tag, "consolidate")
+        key = Element.generate_key(tag, "consolidate")
         # Build artifacts: one per sample (R1 + R2) plus undetermined
         log_file = config.prefix / f"{config.prefix.name}_consolidation.log"
         artifacts = ArtifactSet(log_file, primary_name="log")
@@ -642,11 +654,13 @@ class FastGrab(External):
             return FastqArtifact(r1, r2), files_to_rename
 
         paths = {}
-        for sample_name in names:  # type: ignore
+        for sample_name in names:
             full_name = f"{config.library_name}_{sample_name}"
             artifact, files_to_rename = check_output(full_name)
             fastqs[full_name] = artifact
+
             paths.update(files_to_rename)
+
         undetermined_name = f"{config.library_name}_undetermined"
         undetermined, _ = check_output(undetermined_name)
         fastqs[undetermined_name] = undetermined
@@ -808,36 +822,43 @@ class FastGrab(External):
         *,
         include_reverse: bool = False,
         name_column: str = "sample",
-        barcode_columns: list[str] = ["barcode"],
-        outspec: OutType | None = None,
+        barcode_column: str = "barcode",
+        additional_barcode_columns: list[str] = [],
+        duplicate_behaviour: Literal["drop", "raise"] = "raise",
+        library_name: str | None = None,
+        out: OutType | None = None,
         tag: TagType | None = None,
     ) -> Element:
-
-        tag = from_prior(
-            barcodes.tag,
+        barcode_columns = [barcode_column] + additional_barcode_columns
+        tag = barcodes.tag.bump(
             state=State.PREPROCESS,
             method=Method.FASTQGRAB,
-            ext="fasta",
-            param="_".join(barcode_columns),
+            flag=("_".join(barcode_columns) + library_name) if library_name else "",
+        ).patch(tag)
+        out = OutSpec.from_tag(
+            tag,
+            Out(
+                folder=self.config_dir(library_name or barcodes.root),
+                prefixes=[f"{library_name}."] if library_name else None,
+                ext="fasta",
+            ),
+            out,
         )
-        outspec = Out(
-            stem=tag.default_name,
-            outdir=self.default_config_dir(barcodes.root),
-            ext="fasta",
-        ).patch(outspec)
-        barcodefile = barcodes.artifacts.primary.resolve()
-        outfile = outspec.path(tag.default_name)
-        reverse_fasta = None
-        artifacts = ArtifactSet(outfile, primary_name="fasta")
         if include_reverse:
-            reverse_fasta = outfile.with_name(outfile.stem + "_reverse.fasta")
-            artifacts = artifacts.with_extra("fasta_reverse", reverse_fasta)
+            out.add_output(
+                "fasta_reverse", FileSpec(out.file.stem + "_reverse", "fasta")
+            )
+        barcodefile = barcodes.artifacts.primary.resolve()
+        artifacts = ArtifactSet.from_outspec(out)
+
         key = f"{tag.default_name}_flanks_fasta"
         runner = self.write_barcode_fasta(
             sensorfile=barcodefile,
-            outfile=outfile,
+            outfile=out.file,
             name_column=name_column,
             barcode_columns=barcode_columns,
+            duplicate_behaviour=duplicate_behaviour,
+            library_name=library_name,
         )
         return Element(
             key,
@@ -846,7 +867,6 @@ class FastGrab(External):
             inputs=(barcodefile,),
             artifacts=artifacts,
             pres=(barcodes,) if isinstance(barcodes, Element) else (),
-            name=key,
         )
 
     def write_barcode_fasta(
@@ -855,15 +875,36 @@ class FastGrab(External):
         outfile: Path,
         name_column: str,
         barcode_columns: list[str],
+        duplicate_behaviour: Literal["drop", "raise"] = "raise",
+        library_name: str | None = None,
     ) -> Runnable:
 
         def __run():
             df_constructs = pd.read_csv(sensorfile, sep="\t")
+            if library_name:
+                df_constructs = df_constructs[df_constructs["library"] == library_name]
             names = []
             sequences = []
             for barcode_column in barcode_columns:
-                names.extend(df_constructs[name_column].tolist())
-                sequences.extend(df_constructs[barcode_column].tolist())
+                df_dedup = df_constructs.drop_duplicates(subset=[barcode_column])
+                names.extend(df_dedup[name_column].tolist())
+                sequences.extend(df_dedup[barcode_column].tolist())
+            if duplicate_behaviour == "raise":
+                if len(names) != len(set(names)):
+                    raise ValueError(
+                        f"Duplicate sample names found in {sensorfile} for columns {barcode_columns}."
+                    )
+                if len(sequences) != len(set(sequences)):
+                    raise ValueError(
+                        f"Duplicate barcode sequences found in {sensorfile} for columns {barcode_columns}."
+                    )
+            elif duplicate_behaviour == "drop":
+                names = list(dict.fromkeys(names))
+                sequences = list(dict.fromkeys(sequences))
+            else:
+                raise ValueError(
+                    f"Invalid duplicate_behaviour: {duplicate_behaviour}. Must be 'drop' or 'raise'."
+                )
             write_fasta_from_list(outfile, names, sequences)
 
         callspec = CallSpec(
@@ -894,14 +935,13 @@ class FastGrab(External):
         barcodes: Callable | Element | Mapping[str, Element],
         *,
         names: Iterator[str] | list[str],
-        compression: Literal["Raw", "Gzip"] = "Gzip",
-        tag: TagType | None = None,
-        # outspec: Out | None = None,
-        demultiplex_dir: Path | None = None,
         config_dir: Path | None = None,
-        filename: Path | str | None = None,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        demultiplex_dir: Path | None = None,
+        compression: Literal["Raw", "Gzip"] = "Gzip",
+        tag: TagType | SpecValues[TagType] | None = None,
+        out: OutType | SpecValues[OutType] | None = None,
+        par: ParType | SpecValues[ParType] | None = None,
+        cfg: CfgType | SpecValues[CfgType] | None = None,
     ) -> tuple[Element, Element, Element, Element]:
         """Configure and process a demultiplexing run in one step.
 
@@ -921,12 +961,6 @@ class FastGrab(External):
         names : Iterator[str] | list[str] | None
             Optional list of sample names to expect in the consolidated output. If
             *None*, all samples found in the process output are included.
-        rename : Callable[[str], str] | None
-            Optional function to rename consolidated FASTQ files. If *None*, a default
-            renaming scheme is applied that removes the "barcode_unambiguous=true_"
-            prefix and replaces "_read1" and "_read2" with "_R1" and "_R2".
-        tag : TagType | None
-            Optional tag override for all created Elements.
         compression : Literal["Raw", "Gzip"]
             Compression method for the consolidated FASTQ files.  If *Gzip*, the files
             are compressed with gzip; if *Raw*, they are left uncompressed.
@@ -936,23 +970,24 @@ class FastGrab(External):
         config_dir : Path | None
             Directory in which to write the configuration file.  If *None*, a default
             directory is derived from the sample name.
-        filename : Path | str | None
-        outspec : Out | None
+        tag : TagType | None
+            Optional tag override for all created Elements.
+        out: OutType | None
             Output specification for the demultiplexed FASTQs.  If *None*, a default
             specification is derived from the sample name.
-        outdir : Path | str | None
+        outdir: Path | str | None
             Base output directory for the demultiplexed FASTQs.  If *None*, a default
             directory is derived from the sample name.
-        configdir : Path | None
+        configdir: Path | None
             Directory in which to write the configuration file.  If *None*, a default
             directory is derived from the sample name.
-        filename : Path | str | None
+        filename: Path | str | None
             Filename for the configuration file.  If *None*, a default name is derived
             from the sample name.
         params : ParType | None
             Parameter sets keyed by step name (``"configure"``,
             ``"process"``).
-        cfg : ExtType |None
+        cfg : CfgType |None
             Run configurations keyed by step name.
 
         Returns
@@ -964,21 +999,32 @@ class FastGrab(External):
             sample=sample,
             template=template,
             barcodes=barcodes,
-            demultiplex_dir=demultiplex_dir,
             config_dir=config_dir,
+            demultiplex_dir=demultiplex_dir,
             compression=compression,
-            tag=tag,
-            params=params,
-            cfg=cfg,
+            tag=pick_spec(tag, "configure"),
+            out=pick_spec(out, "configure"),
+            par=pick_spec(par, "configure"),
+            cfg=pick_spec(cfg, "configure"),
         )
-        process_el = self.process(config=config_el, tag=tag)
+        process_el = self.process(
+            config=config_el,
+            tag=pick_spec(tag, "process"),
+            # out=pick_spec(out, "process"), # since config determines the output  # noqa: E501
+            par=pick_spec(par, "process"),
+            cfg=pick_spec(cfg, "process"),
+        )
         consolidate_el = self.consolidate(
-            process=process_el, config=config_el, names=names, tag=tag
+            process=process_el,
+            config=config_el,
+            names=names,
+            tag=pick_spec(tag, "consolidate"),
         )
         report_el = self.report(
             config=config_el,
             process=process_el,
             consolidate=consolidate_el,
+            tag=pick_spec(tag, "report"),
         )
 
         return consolidate_el, process_el, config_el, report_el
@@ -990,13 +1036,13 @@ class FastGrab(External):
         barcodes: Callable | Element | Mapping[str, Element],
         *,
         names: Iterator[str] | list[str],
-        compression: Literal["Raw", "Gzip"] = "Gzip",
-        tag: TagType | None = None,
-        demultiplex_dir: Path | None = None,
         config_dir: Path | None = None,
-        filename: Path | str | None = None,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        demultiplex_dir: Path | None = None,
+        compression: Literal["Raw", "Gzip"] = "Gzip",
+        tag: TagType | SpecValues[TagType] | None = None,
+        out: OutType | SpecValues[OutType] | None = None,
+        par: ParType | SpecValues[ParType] | None = None,
+        cfg: CfgType | SpecValues[CfgType] | None = None,
     ) -> tuple[dict[str, NextGenSample], NextGenSample | None]:
         """Configure and process a demultiplexing run in one step.
 
@@ -1017,24 +1063,23 @@ class FastGrab(External):
         names : Iterator[str] | list[str]
             List of sample names to expect in the consolidated output. All samples found
             in the process output are included.
-        compression : Literal["Raw", "Gzip"]
-            Compression method for the consolidated FASTQ files.  If *Gzip*, the files
-            are compressed with gzip; if *Raw*, they are left uncompressed.
-        tag : TagType | None
-            Optional tag override for all created Elements.
-        demultiplex_dir : Path | None
-            Base output directory for the demultiplexed FASTQs.  If *None*, a default
-            directory is derived from the sample name.
         config_dir : Path | None
             Directory in which to write the configuration file.  If *None*, a default
             directory is derived from the sample name.
-        filename : Path | str | None
-            Filename for the configuration file.  If *None*, a default name is derived
-            from the sample name.
-        params : Mapping[str, Params] | None
-            Parameter for the ``"configure"`` step.
-        cfg : ExtType |None
-            Run configuration for the configure step.
+        demultiplex_dir : Path | None
+            Base output directory for the demultiplexed FASTQs.  If *None*, a default
+            directory is derived from the sample name.
+        compression : Literal["Raw", "Gzip"]
+            Compression method for the consolidated FASTQ files.  If *Gzip*, the files
+            are compressed with gzip; if *Raw*, they are left uncompressed.
+        tag : TagType | StepValues[TagType] | None
+            Optional tag override for all created Elements.
+        out: OutType | StepValues[OutType] | None
+            Output specification for the created elements.
+        par : ParType | StepValues[ParType] | None
+            Parameter for the created elements.
+        cfg : CfgType |None
+            Run configuration for the created elements.
 
         Returns
         -------
@@ -1047,11 +1092,11 @@ class FastGrab(External):
             barcodes=barcodes,
             names=names,
             compression=compression,
-            tag=tag,
             demultiplex_dir=demultiplex_dir,
             config_dir=config_dir,
-            filename=filename,
-            params=params,
+            tag=tag,
+            out=out,
+            par=par,
             cfg=cfg,
         )
         samples, undetermined = self.samples(consolidate_el, config_el.library_name)
@@ -1089,8 +1134,7 @@ class FastGrab(External):
             # else:
             #     logger.warning(f"Sample {artifact_name} is single-end")
 
-            tag = from_prior(
-                consolidate_el.tag,
+            tag = consolidate_el.tag.bump(
                 root=artifact_name,
                 method=Method.FASTQGRAB,
                 state=State.DEMULTIPLEX,
@@ -1126,13 +1170,11 @@ class FastGrab(External):
         return NextGenSample(
             "Undetermined",
             source,
-            tag=from_prior(
-                consolidate_el.tag,
+            tag=consolidate_el.tag.bump(
                 root=root,
                 method=Method.FASTQGRAB,
                 state=State.DEMULTIPLEX,
                 omics=Omics.DNA,
-                ext="fq",
             ),
         )
 
@@ -1144,7 +1186,7 @@ class FastGrab(External):
         consolidate: Element,
         *,
         tag: TagType | None = None,
-        outspec: Out | None = None,
+        out: OutType | None = None,
     ) -> Element:
         """Create a report Element that summarizes the demultiplexing results.
 
@@ -1162,25 +1204,19 @@ class FastGrab(External):
         Element
             Element with artifacts for the summary and details TSV files.
         """
-        tag = from_prior(
-            consolidate.tag,
+        tag = consolidate.tag.bump(
             stage=Stage.PREP,
             method=Method.FASTQGRAB,
             state=State.DEMULTIPLEX,
-            ext="tsv",
-        )
-        spec = Out(
-            stem=tag.default_name,
-            outdir=config.prefix,
-            ext="tsv",
-        ).merge(outspec)
-        spec = spec.add_output(
-            "details", FileSpec(tag.default_name + "_details", ext="tsv")
-        )
-        summary_file = spec.files["tsv"]
-        details_file = spec.files["details"]
-        runner = self.create_report(summary_file, details_file, config.prefix)
-        artifacts = ArtifactSet.generate(spec=spec, tag=tag)
+            flag="report",
+        ).resolve(tag)
+        out = OutSpec.from_tag(
+            tag, Out(folder=config.prefix, ext="tsv"), out
+        ).add_output("details", FileSpec(tag.default_name + "_details", ext="tsv"))
+        details_file = out.path("details")
+        artifacts = ArtifactSet.from_outspec(out)
+
+        runner = self.create_report(out.file, details_file, config.prefix)
         key, name = self.build_element_name(tag, "demultiplex_report")
 
         return Element(
@@ -1189,7 +1225,6 @@ class FastGrab(External):
             tag=tag,
             artifacts=artifacts,
             pres=(config, process, consolidate),
-            name=name,
         )
 
     def create_report(

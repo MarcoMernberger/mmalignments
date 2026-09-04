@@ -30,15 +30,16 @@ import subprocess
 from pathlib import Path
 from typing import Literal, Mapping
 
-from mmalignments.models.artifacts import ArtifactSet, FastqArtifact
+from mmalignments.models.artifacts import ArtifactSet
 from mmalignments.models.elements import Element, NextGenSample, element
 from mmalignments.models.overlay import (
-    OutputSpec,
+    CfgType,
     ExternalRunConfig,
-    PartialElementTag,
-    PartialExternalRunConfig,
-    PartialOutputSpec,
-    from_prior,
+    FileSpec,
+    OutSpec,
+    OutType,
+    ParType,
+    TagType,
 )
 from mmalignments.models.parameters import (
     ParamRegistry,
@@ -252,7 +253,7 @@ def _build_param_registry() -> ParamRegistry:
         ),
     }
     return ParamRegistry(
-        default=ParamSet(_specs, "mmfqcount", "default"),
+        default=ParamSet(_specs, "ngmerge", "default"),
     )
 
 
@@ -352,18 +353,16 @@ class NGmerge(External):
     # Default paths
     # -----------------------------------------------------------------------
 
-    def default_output_dir(self, sample_name: str) -> Path:
+    def output_dir(self, sample_name: str) -> Path:
         """Return the default output directory for a given sample."""
         return Path("results") / self.version_name / sample_name
 
-    def default_output_spec(
+    def default_outspec(
         self, sample_name: str, compression: Literal["Raw", "Gzip"] = "Gzip"
-    ) -> OutputSpec:
+    ) -> OutSpec:
         """Return the default output directory for a given sample."""
         ext = "fq" if compression == "Raw" else "fq.gz"
-        return OutputSpec(
-            stem=sample_name, outdir=self.default_output_dir(sample_name), ext=ext
-        )
+        return OutSpec(stem=sample_name, folder=self.output_dir(sample_name), ext=ext)
 
     # -----------------------------------------------------------------------
     # count — high-level @element
@@ -376,10 +375,10 @@ class NGmerge(External):
         *,
         mode: str = "stitch",
         compression: Literal["Raw", "Gzip"] = "Gzip",
-        t: PartialElementTag | None = None,
-        o: PartialOutputSpec | None = None,
-        p: ParType | None = None,
-        e: PartialExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Merge paired-end reads in a sample.
 
@@ -422,7 +421,7 @@ class NGmerge(External):
             ``trim_length`` (int)
                 Keep at most this many bases after trimming.
 
-        cfg : ExtType |None
+        cfg : CfgType |None
             Subprocess configuration.
 
         Returns
@@ -430,16 +429,19 @@ class NGmerge(External):
         Element
             Element whose artifact ``"tsv"`` is the path to the counts TSV.
         """
-        tag = from_prior(
-            sample.tag,
-            t,
+        tag = sample.tag.bump(
             stage=Stage.PREP,
             method=Method.NGMERGE,
             state=State.MERGED,
-        )
-        out = self.default_output_spec(sample.root).patch(o)
-        params = Params().update(p)
-        cfg = ExternalRunConfig().patch(e)
+        ).resolve(
+            tag
+        )  # merge with user-provided tag if any
+        out = self.default_outspec(sample.root).patch(out)
+        par = Params().patch(par)
+        if "l" in par:
+            log_path = Path(par["l"])
+            out.add_output("log", FileSpec(log_path.name, log_path.suffix))
+        cfg = ExternalRunConfig().patch(cfg)
         if not hasattr(sample, "r1"):
             raise ValueError("Sample element must have 'r1' attribute.")
         if not hasattr(sample, "r2"):
@@ -449,7 +451,8 @@ class NGmerge(External):
 
         fastq_r1 = sample.r1
         fastq_r2 = sample.r2
-        output_fastq = out.path()
+        output_fastq = out.file
+        artifacts = ArtifactSet.from_outspec(out)
 
         runner = self.run_ngmerge(
             fastq_r1=fastq_r1,
@@ -457,16 +460,12 @@ class NGmerge(External):
             output_fastq=output_fastq,
             mode=mode,
             compression=compression,
-            params=params,
+            par=par,
             cfg=cfg,
         )
-
         key = Element.generate_key(tag, "NGmerge", "merge")
-        determinants = (mode,) + self.signature_determinants(params)
+        determinants = (mode,) + self.signature_determinants(par)
         inputs = (fastq_r1, fastq_r2) if fastq_r2 is not None else (fastq_r1,)
-        artifacts = ArtifactSet(FastqArtifact(output_fastq), primary_name="fastq")
-        if "l" in params:
-            artifacts = artifacts.with_extra("log", params["l"])
         source = Element(
             key=key,
             run=runner,
@@ -491,8 +490,8 @@ class NGmerge(External):
         mode: str = "stitch",
         compression: Literal["Raw", "Gzip"] = "Gzip",
         *,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Low-level wrapper for ``ngmerge``.
 
@@ -506,10 +505,9 @@ class NGmerge(External):
             Destination path for the merged FASTQ.
         mode : str
             Mode for merging reads. Options are "stitch" (default) or "adapter-removal".
-        params : ParType | None
-            Trimming parameters (``trim_start``, ``trim_stop``,
-            ``trim_length``).
-        cfg : ExtType |None
+        par : ParType | None
+            Trimming parameters (``trim_start``, ``trim_stop``, ``trim_length``).
+        cfg : CfgType |None
             Subprocess configuration.
 
         Returns

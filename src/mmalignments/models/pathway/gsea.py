@@ -34,7 +34,6 @@ Design notes
 from __future__ import annotations
 
 import logging
-from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -52,17 +51,17 @@ from mmalignments.models.elements import (
     element,
     generate_element_key_name,
 )
+from mmalignments.models.overlay import (
+    ElementTag,
+    OutputSpec,
+    PartialElementTag,
+    from_prior,
+)
 from mmalignments.models.parameters import Params
 from mmalignments.models.tags import (
     Method,
     Stage,
     State,
-)
-from mmalignments.models.overlay import (
-    ElementTag,
-    PartialElementTag,
-    from_prior,
-    OutputSpec,
 )
 from mmalignments.services.dependencies import depends
 from mmalignments.services.io import (
@@ -74,11 +73,6 @@ from mmalignments.services.io import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class Species(str, Enum):
-    Homo_sapiens = "Homo_sapiens"
-    Mus_musculus = "Mus_musculus"
 
 
 ###############################################################################

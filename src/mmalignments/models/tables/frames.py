@@ -16,17 +16,21 @@ from mmalignments.models.elements import (
     element,
     generate_element_key_name,
 )
-from mmalignments.models.parameters import Params
+from mmalignments.models.overlay import (
+    ElementTag,
+    Out,
+    OutSpec,
+    OutType,
+    Params,
+    PartialElementTag,
+    ParType,
+    TagType,
+    from_prior,
+)
 from mmalignments.models.tags import (
     Method,
     State,
 )
-from mmalignments.models.overlay import (
-    ElementTag,
-    PartialElementTag,
-    from_prior,
-)
-
 from mmalignments.services.dependencies import (
     depends,
     # collect_code_dependency,
@@ -37,7 +41,6 @@ from mmalignments.services.dependencies import (
 from mmalignments.services.io import (
     read_frame,
     read_schema,
-    write_frame,
     write_frames,
 )
 
@@ -466,9 +469,9 @@ class Tables:
         return Path("results/tables")
 
     @cached_property
-    def default_output_spec(self) -> OutputSpec:
-        ret = OutputSpec(
-            outdir=self.default_dir,
+    def default_out(self) -> OutSpec:
+        ret = OutSpec(
+            folder=self.default_dir,
             ext="parquet",
             exts=("tsv",),
         )
@@ -507,12 +510,12 @@ class Tables:
         source: FileSource | Element,
         *morphs: Morph,
         root: str | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
-        # column_schema: ColumnSchema | None = None,
         view: View | None = None,
         index_column: str | None = None,
-        output_spec: OutputSpec | None = None,
-        params: Params | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        # column_schema: ColumnSchema | None = None,
     ) -> Element:
         """
         Transform a dataframe element using the provided morph function. For
@@ -532,27 +535,28 @@ class Tables:
             A function that takes a DataFrame and returns a transformed
             DataFrame.
         """
-        tag = from_prior(
-            source.tag,
-            tag,
+        tag = source.tag.bump(
             root=root,
             state=State.TRANSFORMED,
             method=Method.TABLES,
-        )
-
-        table_source = as_table_source(source)
-        infile = table_source.resolve()
+        ).resolve(tag)
+        # table_source = as_table_source(source)
+        # infile = table_source.resolve()
         # running_schema, renames, drops = bundle_morphs(
         #     table_source.schema, list(morphs)
         # )
-        output_spec = output_spec or self.default_output_spec
-        artifacts, output = ArtifactSet.generate_file_artifacts(
-            tag=tag,
-            default_dir=infile.parent,
-            spec=output_spec,
-            # column_schema=None,  # column_schema or running_schema,
-            index_column=index_column or table_source.index_column,
-        )  # in another function
+        out = OutSpec.from_tag(
+            tag, Out(folder=source.file.parent, ext="parquet", exts=("tsv",)), out
+        )
+        artifacts = ArtifactSet.from_outspec(out)
+        par = Params().resolve(par)
+        # artifacts, output = ArtifactSet.generate_file_artifacts(
+        #     tag=tag,
+        #     default_dir=infile.parent,
+        #     spec=output_spec,
+        #     # column_schema=None,  # column_schema or running_schema,
+        #     index_column=index_column or table_source.index_column,
+        # )  # in another function
 
         @depends(frame_callable, *(m.fn for m in morphs))
         def __run():
@@ -560,21 +564,18 @@ class Tables:
             for m in morphs:
                 df = m.fn(df)  # .rename(columns=rename)
 
-            write_frames(df, output)
+            write_frames(df, out.files)
 
-        key, name = generate_element_key_name(
-            tag, "Tables", subroutine="transform"
-        )  # noqa: E501
+        key = Element.generate_key(tag, "Tables", subroutine="transform")  # noqa: E501
         pres = (source,) if isinstance(source, Element) else source.pres
         return Element(
             key,
             __run,
             tag=tag,
-            determinants=(str(params),) if params else None,
-            inputs=(source.primary.resolve(),),
+            determinants=par.determinants + tuple(m.signature() for m in morphs),
+            inputs=(source.file,),
             artifacts=artifacts,
             pres=pres,
-            name=name,
         )
 
     @element
@@ -584,48 +585,51 @@ class Tables:
         *morphs: Morph,
         root: str | None = None,
         view: View | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
-        output_spec: OutputSpec | None = None,
-        params: Params | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
     ) -> Element:
-        tag = from_prior(
-            source.tag,
-            tag,
+        tag = source.tag.bump(
             root=root or source.tag.root,
             state=State.FILTER,
             method=Method.TABLES,
-        )
-        params = params or Params()
+        ).resolve(tag)
+        params = Params().resolve(par)
 
         # default morph if none provided
         if not morphs:
             view = _VIEWS["escd"] if view is None else view
             morphs = (filter_to_threshold(**params.to_dict()),)
-
-        infile = source.primary.resolve()
-        index_column = (
-            source.primary.index_column
-            if hasattr(source.primary, "index_column")
-            else None
+        out = OutSpec.from_tag(
+            tag, Out(folder=source.file.parent, ext="tsv", exts=("parquet",)), out
         )
-        pres = (source,) if isinstance(source, Element) else source.pres
-        artifacts, output = ArtifactSet.generate_file_artifacts(
-            tag=tag,
-            default_dir=infile.parent,
-            spec=output_spec or self.default_output_spec,
-            # column_schema=source.primary.column_schema,
-            index_column=index_column,
-        )
+        artifacts = ArtifactSet.from_outspec(out)
+        # infile = source.primary.resolve()
+        # index_column = (
+        #     source.primary.index_column
+        #     if hasattr(source.primary, "index_column")
+        #     else None
+        # )
+        pres = (source,)  # if isinstance(source, Element) else source.pres
+        # artifacts, output = ArtifactSet.generate_file_artifacts(
+        #     tag=tag,
+        #     default_dir=infile.parent,
+        #     spec=output_spec or self.default_output_spec,
+        #     # column_schema=source.primary.column_schema,
+        #     index_column=index_column,
+        # )
 
         # @depends(frame_callable, *(m.fn for m in morphs), bundle_morphs)
         def __run():
             print("source", source.primary)
-            filter_df = source.primary.view(view)
-            df = source.primary.view()
+            # filter_df = source.primary.view(view)
+            print(source.primary.resolve())
+            df = read_frame(source.primary.resolve())  # primary.view()
+            filter_df = df.copy()
             for morph in morphs:
                 index = morph.fn(filter_df).index
                 df = df.loc[index, :]
-            write_frames(df, output)
+            write_frames(df, out.files)
 
         # return self._finalize(
         #     source=source,
@@ -642,11 +646,10 @@ class Tables:
             key,
             __run,
             tag=tag,
-            determinants=(str(params),) if params else None,
-            inputs=(source.primary.resolve(),),
+            determinants=params.determinants + tuple(m.signature() for m in morphs),
+            inputs=(source.file,),
             artifacts=artifacts,
             pres=pres,
-            name=name,
         )
 
     @element
@@ -658,10 +661,10 @@ class Tables:
         first_key: str | None = None,
         root: str | None = None,
         index_column: str | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
         views: Mapping[str, View] | None = None,
-        output_spec: OutputSpec | None = None,
-        params: Params | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
     ) -> Element:
         """
         Combine multiple DataFrame elements into a single DataFrame element
@@ -688,9 +691,9 @@ class Tables:
         views : Mapping[str, View] | None, optional
             Views to select columns for each of the input DataFrames, by default
             None (select all columns).
-        output_spec : OutputSpec | None, optional
+        out : OutType | None, optional
             Output specification for the combined element, by default None
-        params : Params | None, optional
+        par : ParType | None, optional
             Parameters for the morph functions, by default None
         """
         artifact_keys = artifact_keys or {}
@@ -698,35 +701,39 @@ class Tables:
             sources[first_key] if first_key else next(iter(sources.values()))
         )
         views = views or {}
-        tag = from_prior(
-            first_element.tag,
-            tag,
+        tag = first_element.tag.bump(
             root=root,
             state=State.COMBINED,
             method=Method.TABLES,
+        ).resolve(tag)
+        out = OutSpec.from_tag(
+            tag,
+            Out(folder=first_element.file.parent, ext="parquet", exts=("tsv",)),
+            out,
         )
+        artifacts = ArtifactSet.from_outspec(out)
+        par = Params().resolve(par)
+
         input_paths = {
             key: s.artifacts[artifact_keys.get(key, "primary")].resolve()
             for key, s in sources.items()
         }
-        infile = first_element.primary.resolve()
-        output_spec = output_spec or self.default_output_spec
-        artifacts, _ = ArtifactSet.generate_file_artifacts(
-            tag=tag,
-            default_dir=infile.parent,
-            spec=output_spec,
-            # index_column=index_column or first_element.primary.index_column,
-        )  # in another function
+        # infile = first_element.primary.resolve()
+        # output_spec = output_spec or self.default_output_spec
+        # artifacts, _ = ArtifactSet.generate_file_artifacts(
+        #     tag=tag,
+        #     default_dir=infile.parent,
+        #     spec=output_spec,
+        #     # index_column=index_column or first_element.primary.index_column,
+        # )  # in another function
 
         @depends(frame_callable)
         def __run():
             inputs = {}
             for key, source in sources.items():
-                inputs[key] = source.artifacts[
-                    artifact_keys.get(key, "primary")
-                ].view(  # noqa: E501
-                    views.get(key)
-                )
+                artifact = source.artifacts[artifact_keys.get(key, "primary")]
+                df = self.resolve_artifact(artifact, views.get(key, None))
+                inputs[key] = df
             # apply the morphs
             for m in morphs:
                 inputs = m.fn(inputs)
@@ -741,27 +748,47 @@ class Tables:
                     raise ValueError(
                         f"Result key '{result_key}' not found in artifacts."
                     )
-                out = artifacts.primary.resolve()
-                write_frame(df, out)
+                write_frames(df, artifacts.files)
 
-        key, name = generate_element_key_name(
-            tag, "Tables", subroutine="combine"
-        )  # noqa: E501
+        key = Element.generate_key(tag, "Tables", subroutine="combine")  # noqa: E501
         return Element(
             key,
             __run,
             tag=tag,
-            determinants=tuple(m.signature() for m in morphs),
+            determinants=par.determinants + tuple(m.signature() for m in morphs),
             inputs=tuple(s.resolve() for s in input_paths.values()),
             artifacts=artifacts,
             pres=tuple(sources.values()),
-            name=name,
         )
+
+    def resolve_artifact(
+        self, artifact: Path | TableArtifact, view: View | None
+    ) -> DataFrame:
+        if isinstance(artifact, TableArtifact):
+            if view is None:
+                return artifact.frame
+            else:
+                schema = ColumnSchema.derive_from_columns(artifact.frame.columns)
+                columns = schema.select(view)
+                return artifact.frame[columns].as_frame()
+        elif isinstance(artifact, Path):
+            df = read_frame(artifact)
+            if view is None:
+                return df
+            else:
+                schema = ColumnSchema.derive_from_columns(df.columns)
+                selected_columns = schema.select(view)
+                return df[selected_columns].as_frame()
+        else:
+            raise ValueError(
+                f"Invalid artifact type: {type(artifact)}. Expected Path or TableArtifact."
+            )
 
     @element
     def join(
         self,
-        *sources: tuple[Element, str] | Element,
+        sources: Mapping[str, Element],
+        # *sources: tuple[Element, str] | Element,
         on: str | None = None,
         how: Literal[
             "left",
@@ -774,8 +801,8 @@ class Tables:
         ] = "left",
         views: Mapping[str, View | None] | None = None,
         root: str | None = None,
-        tag: PartialElementTag | ElementTag | None = None,
-        output_spec: OutputSpec | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
     ) -> Element:
         """
         Combine multiple DataFrame elements into a single DataFrame element
@@ -795,9 +822,9 @@ class Tables:
             Type of join to perform, by default "inner"
         root : str | None, optional
             Root name for the combined element, by default None
-        tag : PartialElementTag | ElementTag | None, optional
+        tag : TagType | None, optional
             Tag for the combined element, by default None
-        output_spec : OutputSpec | None, optional
+        out : OutType | None, optional
             Output specification for the combined element, by default None
 
         Returns
@@ -814,17 +841,25 @@ class Tables:
             else:
                 return source, "primary"
 
+        first_element = (
+            sources[first_key] if first_key else next(iter(sources.values()))
+        )
+
+        tag = first_element.tag.bump(
+            root=root or first_element.tag.root,
+            state=State.COMBINED,
+            method=Method.TABLES,
+        ).resolve(tag)
+        out = OutSpec.from_tag(
+            tag,
+            Out(folder=first_element.file.parent, ext="parquet", exts=("tsv",)),
+            out,
+        )
+        artifacts = ArtifactSet.from_outspec(out)
         views = views or {}
         output_spec = output_spec or self.default_output_spec
         first_element, fkey = get_element_and_key(sources[0])
         fkey = fkey or "primary"
-        tag = from_prior(
-            first_element.tag,
-            tag,
-            root=root or first_element.tag.root,
-            state=State.COMBINED,
-            method=Method.TABLES,
-        )
         elements = []
         names_in_order = []
         pre = []
@@ -863,9 +898,7 @@ class Tables:
                 raise ValueError("Cannot join empty input artifacts.")
             write_frames(df, output)
 
-        key, name = generate_element_key_name(
-            tag, "Tables", subroutine="join"
-        )  # noqa: E501
+        key = Element.generate_key(tag, "Tables", subroutine="join")  # noqa: E501
         return Element(
             key,
             __run,
@@ -873,7 +906,6 @@ class Tables:
             determinants=(str(on), str(how)),
             artifacts=artifacts,
             pres=tuple(pre),
-            name=name,
         )
 
     def long(
@@ -884,7 +916,7 @@ class Tables:
         root: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
         index_column: str | None = "gene_stable_id [META]",
-        output_spec: OutputSpec | None = None,
+        output_spec: OutSpec | None = None,
     ):
         """
         Convert a wide-format table to long-format.
@@ -901,7 +933,7 @@ class Tables:
             The tag for the output element, by default None
         index_column : str | None, optional
             The column to use as the index, by default "gene_stable_id [META]"
-        output_spec : OutputSpec | None, optional
+        output_spec : OutSpec | None, optional
             The output specification, by default None
 
         Returns
@@ -1002,7 +1034,7 @@ class Tables:
         index_column: str | None = "gene_stable_id [META]",
         root: str | None = None,
         tag: PartialElementTag | ElementTag | None = None,
-        output_spec: OutputSpec | None = None,
+        output_spec: OutSpec | None = None,
     ):
         schema, rename = ColumnSchema.from_legacy(
             read_schema(source.primary), sample_names
@@ -1400,3 +1432,23 @@ def pivot_values(
             "pipeline": pipeline,
         },
     )
+
+
+def annotate_single_values(
+    row_id: str, columns: list[str], index_column: str
+) -> MultiMorph:
+    def __annotate(inputs: Mapping[str, DataFrame]) -> Mapping[str, DataFrame]:
+        from_annotate = inputs["from_annotate"]
+        to_annotate = inputs["to_annotate"]
+        for col in columns:
+            if col not in from_annotate.columns:
+                raise ValueError(f"Column '{col}' not found in `from_annotate`.")
+            value = from_annotate.loc[
+                from_annotate[index_column] == row_id, col
+            ].values[0]
+            if pd.isna(value):
+                raise ValueError(f"Value at row '{row_id}' and column '{col}' is NaN.")
+            to_annotate[col] = value
+        return {"primary": to_annotate}
+
+    return MultiMorph.from_callable(__annotate)

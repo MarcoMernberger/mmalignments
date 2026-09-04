@@ -328,7 +328,8 @@ class ProgressReporter:
                 log_text.append("\n")
             log_text.append(
                 # line[: self.log_width], style=Style(color="bright_white", dim=True)
-                line, style=Style(color="bright_white", dim=True)
+                line,
+                style=Style(color="bright_white", dim=True),
             )
 
         return Panel(

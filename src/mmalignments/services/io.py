@@ -10,8 +10,13 @@ from typing import IO, TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 import pandas as pd  # type: ignore[import]
 import pyarrow.parquet as pq  # type: ignore[import]
+from Bio import SeqIO  # type: ignore[import]
 from matplotlib.figure import Figure  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
+
+from mmalignments.models.data import SequenceRecord  # type: ignore[import]
+
+from .genomic import normalize_sequence  # type: ignore[import]
 
 if TYPE_CHECKING:
     from artifacts import TableArtifact  # type: ignore[import]
@@ -245,6 +250,43 @@ def exists(path: Path | str) -> Callable[[], bool]:
     return check
 
 
+def read_fasta(path: str | Path) -> list[SequenceRecord]:
+    """
+    Read all sequences from a FASTA file.
+    """
+    records: list[SequenceRecord] = []
+
+    for record in SeqIO.parse(str(path), "fasta"):
+        sequence = normalize_sequence(str(record.seq))
+
+        if not sequence:
+            raise ValueError(f"Empty sequence: {record.id}")
+
+        records.append(
+            SequenceRecord(
+                id=record.id,
+                sequence=sequence,
+            )
+        )
+
+    if not records:
+        raise ValueError(f"No FASTA records found in {path}")
+
+    return records
+
+
+def read_single_fasta(path: str | Path) -> SequenceRecord:
+    records = read_fasta(path)
+
+    if len(records) != 1:
+        raise ValueError(
+            f"Reference FASTA must contain exactly one sequence, "
+            f"found {len(records)}"
+        )
+
+    return records[0]
+
+
 def write_fasta(path: Path, sequences: dict[str, str]) -> None:
     """
     Write sequences to a FASTA file.
@@ -325,7 +367,7 @@ def write_frame(df: DataFrame, path: Path, **kwargs) -> None:
     """
     ext = path.suffix.lower()
     parents(path)
-    params = {"sep": "\t", "index": True}
+    params = {"sep": "\t", "index": df.index.name is not None}
     params.update(kwargs)
     if ext in (".tsv", ".csv", ".txt"):
         df.to_csv(path, **params)
@@ -358,8 +400,8 @@ def read_frame(path: Path, drop_unnamed_columns: bool = True, **kwargs) -> DataF
     ValueError
         If the file format is unsupported.
     """
-    if drop_unnamed_columns:
-        kwargs.setdefault("usecols", lambda c: not c.startswith("Unnamed"))
+    # if drop_unnamed_columns:
+    #     kwargs.setdefault("usecols", lambda c: not c.startswith("Unnamed"))
     if path.suffix in (".tsv", ".txt"):
         return pd.read_csv(path, sep="\t", **kwargs)
     elif path.suffix == ".parquet":
@@ -488,3 +530,53 @@ def save_figure(fig: Figure, outfile: Path) -> None:
         format=outfile.suffix[1:],
         bbox_inches="tight",
     )
+
+
+def fastq_to_dataframe(fastq_file: Path) -> DataFrame:
+    """
+    Liest eine FASTQ-Datei ein und gibt einen DataFrame zurück.
+
+    Spalten:
+        id       - Read-ID
+        sequence - Sequenz als String
+        quality  - Phred-Qualitätswerte als Liste
+    """
+    records = []
+
+    for record in SeqIO.parse(fastq_file, "fastq"):
+        records.append(
+            {
+                "name": record.id,
+                "R1": str(record.seq),
+                "quality": record.letter_annotations["phred_quality"],
+            }
+        )
+
+    return pd.DataFrame(records)
+
+
+def read_sequence_file(sequence_path: Path) -> DataFrame:
+    """
+    Read a sequence file (TSV, CSV, Parquet, FASTQ) and return a DataFrame.
+
+    Parameters
+    ----------
+    sequence_path : Path
+        The path to the sequence file.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame containing the sequences.
+
+    Raises
+    ------
+    ValueError
+        If the file type is unsupported.
+    """
+    if sequence_path.suffix in (".tsv", ".csv", ".parquet"):
+        return read_frame(sequence_path)
+    elif sequence_path.suffix in (".fastq", ".fq"):
+        return fastq_to_dataframe(sequence_path)
+    else:
+        raise ValueError(f"Unsupported sequence file type: {sequence_path.suffix}")

@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Self
+from typing import Any, Callable, Self
 
 from pandas import DataFrame  # type: ignore[import]
 
+from mmalignments.models.overlay import OutSpec  # type: ignore[import]
 from mmalignments.services.dependencies import (
     Signifiable,
     combined_signature,
@@ -17,6 +18,57 @@ from mmalignments.services.dependencies import (
     stable_hash,
 )
 from mmalignments.services.io import read_frame  # , read_schema
+
+################################################################################
+# ArtifactFactory
+################################################################################
+
+ArtifactFactory = Callable[[str, "Path | tuple[Path, ...]"], Any | None]
+
+
+def _fastq_factory(key: str, value: Path | tuple[Path, ...]) -> Any | None:
+    paths = value if isinstance(value, tuple) else (value,)
+    if not any(
+        paths[0].name.endswith("." + s) for s in FastqArtifact.FASTQ_SUFFIXES
+    ):  # noqa: E501
+        return None
+    if len(paths) == 1:
+        return FastqArtifact(r1=paths[0])
+    if len(paths) == 2:
+        return FastqArtifact(r1=paths[0], r2=paths[1])
+    return None  # more than 2 files in a fastq-named group: not handled here
+
+
+def _table_factory(key: str, value: Path | tuple[Path, ...]) -> Any | None:
+    if isinstance(value, tuple):
+        return None
+    ext = value.suffix.removeprefix(".")
+    if ext not in ("parquet", "tsv", "csv"):
+        return None
+    return TableArtifact(path=value)
+
+
+DEFAULT_ARTIFACT_FACTORIES: tuple[ArtifactFactory, ...] = (
+    _fastq_factory,
+    _table_factory,
+)
+
+
+def _wrap_artifact(
+    key: str,
+    value: Path | tuple[Path, ...],
+    factories: tuple[ArtifactFactory, ...],
+) -> Any:
+    for factory in factories:
+        result = factory(key, value)
+        if result is not None:
+            return result
+    return value  # unmatched: plain Path, or tuple[Path, ...] left as-is
+
+
+################################################################################
+# Artifacts
+################################################################################
 
 
 class Artifact(ABC):
@@ -133,6 +185,31 @@ class TableArtifact(FileArtifact):
             frame.set_index(index_column, inplace=True)
             # frame.index = Index(frame[index_column].copy())
         return frame
+
+    # def view(
+    #     self,
+    #     view: View | None = None,
+    # ) -> DataFrame:
+    #     cols = self.schema.select(view)
+    #     df = self.frame
+    #     selected_columns = [col for col in cols if col in df.columns]
+    #     # difference = set(cols) - set(df.columns)
+    #     # if difference:
+    #     #     raise KeyError(
+    #     #         f"Columns {difference} are in the schema but not in the DataFrame for {self.path}."  # noqa: E501
+    #     #     )
+    #     if not cols and view:
+    #         print(self.frame.head())
+    #         raise KeyError(
+    #             f"No columns match metric={view.metric!r}, sample_id={view.sample_id!r}, pipeline={view.pipeline!r}."  # noqa: E501
+    #             f"in {self.path}."
+    #         )
+    #     return self.frame[selected_columns]  # type: ignore[return-value]
+
+
+################################################################################
+# ArtifactSet
+################################################################################
 
 
 class ArtifactSet(Mapping[str, Any], Signifiable):
@@ -480,3 +557,74 @@ class ArtifactSet(Mapping[str, Any], Signifiable):
             return f"ArtifactSet({primary}, {extras})"
 
         return f"ArtifactSet({primary})"
+
+    # @classmethod
+    # def from_outspec(
+    #     cls,
+    #     spec: OutSpec,
+    # ) -> ArtifactSet:
+    #     # ensure we have a name and directory
+    #     primary_name = spec.ext or "primary"
+    #     primary = spec.file
+    #     file_artifacts: dict[str, Any] = {}
+    #     for key, path in spec.iterfiles():
+    #         if path == primary:
+    #             continue
+    #         file_artifacts[key] = path
+    #     return ArtifactSet(
+    #         primary,
+    #         primary_name=primary_name,
+    #         **file_artifacts,
+    #     )
+
+    @classmethod
+    def from_outspec(
+        cls,
+        spec: OutSpec,
+        default_name: str | None = None,
+        artifact_factories: tuple[
+            ArtifactFactory, ...
+        ] = DEFAULT_ARTIFACT_FACTORIES,  # noqa: E501
+    ) -> ArtifactSet:
+        """
+        Create an ArtifactSet from an OutSpec, wrapping each output group in
+        the appropriate Artifact type (FastqArtifact, TableArtifact, or a
+        plain Path/tuple[Path, ...] fallback). Factories are tried in order
+        per group; the first non-None match wins.
+
+        Parameters
+        ----------
+        spec : OutSpec
+            The OutSpec describing the outputs to wrap.
+        default_name : str | None, optional
+            Used to resolve ``spec.stem`` if it is not already set (see
+            ``OutSpec.resolve_stem``). Required if ``spec.stem`` is None.
+        artifact_factories : tuple[ArtifactFactory, ...], optional
+            Ordered factories to try per group. Override to customize
+            wrapping (e.g. a different TableArtifact configuration, or
+            support for additional artifact types).
+
+        Returns
+        -------
+        ArtifactSet
+            The resulting ArtifactSet, with ``spec.ext`` as the primary key.
+        """
+        if default_name is not None:
+            spec = spec.resolve_stem(default_name)
+
+        mapping = spec.map()  # dict[str, Path | tuple[Path, ...]]
+
+        if spec.ext not in mapping:
+            raise ValueError(
+                f"OutSpec has no files for primary extension '{spec.ext}'; "
+                "was 'stem' left unresolved? Pass 'default_name' or call "
+                "spec.resolve_stem(...) first."
+            )
+
+        resolved = {
+            key: _wrap_artifact(key, value, artifact_factories)
+            for key, value in mapping.items()
+        }
+
+        primary = resolved.pop(spec.ext)
+        return cls(primary, primary_name=spec.ext, **resolved)

@@ -69,13 +69,19 @@ class Sample:
         return self.input_files[1] if len(self.input_files) > 1 else None
 
 
+class Species(str, Enum):
+    Homo_sapiens = "Homo_sapiens"
+    Mus_musculus = "Mus_musculus"
+
+
 @dataclass
 class Genome:
     """Lightweight genome description"""
 
-    species: str
+    species: Species
     revision: int
-    prebuild_prefix: str
+    assembly: str
+    prebuild_prefix: str = ""
     genetic_code: Any | None = None
 
     @property
@@ -138,3 +144,9 @@ class HardFilterThresholds:
             f"(FMT/AD[{sample_name}:1]/FMT/DP[{sample_name}])>={self.min_vaf}"
         )
         return ret
+
+
+@dataclass(frozen=True)
+class SequenceRecord:
+    id: str
+    sequence: str

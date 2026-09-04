@@ -28,11 +28,13 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping, cast
 
 import matplotlib.pyplot as plt  # type: ignore[import]
 import numpy as np  # type: ignore[import]
 import pandas as pd  # type: ignore[import]
+from matplotlib import colormaps  # type: ignore[import]
+from matplotlib.lines import Line2D  # type: ignore[import]
 from matplotlib.patches import Rectangle  # type: ignore[import]
 from pandas import DataFrame, Series  # type: ignore[import]
 
@@ -47,17 +49,6 @@ from mmalignments.models.artifacts import (
     ArtifactSet,
     TableArtifact,
 )
-from mmalignments.models.overlay import (
-    FileSpec,
-    OutType,
-    ParType,
-    TagType,
-    ExtType,
-    Out,
-    OutputSpec,
-    Par,
-    from_prior,
-)
 from mmalignments.models.elements import (
     CallSpec,
     Element,
@@ -65,6 +56,20 @@ from mmalignments.models.elements import (
     NextGenSample,
     TableElement,
     element,
+)
+from mmalignments.models.overlay import (
+    CfgType,
+    FileSpec,
+    Out,
+    OutputSpec,
+    OutSpec,
+    OutType,
+    Params,
+    ParType,
+    SpecValues,
+    TagType,
+    from_prior,
+    pick_spec,
 )
 from mmalignments.models.parameters import (
     ParamRegistry,
@@ -97,6 +102,29 @@ from ..externals import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _overlay_signature_determinants(params: ParType | None) -> tuple[str, ...]:
+    if params is None:
+        return ()
+    merged = params.to_dict()
+    tokens: list[str] = []
+    for key in sorted(merged.keys()):
+        value = merged[key]
+        if value is None or value is False or value == []:
+            continue
+        tokens.append(f"{key}={value}")
+    return tuple(tokens)
+
+
+def _artifact_path(value: Any) -> Path:
+    if isinstance(value, Path):
+        return value
+    if hasattr(value, "resolve"):
+        resolved = value.resolve()
+        if isinstance(resolved, Path):
+            return resolved
+    return Path(value)
 
 
 # ---------------------------------------------------------------------------
@@ -309,18 +337,13 @@ class MmFqCount(External):
     # Default paths
     # -----------------------------------------------------------------------
 
-    def default_output_dir(self, sample_name: str) -> Path:
+    def default_outdir(self, sample_name: str) -> Path:
         """Return the default output directory for a given sample."""
         return Path("results") / "counts" / self.version_name / sample_name
 
-    def default_output(
-        self, sample_name: str = "", outdir: Path | None = None, ext: str = "tsv"
-    ) -> OutputSpec:
-        """Return the default output spec for a given sample."""
-        return OutputSpec(
-            outdir=outdir or self.default_output_dir(sample_name),
-            ext=ext,
-        )
+    def default_out(self, sample_name: str) -> OutSpec:
+        """Return the default OutSpec for a given sample."""
+        return OutSpec(folder=self.default_outdir(sample_name), ext="tsv")
 
     # -----------------------------------------------------------------------
     # count — high-level @element
@@ -333,8 +356,8 @@ class MmFqCount(External):
         *,
         tag: TagType | None = None,
         out: OutType | None = None,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Count all unique read sequences (or read pairs) in a sample.
 
@@ -353,10 +376,10 @@ class MmFqCount(External):
             automatically.
         tag : TagType | None
             Optional tag override.
-        outspec : OutType | None
+        out : OutType | None
             Output specification; defaults to
             ``results/counts/<version>/<sample.name>`` with extension ``tsv``.
-        params : ParType | None
+        par : ParType | None
             Trimming parameters.  Recognised keys:
 
             ``trim_start`` (str)
@@ -367,7 +390,7 @@ class MmFqCount(External):
             ``trim_length`` (int)
                 Keep at most this many bases after trimming.
 
-        cfg : ExtType |None
+        cfg : CfgType |None
             Subprocess configuration.
 
         Returns
@@ -378,31 +401,27 @@ class MmFqCount(External):
         fastq_r1 = sample.primary.r1
         fastq_r2 = sample.primary.r2 if hasattr(sample.primary, "r2") else None
 
-        tag = from_prior(
-            sample.tag,
-            tag,
+        tag = sample.tag.bump(
             stage=Stage.QUANT,
             method=Method.MMFQCOUNT,
             state=State.COUNT,
-            ext="tsv",
-        )
+        ).resolve(tag)
 
-        outspec = self.default_output(tag.default_name).patch(out)
-        output_file = outspec.file
+        out = OutSpec.from_tag(tag).resolve(self.default_out(sample.root), out)
+        artifacts = ArtifactSet(out.file, primary_name=out.ext)
 
         runner = self.run_count(
             fastq_r1=fastq_r1,
             fastq_r2=fastq_r2,
-            output_file=output_file,
-            params=params,
+            output_file=out.file,
+            par=par,
             cfg=cfg,
         )
 
-        key, name = self.build_element_name(tag, "count")
-        determinants = self.signature_determinants(params, subroutine="count")
+        key = Element.generate_key(tag, "count")
+        determinants = _overlay_signature_determinants(par)
         inputs = (fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,)
         pres = (sample,) if isinstance(sample, Element) else sample.pres
-        artifacts = ArtifactSet(output_file, primary_name=out.ext)
         return Element(
             key,
             runner,
@@ -424,8 +443,8 @@ class MmFqCount(External):
         fastq_r2: Path | None,
         output_file: Path,
         *,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Low-level wrapper for ``mmfqcount count``.
 
@@ -437,10 +456,10 @@ class MmFqCount(External):
             R2 FASTQ file (plain or gzip), or *None* for single-end.
         output_file : Path | str
             Destination path for the counts TSV.
-        params : ParType | None
+        par : ParType | None
             Trimming parameters (``trim_start``, ``trim_stop``,
             ``trim_length``).
-        cfg : ExtType |None
+        cfg : CfgType |None
             Subprocess configuration.
 
         Returns
@@ -484,9 +503,9 @@ class MmFqCount(External):
         r2_col: str | None = None,
         id_col: str = "Name",
         tag: TagType | None = None,
-        outspec: OutType | None = None,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Match counted sequences against a predefined-sequences table.
 
@@ -517,13 +536,13 @@ class MmFqCount(External):
             Default: ``"Name"``.
         tag : TagType | None
             Optional tag override.
-        outspec : OutType | None
+        out : OutType | None
             Output specification.
-        params : ParType | None
+        par : ParType | None
             Additional ``match`` parameters (``seq_col``, ``r2_col``,
-            ``id_col`` can also be supplied here as ``Params`` overrides
+            ``id_col`` can also be supplied here as ``Par`` overrides
             instead of keyword arguments).
-        cfg : ExtType |None
+        cfg : CfgType |None
             Subprocess configuration.
 
         Returns
@@ -535,9 +554,9 @@ class MmFqCount(External):
             ``"unmatched"`` → unmatched sequences TSV
         """
         # count file
-        counts_file = counts.primary.resolve()
+        counts_file = _artifact_path(counts.artifacts.primary)
         # Resolve predefined path
-        pred_path = predefined.primary.resolve()
+        pred_path = _artifact_path(predefined.artifacts.primary)
         if isinstance(predefined, Element):
             pred_pres: tuple = (predefined,)
         elif isinstance(predefined, FileSource):
@@ -547,38 +566,40 @@ class MmFqCount(External):
                 f"predefined must be an Element or FileSource, got {type(predefined)}"
             )
         # Merge column settings: explicit kwargs take priority over params
-        merged_params = Par(
-            seq_col=seq_col,
-            id_col=id_col,
-            **({"r2_col": r2_col} if r2_col else {}),
-        )
-        if params:
-            merged_params = merged_params.patch(**params.to_dict())
-        tag = from_prior(
-            counts.tag,
-            tag,
+        tag = counts.tag.bump(
             stage=Stage.QUANT,
             method=Method.MMFQCOUNT,
             state=State.ANNOTATED,
-        )
-        spec = self.default_output(outdir=counts_file.parent).patch(outspec)
+        ).resolve(tag)
+        par = Params(
+            seq_col=seq_col,
+            id_col=id_col,
+            **({"r2_col": r2_col} if r2_col else {}),
+        ).patch(par)
+        spec = OutSpec.from_tag(tag, Out(folder=counts_file.parent)).patch(out)
         spec = spec.add_output(
             "unmatched", FileSpec(tag.default_name + ".unmatched", ext=spec.ext)
         )
-        artifacts = ArtifactSet.generate(tag, spec=spec)
+        matched_path = spec.path()
+        unmatched_path = spec.path("unmatched")
+        artifacts = ArtifactSet(
+            TableArtifact(matched_path),
+            primary_name=spec.ext,
+            unmatched=TableArtifact(unmatched_path),
+        )
         runner = self.run_match(
             counts_tsv=counts_file,
             predefined_tsv=pred_path,
-            matched_tsv=artifacts.primary.resolve(),
-            unmatched_tsv=artifacts["unmatched"].resolve(),
-            params=merged_params,
+            matched_tsv=matched_path,
+            unmatched_tsv=unmatched_path,
+            par=par,
             cfg=cfg,
         )
 
         key, name = self.build_element_name(
             tag, "match", seq_col=seq_col, id_col=id_col
         )
-        determinants = self.signature_determinants(merged_params, subroutine="match")
+        determinants = _overlay_signature_determinants(par)
         return Element(
             key,
             runner,
@@ -587,7 +608,6 @@ class MmFqCount(External):
             determinants=determinants,
             inputs=(counts_file, pred_path),
             pres=(counts,) + pred_pres,
-            name=name,
         )
 
     # -----------------------------------------------------------------------
@@ -602,8 +622,8 @@ class MmFqCount(External):
         matched_tsv: Path | str,
         unmatched_tsv: Path | str,
         *,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Low-level wrapper for ``mmfqcount match``.
 
@@ -619,7 +639,7 @@ class MmFqCount(External):
             Output path for unmatched sequences.
         params : ParType | None
             Match parameters (``seq_col``, ``r2_col``, ``id_col``).
-        cfg : ExtType |None
+        cfg : CfgType |None
             Subprocess configuration.
 
         Returns
@@ -645,7 +665,7 @@ class MmFqCount(External):
         ]
 
         # Append column flags from params
-        params = params or Par()
+        par = par or Params()
         # cli_extras = self.to_cli(params, subroutine="match")
         # arguments += cli_extras
         return (
@@ -672,9 +692,9 @@ class MmFqCount(External):
         keys: list[str] | None = ["R2", "Annotation"],
         filter: Callable[[pd.DataFrame], pd.DataFrame] | bool = True,
         tag: TagType | None = None,
-        outspec: OutType | None = None,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
         mode: str = "both",
     ) -> Element:
         """
@@ -690,10 +710,10 @@ class MmFqCount(External):
         threshold (if exclude_score is set).
 
         Parameters
-        ----------st du
-        compare : NextGenSampleElement
+        ----------
+        compare : TableElement
             Element containing the counts TSV to compare (condition).
-        against : NextGenSampleElement
+        against : TableElement
             Element containing the counts TSV to compare against (control).
         score : Callable[[int, int], float]] | None, optional
             Function that takes two counts (compare, against) and returns a score.
@@ -713,11 +733,11 @@ class MmFqCount(External):
             excluded.
         tag : TagType | None
             Optional tag override.
-        outspec : OutType | None, optional
+        out : OutType | None, optional
             Optional output specification override.
-        params : ParType | None, optional
+        par : ParType | None, optional
             Additional parameters, by default None
-        cfg : ExtType |None, optional
+        cfg : CfgType |None, optional
             Runtime configuration, by default None
 
         Returns
@@ -745,7 +765,7 @@ class MmFqCount(External):
             filter_column: str, filter: Callable[[pd.DataFrame], pd.DataFrame] | bool
         ) -> Callable[[DataFrame], DataFrame] | None:
             def filter_func(df: DataFrame) -> DataFrame:
-                df = df[df[filter_column] > 0]
+                df = df[df[filter_column] > 0].as_frame()
                 return df
 
             if callable(filter):
@@ -755,34 +775,35 @@ class MmFqCount(External):
             else:
                 return None
 
-        tag = from_prior(
-            compare.tag,
-            tag,
+        tag = compare.tag.bump(
             stage=Stage.QUANT,
             method=Method.MMFQCOUNT,
             state=State.SCORE,
-            ext="tsv",
-        )
-        params = Par(
+        ).resolve(tag)
+        spec = OutSpec.from_tag(tag, Out(folder=compare.file.parent)).patch(out)
+        par = Params(
             count_column="Count",
             freq_column="Frequency",
             annotation_column="Annotation",
             seq_column="R2",
             score_name="Score" if score else "Log2 Relative Enrichment Score",
-        ).update(params)
+        ).patch(par)
 
+        count_column = str(par.get("count_column", "Count"))
         keys = keys or ["R2", "Annotation"]
-        filter_func = get_filter(f"{params.count_column} ({compare.tag.root})", filter)
-        spec = self.default_output(outdir=compare.file.parent).merge(outspec)
+        # compare_file = _artifact_path(compare.artifacts.primary)
+        # against_file = _artifact_path(against.artifacts.primary)
+        filter_func = get_filter(f"{count_column} ({compare.tag.root})", filter)
         score_tsv = spec.path(tag.default_name)
         pres = (compare, against)
         inputs = (compare.file, against.file)
-        determinants = [function_hash(score), str(params)] + keys
+        determinants = (function_hash(score),) + tuple(keys) + par.determinants()
         determinants += (
-            [function_hash(filter_func)]
+            (function_hash(filter_func),)
             if callable(filter_func)
-            else [str(f"filter={filter}")]
+            else (f"filter={filter}",)
         )
+
         runner = self.compare_counts(
             compare=compare.tag.root,
             against=against.tag.root,
@@ -793,7 +814,7 @@ class MmFqCount(External):
             keys=keys,
             filter=filter_func,
             mode=mode,
-            params=params,
+            par=par,
             cfg=cfg,
         )
 
@@ -802,9 +823,12 @@ class MmFqCount(External):
             "compare",
             param_str="_against=" + against.tag.root,
         )
-        artifacts = {"tsv": score_tsv}
+        artifacts = ArtifactSet(score_tsv, primary_name="tsv")
         if filter:
-            artifacts["filtered"] = score_tsv.with_suffix(".filtered.tsv")
+            artifacts = artifacts.with_extra(
+                "filtered",
+                score_tsv.with_suffix(".filtered.tsv"),
+            )
 
         return Element(
             key,
@@ -814,7 +838,6 @@ class MmFqCount(External):
             inputs=inputs,
             artifacts=artifacts,
             pres=pres,
-            name=name,
         )
 
     # -----------------------------------------------------------------------
@@ -833,20 +856,21 @@ class MmFqCount(External):
         keys: list[str] | None = ["R2", "Annotation"],
         filter: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
         mode: str = "both",
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Runnable:
         """Compare two count TSVs and assign a score to each sequence."""
-        params = Par(
+        merged_params = Params(
             count_column="Count",
             freq_column="Frequency",
             annotation_column="Annotation",
             seq_column="R2",
             score_name="Score" if score else "Log2 Relative Enrichment Score",
             how="left",
-        ).update(params)
-        count_column = params.count_column
-        freq_column = params.freq_column
+        ).patch(par)
+        count_column = str(merged_params.get("count_column", "Count"))
+        freq_column = str(merged_params.get("freq_column", "Frequency"))
+        merge_how = str(merged_params.get("how", "left"))
 
         def reduce_to_keys(
             key_columms: list[str],
@@ -881,7 +905,7 @@ class MmFqCount(External):
             merged = compare_df.merge(
                 against_df,
                 on=keys,
-                how=params.how,
+                how=cast(Any, merge_how),
                 suffixes=(f" ({compare})", f" ({against})"),
             )
             merged = merged.fillna(
@@ -903,7 +927,7 @@ class MmFqCount(External):
             if keys:
                 compare_df = reduce_to_keys(keys)(compare_df)
                 against_df = reduce_to_keys(keys)(against_df)
-            score_name = params.get("score_name", "score")
+            score_name = str(merged_params.get("score_name", "score"))
             compare_df = merge_frames(compare_df, against_df)
             comp_count_column = f"{count_column} ({compare})"
             against_count_column = f"{count_column} ({against})"
@@ -934,7 +958,7 @@ class MmFqCount(External):
                 "score": score,
                 "keys": keys,
                 "filter": filter,
-                "params": params,
+                "params": merged_params,
             },
         ).render()
         return Runnable(
@@ -952,7 +976,7 @@ class MmFqCount(External):
     #     score: Callable[[Series, Series], Series],
     #     *,
     #     params: ParType | None = None,
-    #     cfg: ExtType |None = None,
+    #     cfg: CfgType |None = None,
     # ) -> Runnable:
     #     """Compare two count TSVs and assign a score to each sequence."""
     #     keys: list[str] | None = ["R2", "Annotation"]
@@ -1082,11 +1106,10 @@ class MmFqCount(External):
         seq_col: str = "Sequence",
         r2_col: str | None = None,
         id_col: str = "Name",
-        tag: TagType | None = None,
-        outspec: OutType | None = None,
-        count_params: ParType | None = None,
-        match_params: ParType | None = None,
-        cfg: ExtType | None = None,
+        tag: TagType | SpecValues[TagType] | None = None,
+        out: OutType | SpecValues[OutType] | None = None,
+        par: ParType | SpecValues[ParType] | None = None,
+        cfg: CfgType | SpecValues[CfgType] | None = None,
     ) -> tuple[Element, Element]:
         """Count reads and immediately match against predefined sequences.
 
@@ -1104,15 +1127,15 @@ class MmFqCount(External):
             R2-sequence column for paired matching. *None* for single-end.
         id_col : str
             ID column in the predefined TSV. Default: ``"Name"``.
-        tag : TagType | None
+        tag : TagType | SpecValues[TagType] | None
             Tag override (propagated to both elements).
-        outspec : OutType | None
+        out : OutType | SpecValues[OutType] | None
             Output specification overrides.
-        count_params : ParType | None
+        par : ParType | SpecValues[ParType] | None
             Trimming parameters for the ``count`` step.
-        match_params : ParType | None
+        par : ParType | SpecValues[ParType] | None
             Column parameters for the ``match`` step.
-        cfg : ExtType |None
+        cfg : CfgType |None
             Subprocess configuration (shared by both steps).
 
         Returns
@@ -1120,13 +1143,12 @@ class MmFqCount(External):
         tuple[Element, Element]
             ``(match_element, count_element)``
         """
-        spec = self.default_output(sample.root).merge(outspec)
         count_el = self.count(
             sample,
-            tag=tag,
-            outspec=spec,
-            params=count_params,
-            cfg=cfg,
+            tag=pick_spec(tag, "count"),
+            out=pick_spec(out, "count"),
+            par=pick_spec(par, "count"),
+            cfg=pick_spec(cfg, "count"),
         )
         match_el = self.match(
             counts=count_el,
@@ -1134,10 +1156,10 @@ class MmFqCount(External):
             seq_col=seq_col,
             r2_col=r2_col,
             id_col=id_col,
-            tag=tag,
-            outspec=spec,
-            params=match_params,
-            cfg=cfg,
+            tag=pick_spec(tag, "match"),
+            out=pick_spec(out, "match"),
+            par=pick_spec(par, "match"),
+            cfg=pick_spec(cfg, "match"),
         )
         return match_el, count_el
 
@@ -1146,9 +1168,9 @@ class MmFqCount(External):
         samples: Mapping[str, NextGenSample],
         *,
         tag: TagType | None = None,
-        outspec: OutType | None = None,
-        params: ParType | None = None,
-        cfg: ExtType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> dict[str, Element]:
         """
         samplecount is a convenience method that takes a mapping of sample names
@@ -1163,12 +1185,12 @@ class MmFqCount(External):
             A mapping of sample names to NextGenSample instances to be counted.
         tag : TagType | None, optional
             Optional tag override applied to all count elements, by default None.
-        outspec : OutType | None, optional
-            Output specification for all count elements, by default None. If None,
-            defaults to results/counts/<version>/<sample_name> for each sample.
-        params : ParType | None, optional
+        out : OutType | None, optional
+            Output specification for all count elements, by default None. This
+            is broadcasted to all individual sample counts.
+        par : ParType | None, optional
             Parameters for the count method, by default None.
-        cfg : ExtType |None, optional
+        cfg : CfgType |None, optional
             Configuration for external run, by default None.
 
         Returns
@@ -1178,12 +1200,11 @@ class MmFqCount(External):
         """
         count_elements = {}
         for sample_name, sample in samples.items():
-            spec = self.default_output(sample.root).merge(outspec)
             counted = self.count(
                 sample,
                 tag=tag,
-                outspec=spec,
-                params=params,
+                out=out,
+                par=par,
                 cfg=cfg,
             )
             count_elements[sample_name] = counted
@@ -1200,12 +1221,12 @@ class MmFqCount(External):
         exon_column: str = "exon",
         profile_column: str = "profile",
         tag: TagType | None = None,
-        outspec: OutType | None = None,
-        params: ParType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
     ) -> Element:
         """
-        Creates mutation profile for predefined signatures later used for classification
-        of the reads.
+        Creates mutation profile for predefined signatures later used for
+        classification of the reads.
 
         Parameters
         ----------
@@ -1231,7 +1252,7 @@ class MmFqCount(External):
             Optional output specification override.
         params : ParType | None, optional
             Additional parameters, by default None
-        cfg : ExtType |None, optional
+        cfg : CfgType |None, optional
             Runtime configuration, by default None
 
         Returns
@@ -1240,40 +1261,33 @@ class MmFqCount(External):
             Element with the alignment results as a TSV file.
         """
 
-        tag = from_prior(
-            predefined.tag,
-            tag,
+        tag = predefined.tag.bump(
             stage=Stage.ANALYSIS,
             method=Method.MMFQCOUNT,
             state=State.MAP,
-        )
-        params = Par().update(params)
+        ).resolve(tag)
+        out = OutSpec.from_tag(tag).patch(out)
+        artifacts = ArtifactSet.from_outspec(out)  # this is a TableArtifact
+        par = Params().patch(par)
 
         pres = ()
-        predefined_path = predefined.primary.resolve()
-        wt_path = wt.primary.resolve()
-        outfile = (
-            outspec.path(tag.default_name)
-            if outspec
-            else predefined_path.parent / f"{tag.default_name}.tsv"
-        )
+        predefined_path = _artifact_path(predefined.artifacts.primary)
+        wt_path = _artifact_path(wt.artifacts.primary)
         runner = self.create_predefined_profile(
             wt_path,
             predefined_path,
-            outfile,
+            out.file,
             id_column=id_column,
             exon_column=exon_column,
             sequence_column=sequence_column,
             profile_column=profile_column,
         )
-        determinants = (id_column, sequence_column) + params.determinants()
-        key, name = self.build_element_name(
+        determinants = (id_column, sequence_column) + _overlay_signature_determinants(
+            par
+        )
+        key = Element.generate_key(
             tag,
             "profile",
-        )
-        artifacts = ArtifactSet(
-            TableArtifact(outfile),
-            primary_name=outfile.suffix,
         )
 
         return Element(
@@ -1283,7 +1297,6 @@ class MmFqCount(External):
             determinants=tuple(determinants),
             artifacts=artifacts,
             pres=pres,
-            name=name,
         )
 
     def create_predefined_profile(
@@ -1346,8 +1359,8 @@ class MmFqCount(External):
         id_column: str = "mut_ID",
         min_coverage: float = 0.8,
         tag: TagType | None = None,
-        outspec: OutType | None = None,
-        params: ParType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
     ) -> Element:
         """
         Selects the top N sequences from a count table and aligns them to a
@@ -1378,17 +1391,17 @@ class MmFqCount(External):
             Optional output specification override.
         params : ParType | None, optional
             Additional parameters, by default None
-        cfg : ExtType |None, optional
+        cfg : CfgType |None, optional
             Runtime configuration, by default None
         mode : str, optional
             Mode of alignment, by default "both"
         tag : TagType | None
             Optional tag override.
-        outspec : OutType | None, optional
+        out : OutType | None, optional
             Optional output specification override.
-        params : ParType | None, optional
+        par : ParType | None, optional
             Additional parameters, by default None
-        cfg : ExtType |None, optional
+        cfg : CfgType |None, optional
             Runtime configuration, by default None
 
         Returns
@@ -1397,51 +1410,40 @@ class MmFqCount(External):
             Element with the alignment results as a TSV file.
         """
 
-        tag = from_prior(
-            count.tag,
-            tag,
+        tag = count.tag.bump(
             stage=Stage.ANALYSIS,
             method=Method.MMFQCOUNT,
             state=State.MAP,
-        )
-        params = Par().update(params)
+        ).resolve(tag)
+        out = OutSpec.from_tag(tag, Out(folder=count.file.parent), out)
+        artifacts = ArtifactSet.from_outspec(out)
+        par = Params().patch(par)
 
         pres = (count, predefined)
-        determinants = params.determinants()
-        outfile = (
-            outspec.path(tag.default_name)
-            if outspec
-            else count.file.parent / f"{tag.default_name}.tsv"
-        )
         runner = self.align_counts(
-            outpath=outfile,
-            frame_path=count.primary.resolve(),
-            wt_path=wt.primary.resolve(),
+            outpath=out.file,
+            frame_path=count.file,
+            wt_path=wt.file,
             exon=exon,
-            predefined_path=predefined.primary.resolve(),
+            predefined_path=predefined.file,
             sequence_column=sequence_column,
             id_column=id_column,
             min_coverage=min_coverage,
             top=top,
         )
 
-        key, name = self.build_element_name(
+        key = Element.generate_key(
             tag,
             "aligncount",
-        )
-        artifacts = ArtifactSet(
-            TableArtifact(outfile),
-            primary_name=outfile.suffix,
         )
 
         return Element(
             key,
             runner,
             tag=tag,
-            determinants=tuple(determinants),
+            determinants=par.determinants(),
             artifacts=artifacts,
             pres=pres,
-            name=name,
         )
 
     def align_counts(
@@ -1534,22 +1536,18 @@ class MmFqCount(External):
             method=Method.MMFQCOUNT,
             state=State.PLOT,
         )
-        outspec = Out(outdir=count.file.parent).merge(outspec)
-        params = Par().update(params)
+        count_path = _artifact_path(count.artifacts.primary)
+        spec = OutputSpec(folder=count_path.parent, ext="svg").patch(outspec)
+        merged_params = Params().patch(params)
 
         pres = (count,)
-        determinants = params.determinants()
-        outfile = (
-            outspec.path(tag.default_name)
-            if outspec
-            else count.file.parent / f"{tag.default_name}.svg"
-        )
+        determinants = _overlay_signature_determinants(merged_params)
 
         def run():
-            df = read_frame(count.primary.resolve())
+            df = read_frame(count_path)
             return dataframe_to_igv_bam(
                 df=df,
-                output_dir=outspec.outdir or count.file.parent,
+                output_dir=spec.folder or count_path.parent,
                 sample_name=tag.default_name,
                 reference_name=reference_name,
                 min_mapq=min_mapq,
@@ -1559,10 +1557,10 @@ class MmFqCount(External):
             tag,
             "bamaligncount",
         )
-        bam_unsorted = (
-            outspec.outdir or count.file.parent
-        ) / f"{tag.default_name}.unsorted.bam"
-        bam = (outspec.outdir or count.file.parent) / f"{tag.default_name}.bam"
+        bam_unsorted = (spec.folder or count_path.parent) / (
+            f"{tag.default_name}.unsorted.bam"
+        )
+        bam = (spec.folder or count_path.parent) / f"{tag.default_name}.bam"
         bai = Path(str(bam) + ".bai")
 
         artifacts = (
@@ -1578,7 +1576,6 @@ class MmFqCount(External):
             determinants=tuple(determinants),
             artifacts=artifacts,
             pres=pres,
-            name=name,
         )
 
     @element
@@ -1608,18 +1605,16 @@ class MmFqCount(External):
             method=Method.MMFQCOUNT,
             state=State.PLOT,
         )
-        params = Par().update(params)
+        merged_params = Params().patch(params)
 
         pres = (count,)
-        determinants = params.determinants()
-        outfile = (
-            outspec.path(tag.default_name)
-            if outspec
-            else count.file.parent / f"{tag.default_name}.svg"
-        )
+        count_path = _artifact_path(count.artifacts.primary)
+        spec = OutputSpec(folder=count_path.parent, ext="svg").patch(outspec)
+        determinants = _overlay_signature_determinants(merged_params)
+        outfile = spec.path(tag.default_name)
         runner = self.plot_read_alignments(
             outfile=outfile,
-            analysis_df_path=count.primary.resolve(),
+            analysis_df_path=count_path,
             sort_by=sort_by,
             figsize=figsize,
             fontsize=fontsize,
@@ -1646,10 +1641,9 @@ class MmFqCount(External):
             determinants=tuple(determinants),
             artifacts=artifacts,
             pres=pres,
-            name=name,
         )
 
-    def plot_read_alignments(
+    def plot_read_alignments(  # noqa: C901
         self,
         outfile: Path,
         analysis_df_path: Path,
@@ -1727,7 +1721,7 @@ class MmFqCount(External):
         fig, ax
         """
 
-        def call(
+        def call(  # noqa: C901
             figsize=figsize, sort_by=sort_by, start=start, end=end, fontsize=fontsize
         ):
 
@@ -2303,7 +2297,7 @@ class MmFqCount(External):
             ).render(),
         )
 
-    def plot_read_alignments_first(
+    def plot_read_alignments_first(  # noqa: C901
         self,
         outfile: Path,
         analysis_df_path: Path,
@@ -2346,7 +2340,7 @@ class MmFqCount(External):
             Show vertical WT coordinate grid.
         """
 
-        def call(figsize=figsize, sort_by=sort_by):
+        def call(figsize=figsize, sort_by=sort_by):  # noqa: C901
             df = read_frame(analysis_df_path)
             if len(df) == 0:
                 raise ValueError("analysis_df is empty.")
@@ -2538,7 +2532,7 @@ class MmFqCount(External):
                         ax.scatter(
                             pos,
                             y,
-                            marker="^",
+                            marker=cast(Any, "^"),
                             s=70,
                             zorder=5,
                         )
@@ -2980,7 +2974,7 @@ class AmpliconQC(External):
     # Default paths
     # -----------------------------------------------------------------------
 
-    def default_output_dir(self, sample_name: str) -> Path:
+    def output_dir(self, sample_name: str) -> Path:
         """Return the default output directory for a given sample."""
         return Path("results") / "qc" / self.version_name / sample_name
 
@@ -2988,8 +2982,8 @@ class AmpliconQC(External):
         self, sample_name: str = "", outdir: Path | None = None, ext: str = "tsv"
     ) -> OutputSpec:
         """Return the default output spec for a given sample."""
-        return Out(
-            outdir=outdir or self.default_output_dir(sample_name),
+        return OutputSpec(
+            folder=outdir or self.output_dir(sample_name),
             ext=ext,
         )
 
@@ -3009,7 +3003,7 @@ class AmpliconQC(External):
         tag: TagType | None = None,
         outspec: OutType | None = None,
         params: ParType | None = None,
-        cfg: ExtType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Counts the read lengths between flanks, in other words, what remains
         after trimming for trouvleshooting.
@@ -3038,7 +3032,7 @@ class AmpliconQC(External):
         params : ParType | None
             Additional parameters for the count step. Default: None.
 
-        cfg : ExtType |None
+        cfg : CfgType |None
             Subprocess configuration.
 
         Returns
@@ -3058,7 +3052,7 @@ class AmpliconQC(External):
             ext="tsv",
         )
 
-        spec = self.default_output(sample.root).merge(outspec)
+        spec = self.default_output(sample.root).patch(outspec)
         output_file = spec.path(tag.default_name)
         len_file = output_file.with_name(output_file.stem + "_lengths.tsv")
         categories_file = output_file.with_name(output_file.stem + "_categories.tsv")
@@ -3066,8 +3060,8 @@ class AmpliconQC(External):
         runner = self.check_flank_insert(
             fastq_r1=fastq_r1,
             fastq_r2=fastq_r2,
-            flank_start=flank_start.artifacts.primary.resolve(),
-            flank_end=flank_end.artifacts.primary.resolve(),
+            flank_start=_artifact_path(flank_start.artifacts.primary),
+            flank_end=_artifact_path(flank_end.artifacts.primary),
             max_hamming=max_hamming,
             limit=limit,
             output_file=output_file,
@@ -3078,7 +3072,7 @@ class AmpliconQC(External):
         )
 
         key, name = self.build_element_name(tag, "count")
-        determinants = self.signature_determinants(params, subroutine="count")
+        determinants = _overlay_signature_determinants(params)
         inputs = (fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,)
         pres = (sample,) if isinstance(sample, Element) else sample.pres
         artifacts = ArtifactSet(output_file, primary_name=spec.ext)
@@ -3093,7 +3087,6 @@ class AmpliconQC(External):
             artifacts=artifacts,
             inputs=inputs,
             pres=pres,
-            name=name,
         )
 
     # -----------------------------------------------------------------------
@@ -3114,7 +3107,7 @@ class AmpliconQC(External):
         max_hamming: int = 1,
         limit: int = 10000,
         params: ParType | None = None,
-        cfg: ExtType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Low-level wrapper for ``amplicon-qc``.
 
@@ -3133,7 +3126,7 @@ class AmpliconQC(External):
         params : ParType | None
             Trimming parameters (``trim_start``, ``trim_stop``,
             ``trim_length``).
-        cfg : ExtType |None
+        cfg : CfgType |None
             Subprocess configuration.
 
         Returns
@@ -3213,9 +3206,8 @@ class AmpliconQC(External):
         Element
             Element with the histogram plot as an SVG file.
         """
-        outspec = Out(outdir=histogram.primary.resolve().parent, ext="svg").merge(
-            outspec
-        )
+        histogram_path = _artifact_path(histogram.artifacts.primary)
+        spec = OutputSpec(folder=histogram_path.parent, ext="svg").patch(outspec)
         tag = from_prior(
             histogram.tag,
             tag,
@@ -3223,24 +3215,22 @@ class AmpliconQC(External):
             method=Method.MMFQCOUNT,
             state=State.PLOT,
         )
-        params = Par().update(params)
+        merged_params = Params().patch(params)
 
         pres = (histogram,)
-        determinants = params.determinants()
-        outfile = (
-            outspec.path(tag.default_name)
-            if outspec
-            else histogram.file.parent / f"{tag.default_name}.svg"
-        )
+        determinants = _overlay_signature_determinants(merged_params)
+        outfile = spec.path(tag.default_name)
         cat_file = outfile.with_name(outfile.stem + "_categories.svg")
         hist_file = outfile.with_name(outfile.stem + "_lengths.svg")
+        lengths_path = _artifact_path(histogram.artifacts["lengths"])
+        categories_path = _artifact_path(histogram.artifacts["categories"])
         runner = self.plot_flank_lengths(
             output_hist_file=hist_file,
             output_category_file=cat_file,
             output_position_file=outfile,
-            position_file=histogram.primary.resolve(),
-            histogram_path=histogram.artifacts["lengths"].resolve(),
-            category_path=histogram.artifacts["categories"].resolve(),
+            position_file=histogram_path,
+            histogram_path=lengths_path,
+            category_path=categories_path,
             figsize=figsize,
         )
 
@@ -3260,7 +3250,6 @@ class AmpliconQC(External):
             determinants=tuple(determinants),
             artifacts=artifacts,
             pres=pres,
-            name=name,
         )
 
     def plot_flank_lengths(
@@ -3513,7 +3502,7 @@ def plot_histogram(
     # One color per category
     # ------------------------------------------------------------
 
-    cmap = plt.get_cmap("tab20")
+    cmap = colormaps["tab20"]
 
     category_colors = {
         category: cmap(i % cmap.N) for i, category in enumerate(all_categories)
@@ -3546,7 +3535,7 @@ def plot_histogram(
     none_none_count = df.loc[
         df["pair_category"] == none_none_category,
         "count",
-    ].sum()
+    ].sum()  # type: ignore
 
     # ------------------------------------------------------------
     # Figure
@@ -3663,7 +3652,7 @@ def plot_histogram(
     )
 
     fig.savefig(
-        output_svg,
+        str(output_svg),
         format="svg",
         bbox_inches="tight",
     )
@@ -3786,7 +3775,7 @@ def plot_pair_categories(
     )
 
     fig.savefig(
-        output_svg,
+        str(output_svg),
         format="svg",
         bbox_inches="tight",
     )
@@ -3863,7 +3852,7 @@ def plot_flank_positions(
 
     categories = sorted(df["pair_category"].dropna().unique())
 
-    cmap = plt.get_cmap("tab20")
+    cmap = colormaps["tab20"]
 
     category_colors = {
         category: cmap(i % cmap.N) for i, category in enumerate(categories)
@@ -3976,7 +3965,7 @@ def plot_flank_positions(
     # ------------------------------------------------------------
 
     legend_handles = [
-        plt.Line2D(
+        Line2D(
             [0],
             [0],
             color=category_colors[category],
@@ -4014,7 +4003,7 @@ def plot_flank_positions(
     )
 
     fig.savefig(
-        output_svg,
+        str(output_svg),
         format="svg",
         bbox_inches="tight",
     )
