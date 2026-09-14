@@ -34,7 +34,12 @@ from mmalignments.models.overlay import (
 )
 from mmalignments.models.parameters import ParamSet
 from mmalignments.models.tags import Method, Stage, State
-from mmalignments.services.io import parents, read_frame, write_frame
+from mmalignments.services.io import (
+    parents,
+    read_frame,
+    write_frame,
+    write_frames,
+)
 
 from ..externals import External, Runnable, SubroutineIn, subroutine
 
@@ -160,6 +165,7 @@ def _write_haplotype_vcf(
                 alleles=(ref, alt),
             )
             record.info["TYPE"] = variant_type_from_alleles(ref, alt)
+            record.id = var_id_from_chr_pos_ref_alt((chrom, position, ref, alt))
             variant_key = (chrom, position, ref, alt)
             for sample, variants in sample_variants.items():
                 genotype = 1 if variant_key in variants else 0
@@ -454,6 +460,9 @@ class Vep(External):
             alt_column = str(params.get("alt_column", "alt"))
             assembly_column = str(params.get("assembly_column", "assembly"))
             ambigous_column = str(params.get("ambigous_column", "is_ambigous"))
+            alignment_status_column = str(
+                params.get("alignment_status_column", "status")
+            )
 
             required_columns = {
                 sample_column,
@@ -485,6 +494,11 @@ class Vep(External):
 
             sample_variants: dict[str, set[tuple[str, int, str, str]]] = {}
             for _, row in frame.iterrows():
+                if (
+                    alignment_status_column in row
+                    and row[alignment_status_column] != "success"
+                ):
+                    continue
                 sample, variant_key, is_ambiguous = _parse_haplotype_variant_row(
                     row,
                     sample_column=sample_column,
@@ -617,6 +631,7 @@ class Vep(External):
         vep: Element,
         *,
         transcript: str | None = None,
+        additionbal_column_values: Mapping[str, Any] | None = None,
         tag: TagType | None = None,
         out: OutType | None = None,
         par: ParType | None = None,
@@ -643,6 +658,7 @@ class Vep(External):
             variant_path=variant.file,
             output_path=out.file,
             transcript=transcript,
+            additionbal_column_values=additionbal_column_values,
             par=par,
         )
         key = Element.generate_key(
@@ -673,6 +689,7 @@ class Vep(External):
         output_path: Path,
         *,
         transcript: str | None = None,
+        additionbal_column_values: Mapping[str, Any] | None = None,
         rename_dict: dict[str, str] | None = None,
         par: ParType | None = None,
     ) -> Runnable:
@@ -758,7 +775,6 @@ class Vep(External):
         ambiguous_column = cast(
             str, param.get("ambiguous_column", "n_ambigous_variants")
         )
-
         if transcript is not None:
             transcript = str(transcript)
 
@@ -769,8 +785,10 @@ class Vep(External):
             # Read input
             sequence_frame = read_frame(sequence_path)
             variant_frame = read_frame(variant_path)
+            variant_frame = variant_frame[~variant_frame["is_ambigous"]]
             vep_frame = _read_vep_output(vep_path)
             haplo_frame = _read_haplo_output(haplo_path)
+
             # Validate sequence dataframe
             if sample_column not in sequence_frame.columns:
                 raise KeyError(
@@ -828,6 +846,9 @@ class Vep(External):
                 how="left",
                 validate="one_to_one",
             )
+            if additionbal_column_values is not None:
+                for col, val in additionbal_column_values.items():
+                    result[col] = val
 
             # Write result
             parents(output_path)
@@ -852,6 +873,117 @@ class Vep(External):
             run,
             display=callspec.render(),
         )
+
+    @element
+    def dominants(
+        self,
+        vep_haplo: Element,
+        *,
+        major_haplo_threshold: float = 0.05,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
+    ):
+        par = Params(
+            min_count=10,
+            min_frequency=0.01,
+            major_haplo_threshold=major_haplo_threshold,
+        ).resolve(par)
+        tag = vep_haplo.tag.bump(
+            stage=Stage.ANALYSIS,
+            method=Method.VEP,
+            state=State.ANNOTATED,
+            flag="dominants",
+        ).resolve(tag)
+        out = OutSpec.from_tag(
+            tag,
+            folder=self.default_outdir(tag.root),
+            ext="tsv",
+        ).resolve(out)
+        out = out.add_output(
+            key="variants", file_spec=FileSpec(stem=f"{out.stem}.variants", ext="tsv")
+        )
+        out = out.add_output(
+            key="haplotypes",
+            file_spec=FileSpec(stem=f"{out.stem}.haplotypes", ext="tsv"),
+        )
+        artifacts = ArtifactSet.from_outspec(out)
+        runner = self.extract_dominants(
+            vep_haplo_path=vep_haplo.file,
+            output_paths_variants=out.output_groups["variants"],
+            output_paths_haplotypes=out.output_groups["haplotypes"],
+            output_paths_sample_annotation=out.output_groups["tsv"],
+            min_count=cast(int, par.get("min_count", 10)),
+            min_frequency=cast(float, par.get("min_frequency", 0.01)),
+            major_haplo_threshold=cast(
+                float, par.get("major_haplo_threshold", major_haplo_threshold)
+            ),
+        )
+        key = Element.generate_key(
+            tag,
+            "vep",
+            "dominants",
+        )
+        determinants = par.determinants
+        return Element(
+            key,
+            runner,
+            tag=tag,
+            artifacts=artifacts,
+            determinants=determinants,
+            pres=(vep_haplo,),
+        )
+
+    def extract_dominants(
+        self,
+        vep_haplo_path: Path,
+        output_paths_variants: list[Path],
+        output_paths_haplotypes: list[Path],
+        output_paths_sample_annotation: list[Path],
+        min_count: int = 10,
+        min_frequency: float = 0.01,
+        major_haplo_threshold: float = 0.1,
+    ) -> Runnable:
+
+        def run():
+            df = read_frame(vep_haplo_path)
+            dominant_haplotypes = get_dominant_haplotypes(
+                df,
+                min_count=min_count,
+                min_frequency=min_frequency,
+                major_haplo_threshold=major_haplo_threshold,
+            )
+
+            dominant_variants = get_dominant_variants(
+                df,
+                min_count=min_count,
+                min_frequency=min_frequency,
+            )
+            sample_annotation = annotate_samples(
+                dominant_variants,
+                dominant_haplotypes,
+                raw_df=df,
+                min_frequency=min_frequency,
+                major_haplo_threshold=major_haplo_threshold,
+            )
+            write_frames(dominant_variants, output_paths_variants)
+            write_frames(dominant_haplotypes, output_paths_haplotypes)
+            write_frames(sample_annotation, output_paths_sample_annotation)
+
+        callspec = CallSpec(
+            path=("Vep", "extract_dominants"),
+            kwargs={
+                "vep_haplo_path": vep_haplo_path,
+                "output_paths_variants": output_paths_variants,
+                "output_paths_haplotypes": output_paths_haplotypes,
+                "output_paths_sample_annotation": output_paths_sample_annotation,
+                "min_count": min_count,
+                "min_frequency": min_frequency,
+                "major_haplo_threshold": major_haplo_threshold,
+            },
+        )
+        return Runnable(run, display=callspec.render())
 
 
 def build_sequence_variants(
@@ -975,14 +1107,14 @@ def build_vep_lookup(
     ] = {}
 
     for _, row in vep_frame.iterrows():
-        uploaded_variation = _clean_string(row["Uploaded_variation"])
-
+        uploaded_variation = row["Uploaded_variation"]
         extra = _parse_vep_extra(row["Extra"])
-
+        consequence = _clean_string(row["Consequence"])
         vep_annotation = {
             "hgvs_g": _clean_string(extra.get("HGVSg", "")),
             "hgvs_c": _clean_string(extra.get("HGVSc", "")),
             "hgvs_p": _clean_string(extra.get("HGVSp", "")),
+            "consequence": consequence or "NA",
         }
 
         # If the same uploaded variation occurs more than once,
@@ -1031,7 +1163,6 @@ def build_haplosaurus_lookup(
 
     for _, row in haplo_frame.iterrows():
         samples = _extract_haplo_samples(_clean_string(row["samples"]))
-
         annotation = {
             "haplo_hgvs_c": _clean_string(row["cds_haplotype"]),
             "haplo_hgvs_p": _clean_string(row["protein_haplotype"]),
@@ -1103,7 +1234,7 @@ def build_annotation_rows(
             sample_column: sample,
             "n_variants": n_variants,
             # All variants belonging to this sequence.
-            "variants": ";".join(_variant_string(v) for v in variants),
+            "variants": ";".join(var_id_from_chr_pos_ref_alt(v) for v in variants),
             # ------------------------------------------------
             # VEP / HGVS
             # ------------------------------------------------
@@ -1113,6 +1244,7 @@ def build_annotation_rows(
             "hgvs_g (all)": "",
             "hgvs_c (all)": "",
             "hgvs_p (all)": "",
+            "vep_consequence": "",
             # ------------------------------------------------
             # Haplosaurus
             # ------------------------------------------------
@@ -1140,16 +1272,20 @@ def build_annotation_rows(
 
         if n_variants == 1:
             variant = variants[0]
-            hgvs = get_hgvc_for_variant(variant, vep_lookup, rename_dict)
-
-            if hgvs is not None:
-                annotation["hgvs_g"] = hgvs[0]
-                annotation["hgvs_c"] = hgvs[1]
-                annotation["hgvs_p"] = hgvs[2]
+            hgvs_consequence = get_hgvc_for_variant(variant, vep_lookup, rename_dict)
+            if hgvs_consequence is not None:
+                try:
+                    assert len(hgvs_consequence) == 4
+                    assert all(hgvs_consequence)
+                except AssertionError:
+                    print(variant, hgvs_consequence)
+                annotation["hgvs_g"] = hgvs_consequence[0]
+                annotation["hgvs_c"] = hgvs_consequence[1]
+                annotation["hgvs_p"] = hgvs_consequence[2]
                 annotation["hgvs_g (all)"] = (annotation["hgvs_g"],)
                 annotation["hgvs_c (all)"] = (annotation["hgvs_c"],)
                 annotation["hgvs_p (all)"] = (annotation["hgvs_p"],)
-
+                annotation["vep_consequence"] = hgvs_consequence[3]
                 # The record exists, even if some individual
                 # HGVS fields happen to be empty.
                 annotated = any(
@@ -1160,7 +1296,9 @@ def build_annotation_rows(
                     )
                 )
                 annotation["vep_status"] = "annotated" if annotated else "not_found"
-
+            else:
+                print(variant)
+                raise ValueError()
         elif n_variants > 1:
             # VEP is deliberately not used as the primary
             # annotation for multi-variant haplotypes.
@@ -1170,19 +1308,40 @@ def build_annotation_rows(
             collect_hgvsg = []
             collect_hgvsc = []
             collect_hgvsp = []
+            collect_vep_consequences = []
             for variant in variants:
-                hgvs = get_hgvc_for_variant(variant, vep_lookup, rename_dict)
-                if hgvs is not None:
-                    if hgvs[0]:
-                        collect_hgvsg.append(hgvs[0])
-                    if hgvs[1]:
-                        collect_hgvsc.append(hgvs[1])
-                    if hgvs[2]:
-                        collect_hgvsp.append(hgvs[2])
+
+                hgvs_consequence = get_hgvc_for_variant(
+                    variant, vep_lookup, rename_dict
+                )
+                if hgvs_consequence is not None:
+                    try:
+                        assert len(hgvs_consequence) == 4
+                        assert all(hgvs_consequence)
+                    except AssertionError:
+                        print(variant, hgvs_consequence)
+                        raise
+                    collect_hgvsg.append(
+                        hgvs_consequence[0] if hgvs_consequence[0] else "NA"
+                    )
+                    collect_hgvsc.append(
+                        hgvs_consequence[1] if hgvs_consequence[1] else "NA"
+                    )
+                    collect_hgvsp.append(
+                        hgvs_consequence[2] if hgvs_consequence[2] else "NA"
+                    )
+                    collect_vep_consequences.append(
+                        hgvs_consequence[3] if hgvs_consequence[3] else "NA"
+                    )
+                else:
+                    print(variant)
+                    raise ValueError()
+
             annotation["hgvs_g (all)"] = ";".join(collect_hgvsg)
             annotation["hgvs_c (all)"] = ";".join(collect_hgvsc)
             annotation["hgvs_p (all)"] = ";".join(collect_hgvsp)
             annotation["vep_status"] = "not_applicable"
+            annotation["vep_consequence"] = ";".join(collect_vep_consequences)
 
         elif n_variants == 0:
             # No variants present in the sequence.
@@ -1242,15 +1401,14 @@ def build_annotation_rows(
             vep_annotated=vep_annotated,
             haplo_annotated=haplo_annotated,
         )
-
         annotation_rows.append(annotation)
     return annotation_rows
 
 
 def get_hgvc_for_variant(
     variant, vep_lookup, rename_dict
-) -> tuple[str, str, str] | None:
-    uploaded_variation = _uploaded_variation_from_variant(variant)
+) -> tuple[str, str, str, str] | None:
+    uploaded_variation = var_id_from_chr_pos_ref_alt(variant)
 
     vep_annotation = vep_lookup.get(uploaded_variation)
 
@@ -1269,7 +1427,14 @@ def get_hgvc_for_variant(
             vep_annotation["hgvs_p"],
             rename_dict=rename_dict,
         )
-        return hgvs_g, hgvs_c, hgvs_p
+        consequence = rename_annotation(
+            vep_annotation["consequence"],
+            rename_dict=rename_dict,
+        )
+        return hgvs_g, hgvs_c, hgvs_p, consequence
+    else:
+        print(uploaded_variation, "not found in VEP lookup", variant)
+        raise ValueError(f"{uploaded_variation} not found in VEP lookup")
     return None
 
 
@@ -2191,17 +2356,1215 @@ def _variant_key_from_row(
     )
 
 
-def _variant_string(
-    variant: tuple[str, int, str, str],
-) -> str:
-    """Convert a variant tuple into a compact human-readable string."""
-    chrom, position, ref, alt = variant
-    return f"{chrom}:{position}{ref}>{alt}"
+# def _variant_string(
+#     variant: tuple[str, int, str, str],
+# ) -> str:
+#     """Convert a variant tuple into a compact human-readable string."""
+#     chrom, position, ref, alt = variant
+#     return f"{chrom}:{position}{ref}>{alt}"
 
 
-def _uploaded_variation_from_variant(
-    variant: tuple[str, int, str, str],
-) -> str:
-    """Create the VEP Uploaded_variation identifier."""
+def var_id_from_chr_pos_ref_alt(variant: tuple[str, int, str, str]) -> str:
     chrom, position, ref, alt = variant
-    return f"{chrom}_{position}_{ref}/{alt}"
+    return f"var_{chrom}_{position}_{ref}/{alt}"
+
+# def _uploaded_variation_from_variant(
+#     variant: tuple[str, int, str, str],
+# ) -> str:
+#     """Create the VEP Uploaded_variation identifier."""
+#     chrom, position, ref, alt = variant
+#     if ref[:len(alt)] == alt:
+#         ref = ref[len(alt):]
+#         alt = "-"
+#     return f"{chrom}_{position}_{ref}/{alt}"
+
+
+def _set_join(values) -> str | None:
+    """Join unique, non-empty annotation values while preserving input order."""
+    res: set[str] = set()
+
+    for value in values.dropna():
+        if not isinstance(value, str):
+            continue
+
+        res.update(
+            item.strip()
+            for item in value.split(";")
+            if item.strip()
+        )
+
+    return ",".join(sorted(res))
+
+def _unique_join(values) -> str | None:
+    """Join unique, non-empty annotation values while preserving input order."""
+    unique = []
+
+    for value in values:
+        if pd.isna(value):
+            continue
+
+        value = str(value).strip()
+
+        if value in {"", "<br>", "."}:
+            continue
+
+        if value not in unique:
+            unique.append(value)
+
+    if not unique:
+        return None
+
+    return ";".join(unique)
+
+
+def get_dominant_variants(
+    df: pd.DataFrame,
+    *,
+    min_count: int = 10,
+    min_frequency: float = 0.01,
+    max_variants: int | None = None,
+) -> pd.DataFrame:
+    """
+    Aggregate observed variants and return dominant variants
+    per Sample x Gene.
+
+    Variant frequencies are calculated relative to all observed
+    molecules/sequences within the corresponding Sample x Gene.
+
+    VEP annotations are retained from the input table.
+
+    Parameters
+    ----------
+    df
+        Input table containing variant/haplotype observations
+        and VEP annotations.
+
+    min_count
+        Minimum number of observations required for a variant.
+
+    min_frequency
+        Minimum frequency required for a variant.
+        Default: 1%.
+
+    max_variants
+        Optional maximum number of variants retained per Sample x Gene.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per dominant variant with:
+
+        Sample
+        Gene
+        variant
+        count
+        frequency
+        n_haplotypes
+        rank
+        hgvs_g
+        hgvs_c
+        hgvs_p
+        consequence
+    """
+
+    required_columns = {
+        "Sample",
+        "Gene",
+        "Count",
+        "variants",
+        "hgvs_g",
+        "hgvs_c",
+        "hgvs_p",
+    }
+
+    missing = required_columns - set(df.columns)
+
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+    if min_count < 0:
+        raise ValueError("min_count must be >= 0.")
+
+    if not 0 <= min_frequency <= 1:
+        raise ValueError("min_frequency must be between 0 and 1.")
+
+    if max_variants is not None and max_variants < 1:
+        raise ValueError("max_variants must be >= 1 or None.")
+
+    work = df.copy()
+    work = work.drop(columns=["hgvs_g", "hgvs_c", "hgvs_p"])
+
+    # ------------------------------------------------------------------
+    # Normalize column names
+    # ------------------------------------------------------------------
+
+    work = work.rename(
+        columns={
+            "hgvs_g (all)": "hgvs_g",
+            "hgvs_c (all)": "hgvs_c",
+            "hgvs_p (all)": "hgvs_p",
+        }
+    )
+
+
+    # ------------------------------------------------------------------
+    # Split variant-level annotations
+    # ------------------------------------------------------------------
+
+    columns_to_split = [
+        "variants",
+        "vep_consequence",
+        "hgvs_g",
+        "hgvs_c",
+        "hgvs_p",
+    ]
+
+    for col in columns_to_split:
+        work[col] = (
+            work[col]
+            .fillna("")
+            .astype(str)
+            .str.split(";")
+        )
+
+
+    # ------------------------------------------------------------------
+    # Validate list lengths
+    # ------------------------------------------------------------------
+
+    lengths = work[columns_to_split].map(len)
+
+    invalid = lengths.nunique(axis=1) != 1
+
+    if invalid.any():
+        debug = work.loc[
+            invalid,
+            [
+                "variants",
+                "vep_consequence",
+                "hgvs_g",
+                "hgvs_c",
+                "hgvs_p",
+            ],
+        ].copy()
+
+        debug["n_variants"] = debug["variants"].str.len()
+        debug["n_consequence"] = debug["vep_consequence"].str.len()
+        debug["n_hgvs_g"] = debug["hgvs_g"].str.len()
+        debug["n_hgvs_c"] = debug["hgvs_c"].str.len()
+        debug["n_hgvs_p"] = debug["hgvs_p"].str.len()
+
+        print(debug.to_string())
+        raise ValueError(
+            "Number of variants and annotations does not match in "
+            f"{invalid.sum()} rows."
+        )
+
+
+    # ------------------------------------------------------------------
+    # Explode synchronously
+    # ------------------------------------------------------------------
+
+    work = work.explode(
+        columns_to_split,
+        ignore_index=True,
+    )
+
+
+    # ------------------------------------------------------------------
+    # Clean values
+    # ------------------------------------------------------------------
+
+    for col in columns_to_split:
+        work[col] = work[col].str.strip()
+
+
+    # ------------------------------------------------------------------
+    # Rename variants -> variant
+    # ------------------------------------------------------------------
+
+    work = work.rename(
+        columns={
+            "variants": "variant",
+        }
+    )
+    # Remove WT / empty rows
+    work = work[~work["variant"].isin({"", ".", "<br>"})].copy()
+
+    # ---------------------------------------------------------
+    # 2. Aggregate variant counts
+    # ---------------------------------------------------------
+    result = work.groupby(
+        ["Sample", "Gene", "variant"],
+        as_index=False,
+    ).agg(
+        count=("Count", "sum"),
+        # Number of observed haplotype rows containing
+        # this variant.
+        n_haplotypes=("variant", "size"),
+        # Keep VEP annotations as they occur in input.
+        hgvs_g=("hgvs_g", _unique_join),
+        hgvs_c=("hgvs_c", _unique_join),
+        hgvs_p=("hgvs_p", _unique_join),
+        vep_consequence=("vep_consequence", _set_join),
+    )
+
+    # ---------------------------------------------------------
+    # 3. Calculate total molecules per Sample x Gene
+    # ---------------------------------------------------------
+
+    totals = (
+        df.groupby(
+            ["Sample", "Gene"],
+            as_index=False,
+        )["Count"]
+        .sum()
+        .rename(columns={"Count": "_total_count"})
+    )
+
+    result = result.merge(
+        totals,
+        on=["Sample", "Gene"],
+        how="left",
+    )
+
+    result["frequency"] = result["count"] / result["_total_count"]
+
+    result = result.drop(columns="_total_count")
+
+    # ---------------------------------------------------------
+    # 4. Sort and rank
+    # ---------------------------------------------------------
+
+    result = result.sort_values(
+        ["Sample", "Gene", "frequency", "count"],
+        ascending=[True, True, False, False],
+    ).reset_index(drop=True)
+
+    result["rank"] = result.groupby(["Sample", "Gene"]).cumcount() + 1
+    result["cum_frequency"] = result.groupby(["Sample", "Gene"])["frequency"].cumsum()
+
+    # ---------------------------------------------------------
+    # 5. Add VEP consequence
+    # ---------------------------------------------------------
+
+    result["hgvs_p"] = result["hgvs_p"]
+
+    # ---------------------------------------------------------
+    # 6. Filter dominant variants
+    # ---------------------------------------------------------
+
+    result = result[
+        (result["count"] >= min_count) & (result["frequency"] >= min_frequency)
+    ].copy()
+
+    # ---------------------------------------------------------
+    # 7. Optional top-N restriction
+    # ---------------------------------------------------------
+
+    if max_variants is not None:
+        result = result[result["rank"] <= max_variants].copy()
+
+    # ---------------------------------------------------------
+    # 8. Final column order
+    # ---------------------------------------------------------
+    result = result[
+        [
+            "Sample",
+            "Gene",
+            "variant",
+            "count",
+            "frequency",
+            "cum_frequency",
+            "n_haplotypes",
+            "rank",
+            "hgvs_g",
+            "hgvs_c",
+            "hgvs_p",
+            "vep_consequence",
+        ]
+    ]
+
+    return result.reset_index(drop=True)
+
+
+def _classify_functional_consequence(
+    hgvs_p: str | None,
+) -> str:
+    """
+    Classify a protein-level Haplosaurus/VEP consequence
+    into a coarse functional category.
+    """
+
+    if hgvs_p is None or pd.isna(hgvs_p):
+        return "unknown"
+
+    value = str(hgvs_p).strip()
+
+    if value in {"", ".", "<br>"}:
+        return "WT"
+
+    value_lower = value.lower()
+
+    # Ambiguous annotation
+    if "ambiguous" in value_lower or "unknown" in value_lower:
+        return "ambiguous"
+
+    # Strong disruptive consequences
+    if "*" in value:
+        return "stop_gained"
+
+    if "fs" in value_lower or "frameshift" in value_lower:
+        return "frameshift"
+
+    # In-frame deletions/insertions
+    if "del" in value_lower or "ins" in value_lower:
+        return "inframe_indel"
+
+    # Synonymous / unchanged protein
+    if "ref" in value_lower:
+        return "synonymous"
+
+    # Protein substitution
+    if ">" in value:
+        return "missense"
+
+    return "other"
+
+
+def get_dominant_haplotypes(
+    df: pd.DataFrame,
+    *,
+    min_count: int = 10,
+    min_frequency: float = 0.01,
+    major_haplo_threshold: float = 0.05,
+    max_haplotypes: int | None = None,
+) -> pd.DataFrame:
+    """
+    Aggregate observed sequences into haplotypes and return
+    dominant haplotypes per Sample x Gene.
+
+    Parameters
+    ----------
+    df
+        Input table containing one or more observed sequence/haplotype rows.
+
+    min_count
+        Minimum number of observations required for a haplotype
+        to be retained.
+
+    min_frequency
+        Minimum frequency required for a haplotype to be retained.
+        Default: 1%.
+
+    major_haplo_threshold
+        Frequency threshold to categorize retained haplotypes into
+        'MAJOR' or 'MINOR'. Default: 5%.
+
+    max_haplotypes
+        Optional maximum number of haplotypes retained per Sample x Gene.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per dominant haplotype with:
+
+        Sample
+        Gene
+        haplotype
+        haplotype_category
+        count
+        frequency
+        cum_frequency
+        rank
+        hgvs_g
+        hgvs_c
+        hgvs_p
+        functional_class
+    """
+
+    required_columns = {
+        "Sample",
+        "Gene",
+        "Count",
+        "variants",
+        "hgvs_g (all)",
+        "hgvs_c (all)",
+        "hgvs_p (all)",
+    }
+
+    missing = required_columns - set(df.columns)
+
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+    if min_count < 0:
+        raise ValueError("min_count must be >= 0.")
+
+    if not 0 <= min_frequency <= 1:
+        raise ValueError("min_frequency must be between 0 and 1.")
+
+    if not 0 <= major_haplo_threshold <= 1:
+        raise ValueError("major_haplo_threshold must be between 0 and 1.")
+
+    if max_haplotypes is not None and max_haplotypes < 1:
+        raise ValueError("max_haplotypes must be >= 1 or None.")
+
+    work = df.copy()
+
+    # ---------------------------------------------------------
+    # 1. Normalize haplotype representation
+    # ---------------------------------------------------------
+
+    def normalize_haplotype(value) -> str:
+        if pd.isna(value):
+            return "WT"
+
+        value = str(value).strip()
+
+        if value in {"", "<br>", "."}:
+            return "WT"
+
+        parts = [part.strip() for part in value.split(";") if part.strip()]
+
+        if not parts:
+            return "WT"
+
+        return ";".join(parts)
+
+    work["haplotype"] = work["variants"].apply(normalize_haplotype)
+
+    # ---------------------------------------------------------
+    # 2. Aggregate identical haplotypes
+    # ---------------------------------------------------------
+
+    result = work.groupby(
+        ["Sample", "Gene", "haplotype"],
+        as_index=False,
+    ).agg(
+        count=("Count", "sum"),
+        hgvs_g=("hgvs_g (all)", _unique_join),
+        hgvs_c=("hgvs_c (all)", _unique_join),
+        hgvs_p=("hgvs_p (all)", _unique_join),
+    )
+
+    # ---------------------------------------------------------
+    # 3. Calculate frequency within Sample x Gene
+    # ---------------------------------------------------------
+
+    totals = (
+        work.groupby(
+            ["Sample", "Gene"],
+            as_index=False,
+        )["Count"]
+        .sum()
+        .rename(columns={"Count": "_total_count"})
+    )
+
+    result = result.merge(
+        totals,
+        on=["Sample", "Gene"],
+        how="left",
+    )
+
+    result["frequency"] = result["count"] / result["_total_count"]
+    result = result.drop(columns="_total_count")
+
+    # ---------------------------------------------------------
+    # 4. Sort and rank haplotypes
+    # ---------------------------------------------------------
+
+    result = result.sort_values(
+        ["Sample", "Gene", "frequency", "count"],
+        ascending=[True, True, False, False],
+    ).reset_index(drop=True)
+
+    result["rank"] = result.groupby(["Sample", "Gene"]).cumcount() + 1
+    result["cum_frequency"] = result.groupby(["Sample", "Gene"])["frequency"].cumsum()
+
+    # ---------------------------------------------------------
+    # 5. Haplotype category (WT, MAJOR, MINOR)
+    # ---------------------------------------------------------
+
+    def _classify_category(row: pd.Series) -> str:
+        h = str(row["haplotype"]).strip()
+        if h in {"", "WT", ".", "<br>"}:
+            return "WT"
+        if row["frequency"] >= major_haplo_threshold:
+            return "major"
+        return "minor"
+
+    result["haplotype_category"] = result.apply(_classify_category, axis=1)
+
+    # ---------------------------------------------------------
+    # 6. Functional consequence
+    # ---------------------------------------------------------
+
+    result["functional_class"] = result["hgvs_p"].apply(
+        _classify_functional_consequence
+    )
+
+    # ---------------------------------------------------------
+    # 7. Keep dominant haplotypes (meeting min thresholds)
+    # ---------------------------------------------------------
+
+    result = result[
+        (result["count"] >= min_count) & (result["frequency"] >= min_frequency)
+    ].copy()
+
+    # ---------------------------------------------------------
+    # 8. Optional top-N restriction
+    # ---------------------------------------------------------
+
+    if max_haplotypes is not None:
+        result = result[result["rank"] <= max_haplotypes].copy()
+
+    # ---------------------------------------------------------
+    # 9. Final column order
+    # ---------------------------------------------------------
+
+    result = result[
+        [
+            "Sample",
+            "Gene",
+            "haplotype",
+            "haplotype_category",
+            "count",
+            "frequency",
+            "cum_frequency",
+            "rank",
+            "hgvs_g",
+            "hgvs_c",
+            "hgvs_p",
+            "functional_class",
+        ]
+    ]
+
+    return result.reset_index(drop=True)
+
+
+# ------------------------------------------------------------------
+# Functional consequence priority
+# ------------------------------------------------------------------
+
+FUNCTIONAL_PRIORITY = {
+    "ambiguous": 0,
+    "unknown": 0,
+    "synonymous": 1,
+    "missense": 2,
+    "inframe_indel": 2,
+    "stop_gained": 3,
+    "stop_lost": 3,
+    "frameshift": 4,
+    "splice": 4,
+    "complex": 4,
+}
+
+
+def get_functional_impact(
+    consequences: str | None,
+) -> str:
+    """
+    Convert one or more functional consequence classes into
+    a single overall predicted functional impact.
+
+    Priority:
+        none       < low < moderate < high < unknown
+
+    The highest-confidence/highest-impact consequence wins.
+    """
+
+    if consequences is None or pd.isna(consequences):
+        return "unknown"
+
+    value = str(consequences).strip()
+
+    if value in {"", ".", "<br>", "WT"}:
+        return "none"
+
+    # Support both semicolon- and comma-separated annotations.
+    tokens = []
+
+    for part in value.replace(";", ",").split(","):
+        part = part.strip().lower()
+
+        if part:
+            tokens.append(part)
+
+    if not tokens:
+        return "unknown"
+
+    impacts = []
+
+    for consequence in tokens:
+
+        # Exact classes used by our haplotype annotation
+        if consequence in {
+            "ambiguous",
+            "unknown",
+        }:
+            impacts.append((0, "unknown"))
+
+        elif consequence in {
+            "synonymous",
+            "synonymous_variant",
+        }:
+            impacts.append((1, "low"))
+
+        elif consequence in {
+            "missense",
+            "missense_variant",
+            "inframe_indel",
+            "inframe_insertion",
+            "inframe_deletion",
+        }:
+            impacts.append((2, "moderate"))
+
+        elif consequence in {
+            "stop_gained",
+            "stop_gained_variant",
+            "stop_lost",
+            "stop_lost_variant",
+            "stop_change",
+        }:
+            impacts.append((3, "high"))
+
+        elif consequence in {
+            "frameshift",
+            "frameshift_variant",
+            "splice",
+            "splice_donor_variant",
+            "splice_acceptor_variant",
+            "splice_region_variant",
+            "complex",
+        }:
+            impacts.append((4, "high"))
+
+        else:
+            impacts.append((0, "unknown"))
+
+    # If everything is unknown/ambiguous
+    if not any(priority > 0 for priority, _ in impacts):
+        return "unknown"
+
+    return max(impacts, key=lambda x: x[0])[1]
+
+
+def _unique_join(values) -> str | None:
+    """Join unique, non-empty values while preserving order."""
+
+    unique = []
+
+    for value in values:
+        if pd.isna(value):
+            continue
+
+        value = str(value).strip()
+
+        if value in {"", ".", "<br>", "nan", "None"}:
+            continue
+
+        if value not in unique:
+            unique.append(value)
+
+    if not unique:
+        return None
+
+    return ";".join(unique)
+
+
+def _pipe_join(values) -> str | None:
+    """Join unique, non-empty values using ' | ' while preserving order."""
+    unique = []
+
+    for value in values:
+        if pd.isna(value):
+            continue
+
+        value = str(value).strip()
+
+        if value in {"", ".", "<br>", "nan", "None"}:
+            continue
+
+        if value not in unique:
+            unique.append(value)
+
+    if not unique:
+        return None
+
+    return " | ".join(unique)
+
+
+# ------------------------------------------------------------------
+# Final sample-level annotation
+# ------------------------------------------------------------------
+
+
+def annotate_samples(
+    dominant_variants: pd.DataFrame,
+    dominant_haplotypes: pd.DataFrame,
+    *,
+    raw_df: pd.DataFrame | None = None,
+    min_frequency: float = 0.01,
+    major_haplo_threshold: float = 0.05,
+) -> pd.DataFrame:
+    """
+    Create a final annotation table with one row per Sample x Gene.
+
+    The function combines:
+        - dominant variants + VEP consequences
+        - major haplotypes + Haplosaurus consequences
+
+    Only major non-WT haplotypes (frequency >= major_haplo_threshold)
+    are aggregated for the main sample summary.
+
+    Parameters
+    ----------
+    dominant_variants
+        Output of get_dominant_variants().
+
+    dominant_haplotypes
+        Output of get_dominant_haplotypes().
+
+    raw_df
+        Optional original unaggregated/input dataframe containing all
+        observed sequence rows to calculate observed haplotype counts.
+
+    min_frequency
+        Frequency threshold used for dominant haplotypes.
+        Default: 0.01 (1%).
+
+    major_haplo_threshold
+        Frequency threshold above which a haplotype is treated as MAJOR.
+        Default: 0.05 (5%).
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per Sample x Gene.
+    """
+
+    if not 0 <= min_frequency <= 1:
+        raise ValueError("min_frequency must be between 0 and 1.")
+
+    if not 0 <= major_haplo_threshold <= 1:
+        raise ValueError("major_haplo_threshold must be between 0 and 1.")
+
+    # --------------------------------------------------------------
+    # 1. Validate input
+    # --------------------------------------------------------------
+
+    required_variants = {
+        "Sample",
+        "Gene",
+        "variant",
+        "count",
+        "frequency",
+        "vep_consequence",
+    }
+
+    required_haplotypes = {
+        "Sample",
+        "Gene",
+        "haplotype",
+        "count",
+        "frequency",
+        "functional_class",
+    }
+
+    missing = required_variants - set(dominant_variants.columns)
+
+    if missing:
+        raise ValueError("dominant_variants is missing columns: " f"{sorted(missing)}")
+
+    missing = required_haplotypes - set(dominant_haplotypes.columns)
+
+    if missing:
+        raise ValueError(
+            "dominant_haplotypes is missing columns: " f"{sorted(missing)}"
+        )
+
+    variants = dominant_variants.copy()
+    haplotypes = dominant_haplotypes.copy()
+
+    if "haplotype_category" not in haplotypes.columns:
+
+        def _classify_category(row: pd.Series) -> str:
+            h = str(row.get("haplotype", "")).strip()
+            if h in {"", "WT", ".", "<br>"}:
+                return "WT"
+            if float(row.get("frequency", 0.0)) >= major_haplo_threshold:
+                return "MAJOR"
+            return "MINOR"
+
+        haplotypes["haplotype_category"] = haplotypes.apply(
+            _classify_category, axis=1
+        )
+
+    # --------------------------------------------------------------
+    # 2. All Sample x Gene combinations
+    # --------------------------------------------------------------
+
+    sample_genes = pd.concat(
+        [
+            variants[["Sample", "Gene"]],
+            haplotypes[["Sample", "Gene"]],
+        ],
+        ignore_index=True,
+    ).drop_duplicates()
+
+    # --------------------------------------------------------------
+    # 3. Variant-level summary
+    # --------------------------------------------------------------
+
+    variant_summary = variants.groupby(
+        ["Sample", "Gene"],
+        as_index=False,
+    ).agg(
+        n_dominant_variants=(
+            "variant",
+            "nunique",
+        ),
+        dominant_variants=(
+            "variant",
+            _pipe_join,
+        ),
+        variant_hgvs_g=(
+            (
+                "hgvs_g",
+                _pipe_join,
+            )
+            if "hgvs_g" in variants.columns
+            else (
+                "variant",
+                lambda x: None,
+            )
+        ),
+        variant_hgvs_c=(
+            (
+                "hgvs_c",
+                _pipe_join,
+            )
+            if "hgvs_c" in variants.columns
+            else (
+                "variant",
+                lambda x: None,
+            )
+        ),
+        variant_hgvs_p=(
+            (
+                "hgvs_p",
+                _pipe_join,
+            )
+            if "hgvs_p" in variants.columns
+            else (
+                "variant",
+                lambda x: None,
+            )
+        ),
+        vep_consequences=(
+            "vep_consequence",
+            _pipe_join,
+        ),
+        max_variant_frequency=(
+            "frequency",
+            "max",
+        ),
+    )
+
+    # Overall VEP impact of all dominant variants
+    variant_summary["variant_functional_impact"] = variant_summary[
+        "vep_consequences"
+    ].apply(get_functional_impact)
+
+    # --------------------------------------------------------------
+    # 4. Major Haplotype-level summary (only MAJOR non-WT haplotypes)
+    # --------------------------------------------------------------
+
+    major_haplotypes = haplotypes[
+        haplotypes["haplotype_category"] == "MAJOR"
+    ].copy()
+
+    def format_haplotype_label(row: pd.Series) -> str:
+        h = str(row.get("haplotype", "")).strip()
+        p = str(row.get("hgvs_p", "")).strip()
+        freq = float(row.get("frequency", 0.0))
+        label = p if p and p not in {"", ".", "None", "nan", "<br>"} else h
+        return f"{label} ({freq:.1%})"
+
+    major_haplotypes["haplotype_annotated"] = major_haplotypes.apply(
+        format_haplotype_label, axis=1
+    )
+
+    major_summary = major_haplotypes.groupby(
+        ["Sample", "Gene"],
+        as_index=False,
+    ).agg(
+        n_major_haplotypes=(
+            "haplotype",
+            "nunique",
+        ),
+        major_haplotypes=(
+            "haplotype",
+            _pipe_join,
+        ),
+        major_haplotypes_hgvs_p=(
+            (
+                "hgvs_p",
+                _pipe_join,
+            )
+            if "hgvs_p" in major_haplotypes.columns
+            else (
+                "haplotype",
+                lambda x: None,
+            )
+        ),
+        major_haplotypes_annotated=(
+            "haplotype_annotated",
+            _pipe_join,
+        ),
+        functional_classes=(
+            "functional_class",
+            _pipe_join,
+        ),
+        max_major_haplotype_frequency=(
+            "frequency",
+            "max",
+        ),
+        major_mutant_frequency=(
+            "frequency",
+            "sum",
+        ),
+    )
+
+    # --------------------------------------------------------------
+    # 5. WT haplotype information
+    # --------------------------------------------------------------
+
+    wt_summary = (
+        haplotypes[haplotypes["haplotype_category"] == "WT"]
+        .groupby(
+            ["Sample", "Gene"],
+            as_index=False,
+        )
+        .agg(
+            wt_count=("count", "sum"),
+            wt_frequency=("frequency", "sum"),
+        )
+    )
+
+    # --------------------------------------------------------------
+    # 6. Total observed haplotypes from raw input (if available)
+    # --------------------------------------------------------------
+
+    if raw_df is not None and "variants" in raw_df.columns:
+
+        def _norm_raw_h(val) -> str:
+            if pd.isna(val):
+                return "WT"
+            text = str(val).strip()
+            if text in {"", "<br>", "."}:
+                return "WT"
+            parts = [p.strip() for p in text.split(";") if p.strip()]
+            return ";".join(parts) if parts else "WT"
+
+        raw_df_copy = raw_df.copy()
+        raw_df_copy["_haplo_norm"] = raw_df_copy["variants"].apply(_norm_raw_h)
+        observed_summary = raw_df_copy.groupby(
+            ["Sample", "Gene"],
+            as_index=False,
+        ).agg(n_observed_haplotypes=("_haplo_norm", "nunique"))
+    else:
+        observed_summary = None
+
+    # --------------------------------------------------------------
+    # 7. Merge everything
+    # --------------------------------------------------------------
+
+    result = sample_genes.merge(
+        variant_summary,
+        on=["Sample", "Gene"],
+        how="left",
+    )
+
+    result = result.merge(
+        major_summary,
+        on=["Sample", "Gene"],
+        how="left",
+    )
+
+    result = result.merge(
+        wt_summary,
+        on=["Sample", "Gene"],
+        how="left",
+    )
+
+    if observed_summary is not None:
+        result = result.merge(
+            observed_summary,
+            on=["Sample", "Gene"],
+            how="left",
+        )
+        result["n_observed_haplotypes"] = (
+            result["n_observed_haplotypes"]
+            .fillna(result["n_major_haplotypes"])
+            .fillna(0)
+            .astype(int)
+        )
+    else:
+        result["n_observed_haplotypes"] = (
+            result["n_major_haplotypes"].fillna(0).astype(int)
+        )
+
+    result["wt_frequency"] = result["wt_frequency"].fillna(0)
+    result["wt_count"] = result["wt_count"].fillna(0)
+    result["major_mutant_frequency"] = result["major_mutant_frequency"].fillna(0)
+    result["n_dominant_variants"] = result["n_dominant_variants"].fillna(0).astype(int)
+    result["n_major_haplotypes"] = (
+        result["n_major_haplotypes"].fillna(0).astype(int)
+    )
+    result["max_major_haplotype_frequency"] = (
+        result["max_major_haplotype_frequency"].fillna(0)
+    )
+
+    # --------------------------------------------------------------
+    # 8. Overall functional impact
+    # --------------------------------------------------------------
+
+    def combine_impacts(row) -> str:
+        impacts = [
+            row["variant_functional_impact"],
+            get_functional_impact(row["functional_classes"]),
+        ]
+
+        if "high" in impacts:
+            return "high"
+        if "moderate" in impacts:
+            return "moderate"
+        if "low" in impacts:
+            return "low"
+        if "unknown" in impacts:
+            return "unknown"
+        return "none"
+
+    result["functional_impact"] = result.apply(
+        combine_impacts,
+        axis=1,
+    )
+
+    # --------------------------------------------------------------
+    # 9. Haplotype population pattern
+    # --------------------------------------------------------------
+
+    def classify_haplotype_pattern(row) -> str:
+        n = row["n_major_haplotypes"]
+        max_freq = row["max_major_haplotype_frequency"]
+        mutant_frequency = row["major_mutant_frequency"]
+
+        if n == 0 or mutant_frequency == 0:
+            return "WT"
+
+        if n == 1 and max_freq >= 0.50:
+            return "SINGLE_MAJOR_MUTANT"
+
+        if n >= 2:
+            if max_freq >= 0.20:
+                return "MULTI_MAJOR_MUTANT"
+            return "HETEROGENEOUS"
+
+        return "LOW_FREQUENCY_MUTANT"
+
+    result["haplotype_pattern"] = result.apply(
+        classify_haplotype_pattern,
+        axis=1,
+    )
+
+    # --------------------------------------------------------------
+    # 10. WT interpretation
+    # --------------------------------------------------------------
+
+    result["wt_interpretation"] = result.apply(
+        lambda row: (
+            f"{row['wt_frequency']:.1%}"
+            if row["wt_frequency"] > 0
+            else f"<{min_frequency:.1%}"
+        ),
+        axis=1,
+    )
+
+    # --------------------------------------------------------------
+    # 11. Human-readable interpretation
+    # --------------------------------------------------------------
+
+    def make_interpretation(row) -> str:
+        pattern = row["haplotype_pattern"]
+        impact = row["functional_impact"]
+        major_frequency = row["major_mutant_frequency"]
+        wt = row["wt_interpretation"]
+        annotated_haplos = row.get("major_haplotypes_annotated") or "None"
+
+        if pattern == "WT":
+            return (
+                f"No major mutant haplotype detected above "
+                f"{major_haplo_threshold:.1%}. WT frequency: {wt}."
+            )
+
+        if "SINGLE" in pattern:
+            return (
+                f"Single major mutant haplotype ({major_frequency:.1%}): "
+                f"{annotated_haplos}. WT: {wt}. Impact: {impact}."
+            )
+
+        if "MULTI" in pattern:
+            return (
+                f"Multiple major mutant haplotypes ({major_frequency:.1%}): "
+                f"{annotated_haplos}. WT: {wt}. Impact: {impact}."
+            )
+
+        if pattern == "HETEROGENEOUS":
+            return (
+                f"Heterogeneous major mutant haplotypes ({major_frequency:.1%}): "
+                f"{annotated_haplos}. WT: {wt}. Impact: {impact}."
+            )
+
+        return (
+            f"Low-frequency major mutant haplotypes ({major_frequency:.1%}): "
+            f"{annotated_haplos}. WT: {wt}. Impact: {impact}."
+        )
+
+    result["interpretation"] = result.apply(
+        make_interpretation,
+        axis=1,
+    )
+
+    # --------------------------------------------------------------
+    # 12. Final column order
+    # --------------------------------------------------------------
+
+    columns = [
+        "Sample",
+        "Gene",
+        # Statistics & Counts
+        "n_observed_haplotypes",
+        "n_major_haplotypes",
+        "n_dominant_variants",
+        # Frequency metrics
+        "wt_count",
+        "wt_frequency",
+        "wt_interpretation",
+        "major_mutant_frequency",
+        "max_major_haplotype_frequency",
+        "max_variant_frequency",
+        # Major Haplotypes & Variants (| separated)
+        "major_haplotypes",
+        "major_haplotypes_hgvs_p",
+        "major_haplotypes_annotated",
+        "dominant_variants",
+        "variant_hgvs_p",
+        # Final interpretation
+        "functional_impact",
+        "haplotype_pattern",
+        "interpretation",
+    ]
+
+    return result[columns].sort_values(["Sample", "Gene"]).reset_index(drop=True)

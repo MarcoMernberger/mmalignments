@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -47,7 +47,7 @@ from mmalignments.services.io import (
     read_sequence_file,
     write_frames,
 )
-
+from mmalignments.services.genomic import reverse_complement_gapped
 logger = logging.getLogger(__name__)
 
 
@@ -86,8 +86,55 @@ class Variant:
 class AlignmentResult:
     alignment: Alignment | None
     status: str
-    reference_coverage: float | None = None
+    score: float = float("-inf")
+    normalized_score: float | None = None
+    alignment_length: int | None = None
+    matches: int | None = None
+    mismatches: int | None = None
+    total_gaps: int | None = None
+    percent_identity: float | None = None
+    gap_fraction: float | None = None
     query_coverage: float | None = None
+    reference_coverage: float | None = None
+    query_length: int | None = None
+    target_length: int | None = None
+    left_query_gap: int | None = None
+    right_query_gap: int | None = None
+    left_target_gap: int | None = None
+    right_target_gap: int | None = None
+
+    def __str__(self) -> str:
+        # 4. Qualitäts-Bericht ausgeben
+        query_coverage = (
+            self.query_coverage * 100 if self.query_coverage is not None else None
+        )
+        ref_coverage = (
+            self.reference_coverage * 100
+            if self.reference_coverage is not None
+            else None
+        )
+        res = "=== ALIGNMENT QC REPORT ===\n"
+        res += f"Alignment Score:    {self.score}\n"
+        res += f"Normalized Score:   {self.normalized_score:.4f}\n"
+        res += f"Alignment length:    {self.alignment_length} Bases\n"
+        res += f"Matches: {self.matches}\n"
+        res += f"Mismatches: {self.mismatches}\n"
+        res += f"Total Gaps:        {self.total_gaps}\n"
+        res += "---------------------------\n"
+        res += "=== ALIGNMENT METRICS ===\n"
+        res += f"Query length: {self.query_length}\n"
+        res += f"Percent Identity: {self.percent_identity:.2f}%\n"
+        res += f"Gap fraction in alignment: {self.gap_fraction:.2f}%\n"
+        res += f"Query coverage: {query_coverage:.2f}%\n"
+        res += f"Reference coverage: {ref_coverage:.2f}%\n"
+        res += f"Left terminal gap in query: {self.left_query_gap}\n"
+        res += f"Right terminal gap in query: {self.right_query_gap}\n"
+        res += f"Left terminal gap in target: {self.left_target_gap}\n"
+        res += f"Right terminal gap in target: {self.right_target_gap}\n"
+        res += "===========================\n"
+        res += str(self.alignment)
+        return res
+
 
 class BioAligner:
     """Wrapper around Bio.Align.PairwiseAligner.
@@ -140,20 +187,34 @@ class BioAligner:
         query_sequence: str,
     ) -> AlignmentResult:
         alignments = self.aligner.align(reference_sequence, query_sequence)
-
         if not alignments:
-            return AlignmentResult(alignment=None, status="failed", reference_coverage=None, query_coverage=None)
+            return AlignmentResult(
+                alignment=None,
+                status="failed",
+            )
 
         alignment = alignments[0]
-        reference_coverage = self._reference_coverage(alignment, reference_sequence)
-        query_coverage = self._query_coverage(alignment, query_sequence)
-        if reference_coverage < self.min_reference_coverage:
-            return AlignmentResult(alignment=None, status="low_reference_coverage", reference_coverage=reference_coverage, query_coverage=query_coverage)
-
-        if query_coverage < self.min_query_coverage:
-            return AlignmentResult(alignment=None, status="low_query_coverage", reference_coverage=reference_coverage, query_coverage=query_coverage)
-
-        return AlignmentResult(alignment=alignment, status="success", reference_coverage=reference_coverage, query_coverage=query_coverage)
+        metrics = self.calculate_alignment_metrics(alignment)
+        return AlignmentResult(
+            alignment=alignment,
+            status="success",
+            score=metrics["score"],
+            normalized_score=metrics["normalized_score"],
+            alignment_length=metrics["alignment_length"],
+            matches=metrics["matches"],
+            mismatches=metrics["mismatches"],
+            total_gaps=metrics["total_gaps"],
+            percent_identity=metrics["percent_identity"],
+            gap_fraction=metrics["gap_fraction"],
+            query_coverage=metrics["query_coverage"],
+            reference_coverage=metrics["reference_coverage"],
+            query_length=metrics["query_length"],
+            target_length=metrics["target_length"],
+            left_query_gap=metrics["left_query_gap"],
+            right_query_gap=metrics["right_query_gap"],
+            left_target_gap=metrics["left_target_gap"],
+            right_target_gap=metrics["right_target_gap"],
+        )
 
     def _query_coverage(
         self,
@@ -191,6 +252,11 @@ class BioAligner:
             query_sequence="R1",
             target_id="target",
             target_sequence="amplicon",
+            min_reference_coverage=0.9,
+            min_query_coverage=0.0,
+            min_percent_identity=0.9,
+            max_gap_fraction=0.1,
+            normalized_score_threshold=0,
         )
 
     @property
@@ -293,6 +359,50 @@ class BioAligner:
             determinants=determinants,
             pres=pres,
         )
+
+    def classify_alignment(
+        self,
+        alignment: AlignmentResult,
+        min_reference_coverage: float | None,
+        min_query_coverage: float | None,
+        min_percent_identity: float | None,
+        max_gap_fraction: float | None,
+        normalized_score_threshold: float | None = None,
+    ) -> str:
+        """Classify the alignment based on coverage and score thresholds."""
+        if alignment.status != "success":
+            return alignment.status
+        if (
+            min_reference_coverage
+            and alignment.reference_coverage is not None
+            and alignment.reference_coverage < min_reference_coverage
+        ):
+            return "low_reference_coverage"
+        if (
+            min_query_coverage
+            and alignment.query_coverage is not None
+            and alignment.query_coverage < min_query_coverage
+        ):
+            return "low_query_coverage"
+        if (
+            min_percent_identity
+            and alignment.percent_identity is not None
+            and alignment.percent_identity < min_percent_identity
+        ):
+            return "low_percent_identity"
+        if (
+            max_gap_fraction
+            and alignment.gap_fraction is not None
+            and alignment.gap_fraction > max_gap_fraction
+        ):
+            return "high_gap_fraction"
+        if (
+            normalized_score_threshold
+            and alignment.normalized_score is not None
+            and alignment.normalized_score < normalized_score_threshold
+        ):
+            return "low_normalized_score"
+        return alignment.status
 
     @element
     def align2variant(
@@ -488,12 +598,9 @@ class BioAligner:
             _description_
         """
         par = self.default_align_params.resolve(par)
-        score_col = "score"
-        reference_coverage_col = "reference_coverage"
-        query_coverage_col = "query_coverage"
         qaligned_col = "query_aligned"
         taligned_col = "target_aligned"
-        status_col = "alignment_status"
+        reason_col = "alignment_status"
         # target_seq_col = par.get("target_sequence", "sequence")
         target_id_col = par.get("target_id", "target_id")
         query_id_col = par.get("query_id", "query_id")
@@ -511,8 +618,20 @@ class BioAligner:
             species_col,
             assembly_col,
         ]
+        alignment_fields = [
+            field.name
+            for field in fields(AlignmentResult)
+            if field.name not in ["alignment"]
+        ]
         additional_columns = {
-            key: [] for key in [score_col, qaligned_col, taligned_col, status_col, reference_coverage_col, query_coverage_col] + ref_cols
+            key: []
+            for key in [
+                qaligned_col,
+                taligned_col,
+                reason_col,
+                *alignment_fields,
+                *ref_cols,
+            ]
         }
         for _, row in sequences.iterrows():
             target_id = row[target_id_col]
@@ -522,23 +641,29 @@ class BioAligner:
             query_id = row[query_id_col]
             alignment_result = alignments[query_id]
             target_aligned_seq, query_aligned_seq = "", ""
-            score = float("-inf")
             if alignment_result.alignment is not None:
-                target_aligned_seq, query_aligned_seq = alignment_to_strings(alignment_result.alignment)
-                score = alignment_result.alignment.score
-            additional_columns[score_col].append(score)
+                target_aligned_seq, query_aligned_seq = alignment_to_strings(
+                    alignment_result.alignment
+                )
+            status = self.classify_alignment(
+                alignment_result,
+                min_reference_coverage=par.get("min_reference_coverage"),
+                min_query_coverage=par.get("min_query_coverage"),
+                min_percent_identity=par.get("min_percent_identity"),
+                max_gap_fraction=par.get("max_gap_fraction"),
+                normalized_score_threshold=par.get("normalized_score_threshold"),
+            )
+            additional_columns[reason_col].append(status)
             additional_columns[qaligned_col].append(query_aligned_seq)
             additional_columns[taligned_col].append(target_aligned_seq)
-            additional_columns[status_col].append(alignment_result.status)
-            additional_columns[reference_coverage_col].append(alignment_result.reference_coverage)
-            additional_columns[query_coverage_col].append(alignment_result.query_coverage)
+            for col in alignment_fields:
+                additional_columns[col].append(getattr(alignment_result, col))
             for col in ref_cols:
                 additional_columns[col].append(reference_row[col])
 
         df = sequences.copy()
         for col in additional_columns:
             df[col] = additional_columns[col]
-
         return df
 
     def align_and_write(
@@ -615,14 +740,21 @@ class BioAligner:
         ).render()
         return Runnable(__call, display=display)
 
-    def count_ambigous(self, annotated: DataFrame, variants: DataFrame, par: ParType | None = None) -> DataFrame:
+    def count_ambigous(
+        self, annotated: DataFrame, variants: DataFrame, par: ParType | None = None
+    ) -> DataFrame:
         annotated = annotated.copy()
         par = self.default_align_params.patch(par)
         query_id_col = par.get("query_id", "R1 Name")
         ambigous_col = par.get("ambigous_col", "is_ambigous")
 
         number_of_ambigous_variants = variants.groupby(query_id_col)[ambigous_col].sum()
-        annotated["n_ambigous_variants"] = annotated[query_id_col].map(number_of_ambigous_variants).fillna(0).astype(int)
+        annotated["n_ambigous_variants"] = (
+            annotated[query_id_col]
+            .map(number_of_ambigous_variants)
+            .fillna(0)
+            .astype(int)
+        )
         return annotated
 
     def annotate_ns(self, sequences: DataFrame, par: Params) -> DataFrame:
@@ -667,7 +799,6 @@ class BioAligner:
             alignment = self._align(reference_sequence, query_sequence)
             alignments[sequence_id] = alignment
         return alignments
-
 
     # def annotate_alignments(
     #     self,
@@ -722,6 +853,52 @@ class BioAligner:
 
     #     return DataFrame.from_records(records)
 
+    def calculate_alignment_metrics(self, alignment: Alignment) -> dict[str, Any]:
+        query, target = alignment.sequences
+        maximal_score = self.match_score * len(
+            query
+        )  # Assuming match_score is defined in BioAligner
+        normalized_alignment_score = (
+            alignment.score / maximal_score if maximal_score > 0 else 0
+        )
+        counts = alignment.counts()
+        mismatches = counts.mismatches
+        matches = counts.identities
+        total_gaps = counts.gaps
+        alignment_length = alignment.length  # matches + mismatches + total_gaps
+        assert (
+            alignment_length == matches + mismatches + total_gaps
+        ), "Alignment length mismatch!"
+
+        # Prozentuale Identität (bezogen auf die Alignment-Länge)
+        percent_identity = matches / alignment_length
+
+        # Gap-Anteil (zu viele Gaps deuten auf schlechte Qualität hin)
+        gap_fraction = total_gaps / alignment_length
+
+        # Abdeckung der Query-Sequenz (Coverage)
+        query_coverage = (matches + mismatches) / len(query)
+
+        reference_coverage = (matches + mismatches) / len(target)
+        query_length = len(query)
+        target_length = len(target)
+        result = {
+            "score": alignment.score,
+            "normalized_score": normalized_alignment_score,
+            "alignment_length": alignment_length,
+            "matches": matches,
+            "mismatches": mismatches,
+            "total_gaps": total_gaps,
+            "percent_identity": percent_identity,
+            "gap_fraction": gap_fraction,
+            "query_coverage": query_coverage,
+            "reference_coverage": reference_coverage,
+            "query_length": query_length,
+            "target_length": target_length,
+        }
+        result.update(terminal_gaps(alignment))
+        return result
+
     def annotate_variants(
         self,
         sequences_aligned: DataFrame,
@@ -741,17 +918,37 @@ class BioAligner:
         assembly_col = par.get("assembly", "assembly")
         ambigous_col = par.get("ambigous", "is_ambigous")
         alignment_status_col = "alignment_status"
+        left_query_gap_col = par.get("left_query_gap", "left_query_gap")
+        right_query_gap_col = par.get("right_query_gap", "right_query_gap")
+        left_target_gap_col = par.get("left_target_gap", "left_target_gap")
+        right_target_gap_col = par.get("right_target_gap", "right_target_gap")
+        strand_col = par.get("strand", "strand")
+
         for _, row in sequences_aligned.iterrows():
             if row[alignment_status_col] != "success":
                 continue
             chrom = row[chromosome_col]
             reference_start = row[reference_start_col]
             assembly = row[assembly_col]
-            variants = self.extract_variants_from_gapped(
+            left_trim, right_trim = self.get_left_right_trim(
+                left_query_gap=row[left_query_gap_col],
+                right_query_gap=row[right_query_gap_col],
+                left_target_gap=row[left_target_gap_col],
+                right_target_gap=row[right_target_gap_col],
+                strand=row[strand_col],
+            )
+            reference_aligned, query_aligned = self.get_forward_strand_aligned(
                 reference_aligned=str(row["target_aligned"]),
                 query_aligned=str(row["query_aligned"]),
+                strand=row[strand_col],
+            )
+            variants = self.extract_variants_from_gapped(
+                reference_aligned=reference_aligned,
+                query_aligned=query_aligned,
                 chrom=chrom,
-                reference_start=reference_start,
+                reference_start=reference_start, # """1-based genomic start position of the amplicon."""
+                left_trim=left_trim,
+                right_trim=right_trim,
             )
 
             for variant in variants:
@@ -798,6 +995,22 @@ class BioAligner:
 
         return DataFrame.from_records(variant_rows)
 
+    def get_left_right_trim(self, left_query_gap: int, right_query_gap: int, left_target_gap: int, right_target_gap: int, strand: int) -> tuple[int, int]:
+        # Ignore terminal gaps in either sequence.
+        left_trim = max(left_query_gap, left_target_gap)
+        right_trim = max(right_query_gap, right_target_gap)
+        if strand == -1:
+            left_trim, right_trim = right_trim, left_trim
+
+        return left_trim, right_trim
+
+    def get_forward_strand_aligned(self, reference_aligned: str, query_aligned: str, strand: int) -> tuple[str, str]:
+        """Return the aligned sequences oriented to the forward strand."""
+        if strand == -1:
+            reference_aligned = reverse_complement_gapped(reference_aligned)
+            query_aligned = reverse_complement_gapped(query_aligned)
+        return reference_aligned, query_aligned
+
     def extract_variants_from_gapped(
         self,
         *,
@@ -806,23 +1019,44 @@ class BioAligner:
         chrom: str,
         reference_start: int = 1,
         reference_sequence: str | None = None,
+        left_trim: int = 0,
+        right_trim: int = 0,
     ) -> list[Variant]:
-        """Extract VCF-conformant variants from aligned reference/query strings."""
+        """Extract VCF-conformant variants from the non-terminal aligned region."""
+
         if len(reference_aligned) != len(query_aligned):
             raise ValueError(
                 "Aligned strings must have identical length: "
                 f"{len(reference_aligned)} != {len(query_aligned)}"
             )
+
         if reference_sequence is None:
             reference_sequence = reference_aligned.replace("-", "")
+
         if not reference_sequence:
             raise ValueError("Reference sequence must not be empty.")
 
-        variants: list[Variant] = []
-        i = 0
-        ref_index = 0
+        alignment_length = len(reference_aligned)
 
-        while i < len(reference_aligned):
+        start = left_trim
+        end = alignment_length - right_trim
+
+        if start > end:
+            raise ValueError(
+                "Terminal gaps consume the complete alignment: "
+                f"start={start}, end={end}, length={alignment_length}"
+            )
+
+        # Number of reference bases before the retained alignment region.
+        ref_index = sum(
+            base != "-"
+            for base in reference_aligned[:start]
+        )
+
+        variants: list[Variant] = []
+        i = start
+
+        while i < end:
             ref_base = reference_aligned[i]
             query_base = query_aligned[i]
 
@@ -831,6 +1065,7 @@ class BioAligner:
                     raise ValueError(
                         "Aligned strings must not contain a gap in both rows."
                     )
+
                 ref_index += 1
                 i += 1
                 continue
@@ -843,6 +1078,7 @@ class BioAligner:
                     reference_sequence=reference_sequence,
                     reference_start=reference_start,
                     alignment_index=i,
+                    alignment_end=end,
                     ref_index=ref_index,
                 )
                 variants.append(variant)
@@ -855,6 +1091,7 @@ class BioAligner:
                 reference_sequence=reference_sequence,
                 reference_start=reference_start,
                 alignment_index=i,
+                alignment_end=end,
                 ref_index=ref_index,
             )
             variants.append(variant)
@@ -870,25 +1107,37 @@ class BioAligner:
         reference_sequence: str,
         reference_start: int,
         alignment_index: int,
+        alignment_end: int,
         ref_index: int,
     ) -> tuple[Variant, int, int]:
-        """Collect directly adjacent substitutions into one SNV or MNV."""
+
         start = ref_index
+
         reference_bases: list[str] = []
         query_bases: list[str] = []
-        while alignment_index < len(reference_aligned):
+
+        while alignment_index < alignment_end:
             ref_base = reference_aligned[alignment_index]
             query_base = query_aligned[alignment_index]
-            if ref_base == "-" or query_base == "-" or ref_base == query_base:
+
+            if (
+                ref_base == "-"
+                or query_base == "-"
+                or ref_base == query_base
+            ):
                 break
+
             reference_bases.append(ref_base)
             query_bases.append(query_base)
+
             alignment_index += 1
             ref_index += 1
 
         ref = "".join(reference_bases)
         alt = "".join(query_bases)
+
         pos = reference_start + start
+
         variant = Variant(
             chrom=chrom,
             pos=pos,
@@ -898,11 +1147,13 @@ class BioAligner:
             variant_type="SNV" if len(ref) == 1 else "MNV",
             description=f"{pos}{ref}>{alt}",
         )
+
         self._validate_variant(
             reference_sequence=reference_sequence,
             reference_start=reference_start,
             variant=variant,
         )
+
         return variant, alignment_index, ref_index
 
     def _extract_indel_block(
@@ -914,6 +1165,7 @@ class BioAligner:
         reference_sequence: str,
         reference_start: int,
         alignment_index: int,
+        alignment_end: int,
         ref_index: int,
     ) -> tuple[Variant, int, int]:
         """Collect one contiguous alignment gap and create its VCF indel."""
@@ -938,7 +1190,7 @@ class BioAligner:
 
         deleted: list[str] = []
         start = ref_index
-        while alignment_index < len(reference_aligned):
+        while alignment_index < alignment_end:
             ref_base = reference_aligned[alignment_index]
             query_base = query_aligned[alignment_index]
             if ref_base == "-" or query_base != "-":
@@ -1201,6 +1453,7 @@ class BioAligner:
                 corrected.append(query_base)
 
         return "".join(corrected), n_count
+
     # def _pick_reference_for_row(
     #     self,
     #     *,
@@ -1718,7 +1971,31 @@ def alignment_to_strings(alignment: Alignment) -> tuple[str, str]:
 #                 f"Invalid alignment gap: " f"WT gap={wt_gap}, READ gap={read_gap}"
 #             )
 
+
 #     return (
 #         "".join(wt_aligned),
 #         "".join(read_aligned),
 #     )
+def terminal_gaps(alignment: Alignment) -> dict[str, int]:
+    target_index = alignment.indices[0]
+    query_index = alignment.indices[1]
+    left_terminal_target = next(
+        (i for i, x in enumerate(target_index) if x != -1), len(target_index)
+    )
+    right_terminal_target = next(
+        (i for i, x in enumerate(reversed(target_index)) if x != -1),
+        len(target_index),
+    )
+    left_terminal_query = next(
+        (i for i, x in enumerate(query_index) if x != -1), len(query_index)
+    )
+    right_terminal_query = next(
+        (i for i, x in enumerate(reversed(query_index)) if x != -1),
+        len(query_index),
+    )
+    return {
+        "left_target_gap": left_terminal_target,
+        "left_query_gap": left_terminal_query,
+        "right_target_gap": right_terminal_target,
+        "right_query_gap": right_terminal_query,
+    }

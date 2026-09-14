@@ -330,7 +330,7 @@ class ElementTag(Overlay[PartialElementTag]):
             omics=prior.omics,
             flag=None,
         )
-        patched = prior.patch(PartialElementTag(flag=None)) # never inherit
+        patched = prior.patch(PartialElementTag(flag=None))  # never inherit
         patched = patched.resolve(base, tag)
         # override with kwargs
         patched = patched.patch(PartialElementTag(**kwargs))
@@ -436,7 +436,7 @@ class OutSpec(Overlay[PartialOutSpec]):
             )
         return f"{base}.{ext}"
 
-    @cached_property
+    @property
     def output_groups(self) -> dict[str, list[Path]]:
         """
         All output files, grouped by key. The primary extension (``self.ext``)

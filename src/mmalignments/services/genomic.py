@@ -16,6 +16,16 @@ def reverse_complement(seq: str) -> str:
     return str(Seq(seq).reverse_complement())
 
 
+_COMPLEMENT = str.maketrans(
+    "ACGTNacgtn",
+    "TGCANtgcan",
+)
+
+
+def reverse_complement_gapped(sequence: str) -> str:
+    """Reverse-complement an aligned DNA sequence while preserving gaps."""
+    return sequence.translate(_COMPLEMENT)[::-1]
+
 def normalize_sequence(
     sequence: str,
     allow_ambiguous: bool = False,
