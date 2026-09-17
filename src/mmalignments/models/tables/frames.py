@@ -416,7 +416,7 @@ def divide(
 
 
 def concat(
-    key_column: str,
+    key_column: str | None = None,
     views: Mapping[str, View] | None = None,
     *,
     rename_fn: Callable[[list[str]], dict[str, str]] | None = None,
@@ -432,7 +432,8 @@ def concat(
                 raise ValueError(
                     f"Expected DataFrame for key '{key}', got {type(frame)}"
                 )
-            frame.insert(loc=0, column=key_column, value=key)
+            if key_column:
+                frame.insert(loc=0, column=key_column, value=key)
             if result is None:
                 result = frame
             else:

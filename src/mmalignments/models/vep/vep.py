@@ -1096,7 +1096,7 @@ def build_vep_lookup(
             "VEP output is missing required columns: " + ", ".join(sorted(missing))
         )
 
-    if transcript is not None:
+    if transcript:
         vep_frame = vep_frame.loc[
             vep_frame["Feature"].eq(transcript)
         ].copy()  # type: ignore
@@ -1276,9 +1276,10 @@ def build_annotation_rows(
             if hgvs_consequence is not None:
                 try:
                     assert len(hgvs_consequence) == 4
-                    assert all(hgvs_consequence)
+                    assert all(x is not None for x in hgvs_consequence)
                 except AssertionError:
-                    print(variant, hgvs_consequence)
+                    print("hs", variant, hgvs_consequence)
+                    raise
                 annotation["hgvs_g"] = hgvs_consequence[0]
                 annotation["hgvs_c"] = hgvs_consequence[1]
                 annotation["hgvs_p"] = hgvs_consequence[2]
@@ -1317,7 +1318,7 @@ def build_annotation_rows(
                 if hgvs_consequence is not None:
                     try:
                         assert len(hgvs_consequence) == 4
-                        assert all(hgvs_consequence)
+                        assert all(x is not None for x in hgvs_consequence)
                     except AssertionError:
                         print(variant, hgvs_consequence)
                         raise
@@ -2883,7 +2884,7 @@ def get_dominant_haplotypes(
     result["cum_frequency"] = result.groupby(["Sample", "Gene"])["frequency"].cumsum()
 
     # ---------------------------------------------------------
-    # 5. Haplotype category (WT, MAJOR, MINOR)
+    # 5. Haplotype category (WT, major, minor)
     # ---------------------------------------------------------
 
     def _classify_category(row: pd.Series) -> str:
@@ -2895,6 +2896,7 @@ def get_dominant_haplotypes(
         return "minor"
 
     result["haplotype_category"] = result.apply(_classify_category, axis=1)
+    result["haplotype_category"] = result["haplotype_category"].astype(str).str.lower()
 
     # ---------------------------------------------------------
     # 6. Functional consequence
@@ -3194,12 +3196,16 @@ def annotate_samples(
             if h in {"", "WT", ".", "<br>"}:
                 return "WT"
             if float(row.get("frequency", 0.0)) >= major_haplo_threshold:
-                return "MAJOR"
-            return "MINOR"
+                return "major"
+            return "minor"
 
         haplotypes["haplotype_category"] = haplotypes.apply(
             _classify_category, axis=1
         )
+
+    haplotypes["haplotype_category"] = (
+        haplotypes["haplotype_category"].astype(str).str.lower()
+    )
 
     # --------------------------------------------------------------
     # 2. All Sample x Gene combinations
@@ -3282,7 +3288,11 @@ def annotate_samples(
     # --------------------------------------------------------------
 
     major_haplotypes = haplotypes[
-        haplotypes["haplotype_category"] == "MAJOR"
+        haplotypes["haplotype_category"].str.lower() == "major"
+    ].copy()
+
+    minor_haplotypes = haplotypes[
+        haplotypes["haplotype_category"].str.lower() == "minor"
     ].copy()
 
     def format_haplotype_label(row: pd.Series) -> str:
@@ -3331,30 +3341,26 @@ def annotate_samples(
             "frequency",
             "max",
         ),
+        major_mutant_count=(
+            "count",
+            "sum",
+        ),
         major_mutant_frequency=(
             "frequency",
             "sum",
         ),
     )
 
-    # --------------------------------------------------------------
-    # 5. WT haplotype information
-    # --------------------------------------------------------------
-
-    wt_summary = (
-        haplotypes[haplotypes["haplotype_category"] == "WT"]
-        .groupby(
-            ["Sample", "Gene"],
-            as_index=False,
-        )
-        .agg(
-            wt_count=("count", "sum"),
-            wt_frequency=("frequency", "sum"),
-        )
+    minor_summary = minor_haplotypes.groupby(
+        ["Sample", "Gene"],
+        as_index=False,
+    ).agg(
+        n_minor_haplotypes=("haplotype", "nunique"),
+        minor_haplotypes=("haplotype", _pipe_join),
     )
 
     # --------------------------------------------------------------
-    # 6. Total observed haplotypes from raw input (if available)
+    # 5. WT haplotype information
     # --------------------------------------------------------------
 
     if raw_df is not None and "variants" in raw_df.columns:
@@ -3370,11 +3376,40 @@ def annotate_samples(
 
         raw_df_copy = raw_df.copy()
         raw_df_copy["_haplo_norm"] = raw_df_copy["variants"].apply(_norm_raw_h)
+        raw_totals = (
+            raw_df_copy.groupby(["Sample", "Gene"], as_index=False)["Count"]
+            .sum()
+            .rename(columns={"Count": "_total_count"})
+        )
+        wt_rows = (
+            raw_df_copy[raw_df_copy["_haplo_norm"] == "WT"]
+            .groupby(["Sample", "Gene"], as_index=False)["Count"]
+            .sum()
+            .rename(columns={"Count": "wt_count"})
+        )
+        wt_summary = raw_totals.merge(wt_rows, on=["Sample", "Gene"], how="left")
+        wt_summary["wt_count"] = wt_summary["wt_count"].fillna(0)
+        wt_summary["wt_frequency"] = (
+            wt_summary["wt_count"] / wt_summary["_total_count"]
+        ).fillna(0)
+        wt_summary = wt_summary[["Sample", "Gene", "wt_count", "wt_frequency"]]
+
         observed_summary = raw_df_copy.groupby(
             ["Sample", "Gene"],
             as_index=False,
         ).agg(n_observed_haplotypes=("_haplo_norm", "nunique"))
     else:
+        wt_summary = (
+            haplotypes[haplotypes["haplotype_category"].str.lower() == "wt"]
+            .groupby(
+                ["Sample", "Gene"],
+                as_index=False,
+            )
+            .agg(
+                wt_count=("count", "sum"),
+                wt_frequency=("frequency", "sum"),
+            )
+        )
         observed_summary = None
 
     # --------------------------------------------------------------
@@ -3389,6 +3424,12 @@ def annotate_samples(
 
     result = result.merge(
         major_summary,
+        on=["Sample", "Gene"],
+        how="left",
+    )
+
+    result = result.merge(
+        minor_summary,
         on=["Sample", "Gene"],
         how="left",
     )
@@ -3418,10 +3459,14 @@ def annotate_samples(
 
     result["wt_frequency"] = result["wt_frequency"].fillna(0)
     result["wt_count"] = result["wt_count"].fillna(0)
+    result["major_mutant_count"] = result["major_mutant_count"].fillna(0).astype(int)
     result["major_mutant_frequency"] = result["major_mutant_frequency"].fillna(0)
     result["n_dominant_variants"] = result["n_dominant_variants"].fillna(0).astype(int)
     result["n_major_haplotypes"] = (
         result["n_major_haplotypes"].fillna(0).astype(int)
+    )
+    result["n_minor_haplotypes"] = (
+        result["n_minor_haplotypes"].fillna(0).astype(int)
     )
     result["max_major_haplotype_frequency"] = (
         result["max_major_haplotype_frequency"].fillna(0)
@@ -3547,11 +3592,13 @@ def annotate_samples(
         # Statistics & Counts
         "n_observed_haplotypes",
         "n_major_haplotypes",
+        "n_minor_haplotypes",
         "n_dominant_variants",
         # Frequency metrics
         "wt_count",
         "wt_frequency",
         "wt_interpretation",
+        "major_mutant_count",
         "major_mutant_frequency",
         "max_major_haplotype_frequency",
         "max_variant_frequency",
@@ -3559,6 +3606,7 @@ def annotate_samples(
         "major_haplotypes",
         "major_haplotypes_hgvs_p",
         "major_haplotypes_annotated",
+        "minor_haplotypes",
         "dominant_variants",
         "variant_hgvs_p",
         # Final interpretation
