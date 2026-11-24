@@ -38,16 +38,10 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mmalignments.models.elements import (
-    Element,
-    ElementTag,
-    Runnable,
-    element
-)
+from mmalignments.models.elements import Element, ElementTag, Runnable, element
 from mmalignments.models.tags import Method, Omics, Stage, State
-from mmalignments.services.environment import get_variable, hostname, prebuilt_path
+from mmalignments.services.environment import hostname, prebuilt_path
 from mmalignments.services.io import parents
-from mmalignments.services.logging import current_call_to_string
 
 if TYPE_CHECKING:
     pass
@@ -80,6 +74,7 @@ _KNOWN_ASSEMBLIES: dict[str, str] = {
 # GenomeBase
 ###############################################################################
 
+
 class GenomeBase(ABC):
     """Abstract base for all genome references.
 
@@ -90,7 +85,6 @@ class GenomeBase(ABC):
     # ------------------------------------------------------------------
     # Abstract interface
     # ------------------------------------------------------------------
-
 
     @property
     @abstractmethod
@@ -270,14 +264,13 @@ class GenomeBase(ABC):
     # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
-        return (
-            f"{type(self).__name__}(name={self.name!r}, fasta={self.fasta})"
-        )
+        return f"{type(self).__name__}(name={self.name!r}, fasta={self.fasta})"
 
 
 ###############################################################################
 # LocalGenome
 ###############################################################################
+
 
 class LocalGenome(GenomeBase):
     """Genome reference backed by local, already-present files.
@@ -424,6 +417,7 @@ class EnsemblGenome(GenomeBase):
         try:
             with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
                 import json
+
                 data = json.loads(resp.read())
                 return data["assembly_name"]
         except Exception as exc:
@@ -445,7 +439,7 @@ class EnsemblGenome(GenomeBase):
 
     @property
     def base(self) -> Path:
-        return self._base_dir / self.species / self.name
+        return self._base_dir  # / self.species / self.name
 
     @property
     def fasta(self) -> Path:
@@ -642,7 +636,6 @@ class EnsemblGenome(GenomeBase):
             name=f"{self.name} download GFF3",
         )
 
-    
     def prepare(
         self,
         *,

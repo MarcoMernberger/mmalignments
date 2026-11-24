@@ -943,10 +943,10 @@ class FastGrab(External):
         par: ParType | SpecValues[ParType] | None = None,
         cfg: CfgType | SpecValues[CfgType] | None = None,
     ) -> tuple[Element, Element, Element, Element]:
-        """Configure and process a demultiplexing run in one step.
+        """Composite function that configures and runs demultiplexing.
 
-        This convenience method calls :meth:`configure` followed by
-        :meth:`process` and returns both Elements.
+        Calls :meth:`configure`, :meth:`process`, :meth:`consolidate`, and
+        :meth:`report` and returns their Elements.
 
         Parameters
         ----------
@@ -992,8 +992,9 @@ class FastGrab(External):
 
         Returns
         -------
-        tuple[Element, Element, Element]
-            ``(consolidate_element, process_element, config_element)``
+        tuple[Element, Element, Element, Element]
+            Consolidation, processing, configuration, and report Elements,
+            in that order.
         """
         config_el = self.configure(
             sample=sample,
@@ -1044,7 +1045,7 @@ class FastGrab(External):
         par: ParType | SpecValues[ParType] | None = None,
         cfg: CfgType | SpecValues[CfgType] | None = None,
     ) -> tuple[dict[str, NextGenSample], NextGenSample | None]:
-        """Configure and process a demultiplexing run in one step.
+        """Composite function that configures and runs demultiplexing.
 
         In addition, a mapping of sample name → demultiplexed
         NextGenSampleElement is returned, containing the paths to the

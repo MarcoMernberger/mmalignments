@@ -23,6 +23,7 @@ dependencies = [
     "gseapy>=1.0.0",
     "kaleido",
     "panel>=0.14.0",
+    "pybigwig>=0.3.30",
 ]
 [project.optional-dependencies]
 dev = [
@@ -45,8 +46,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/mmalignments"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "black>=24.4.0",
     "ruff>=0.6.0",
     "mypy>=1.10.0",
@@ -81,11 +82,14 @@ target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "W"]
+select = ["E", "F", "I", "D"] # D = pydocstyle
 ignore = ["E203", "E501"]
 fixable = ["ALL"]
 unfixable = []
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
 
 [tool.ruff.format]
 quote-style = "double"
