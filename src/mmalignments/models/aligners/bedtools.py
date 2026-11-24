@@ -5,13 +5,23 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from subprocess import CompletedProcess
-from typing import Callable, Mapping, Union
+from typing import Mapping, Union
 
-from mmalignments.models.elements import Element, element, generate_element_key_name
-from mmalignments.models.tags import ElementTag, Method, State, PartialElementTag, from_prior
+from mmalignments.models.artifacts import ArtifactSet
+from mmalignments.models.elements import Element, element
+from mmalignments.models.overlay import (
+    CfgType,
+    OutSpec,
+    OutType,
+    ParType,
+    PartialElementTag,
+    SpecValues,
+    TagType,
+    pick_spec,
+)
+from mmalignments.models.tags import Method, State
 
-from ..externals import External, ExternalRunConfig, subroutine, SubroutineIn
+from ..externals import External, SubroutineIn, subroutine
 from ..parameters import Params, ParamSet
 
 logger = logging.getLogger(__name__)
@@ -121,81 +131,6 @@ class Bedtools(External):
         return fallback
 
     ###########################################################################
-    # Helpers
-    ###########################################################################
-
-    def build_outfile(
-        self,
-        outdir: Path | str | None,
-        filename: Path | str | None,
-        tag: ElementTag,
-        input_bed: Path,
-    ) -> Path:
-        """Determine the output path for a BED file based on provided parameters.
-
-        Parameters
-        ----------
-        outdir : Path | str | None
-            Directory for the output BED file. If None, defaults to the input BED file's
-            directory.
-        filename : Path | str | None
-            Filename for the output BED file. If None, defaults to a name based on the
-            tag.
-        tag : ElementTag
-            Tag containing metadata for the output file.
-        input_bed : Path
-            Path to the input BED file.
-
-        Returns
-        -------
-        Path
-            Path to the output BED file.
-        """
-        output_dir = outdir or input_bed.parent
-        output_filename = filename or tag.default_output
-        return Path(output_dir) / output_filename
-
-    def get_tag_params_cfg(
-        self,
-        tags: Mapping[str, ElementTag | None] | None,
-        parameters: Mapping[str, Params] | None,
-        cfgs: Mapping[str, ExternalRunConfig | None] | None,
-        subroutine_name: str,
-    ) -> tuple[ElementTag | None, Params, ExternalRunConfig | None]:
-        """Helper to get tag, params, and cfg for a given subroutine.
-
-        This centralizes the logic for retrieving the appropriate tag, parameters,
-        and configuration for a specific subroutine (e.g., "sort", "merge") from
-        the provided mappings. It checks for the presence of the subroutine key
-        in each mapping and returns the corresponding values or defaults.
-
-        Parameters
-        ----------
-        tags : Mapping[str, ElementTag | None] | None
-            Optional mapping of subroutine names to ElementTags.
-        parameters : Mapping[str, Params] | None
-            Optional mapping of subroutine names to Params.
-        cfgs : Mapping[str, ExternalRunConfig | None] | None
-            Optional mapping of subroutine names to ExternalRunConfig.
-        subroutine_name : str
-            Name of the subroutine to retrieve values for (e.g., "sort").
-
-        Returns
-        -------
-        tuple[ElementTag | None, Params, ExternalRunConfig | None]
-            A tuple containing the ElementTag (or None), Params (defaulting to empty),
-            and ExternalRunConfig (or None) for the specified subroutine.
-        """
-        tag = tags[subroutine_name] if tags and subroutine_name in tags else None
-        params = (
-            parameters[subroutine_name]
-            if parameters and subroutine_name in parameters
-            else Params()
-        )
-        cfg = cfgs[subroutine_name] if cfgs and subroutine_name in cfgs else None
-        return tag, params, cfg
-
-    ###########################################################################
     # Sort (High-level and Low-level wrapper)
     ###########################################################################
 
@@ -204,11 +139,10 @@ class Bedtools(External):
         self,
         bed_element: Element,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """
         Sort a BED file using bedtools sort.
@@ -219,19 +153,15 @@ class Bedtools(External):
         ----------
         bed_element : Element
             Element containing the BED file to be sorted (expects 'bed' in artifacts).
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default naming.
-            If not provided, a default tag will be generated based on the input
-            Element's tag.
-        outdir : Path | str | None
-            Directory for the sorted output BED file. If not provided, defaults to
-            the same directory as the input BED file.
-        filename : Path | str | None
-            Filename for the sorted output BED file. If not provided, defaults to
-            the default filename based on the tag. Overrides default filename from tag.
-        params : Params | None
+        tag : TagType | None
+            Partial or full Element tag override. Defaults are derived from the
+            input Element's tag.
+        out : OutType | None
+            Output specification override. Defaults to the directory of the
+            input BED file and extension ``bed``.
+        par : ParType | None
             Parameters for the sort command. Overrides instance defaults.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -250,41 +180,30 @@ class Bedtools(External):
         >>> sorted_elem.run()  # Execute the sort
         """
         input_bed = bed_element.bed
-        root = bed_element.tag.root or bed_element.bed.stem
-        tag = ElementTag(
-            root=root,
-            level=bed_element.tag.level + 1,
-            stage=bed_element.tag.stage,
-            method=Method.BEDTOOLS,
-            state=State.SORT,
-            omics=bed_element.tag.omics,
-            ext="bed",
-        ).merge(tag)
+        resolved_tag = bed_element.tag.bump(
+            method=Method.BEDTOOLS, state=State.SORT
+        ).resolve(tag)
+        resolved_out = OutSpec.from_tag(resolved_tag).resolve(
+            OutSpec(folder=input_bed.parent, ext="bed"), out
+        )
+        output_bed = resolved_out.file
 
-        output_bed = self.build_outfile(outdir, filename, tag, input_bed)
-        params = params or Params()
-        cfg = cfg or ExternalRunConfig()
-        determinants = self.signature_determinants(params, subroutine="sort")
-        # the callable to create the file
         runner = self.sort_bed(
             input_bed=input_bed,
             output_bed=output_bed,
-            params=params,
+            par=par,
             cfg=cfg,
         )
-        # build element
-        key, name = generate_element_key_name(tag, self.version_name, "sort")
-        element = Element(
-            key=key,
-            run=runner,
-            tag=tag,
-            determinants=determinants,
+        key = Element.generate_key(resolved_tag, self.version_name, "sort")
+        return Element(
+            key,
+            runner,
+            tag=resolved_tag,
+            determinants=self.signature_determinants(par, subroutine="sort"),
             inputs=(input_bed,),
-            artifacts={"bed": output_bed},
+            artifacts=ArtifactSet(output_bed, primary_name="bed"),
             pres=(bed_element,),
-            name=name
         )
-        return element
 
     @subroutine
     def sort_bed(
@@ -292,8 +211,8 @@ class Bedtools(External):
         input_bed: Path | str,
         output_bed: Path | str,
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """
         Sort a BED file using bedtools sort.
@@ -307,9 +226,9 @@ class Bedtools(External):
             Path to the unsorted BED file.
         output_bed : Union[Path, str]
             Path for the sorted output BED file.
-        params : Params | None
+        par : ParType | None
             Parameters for sorting call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -340,11 +259,10 @@ class Bedtools(External):
         bed_element: Element,
         genomesizes: Element,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
         slop_bp: int | None = None,
     ) -> Element:
         """
@@ -355,23 +273,19 @@ class Bedtools(External):
 
         Parameters
         ----------
-        input_element : Element
+        bed_element : Element
             Element containing the BED file to extend (expects 'bed' in artifacts).
         genomesizes : Element
             Element containing the chromosome sizes information.
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default naming.
-            If not provided, a default tag will be generated based on the input
-            Element's tag.
-        outdir : Path | str | None
-            Directory for the sorted output BED file. If not provided, defaults to
-            the same directory as the input BED file.
-        filename : Path | str | None
-            Filename for the sorted output BED file. If not provided, defaults to
-            the default filename based on the tag. Overrides default filename from tag.
-        params : Params | None
+        tag : TagType | None
+            Partial or full Element tag override. Defaults are derived from the
+            input Element's tag.
+        out : OutType | None
+            Output specification override. Defaults to the directory of the
+            input BED file and extension ``bed``.
+        par : ParType | None
             Additional parameter overrides.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
         slop_bp : int | None
@@ -392,41 +306,39 @@ class Bedtools(External):
         """
         input_bed = bed_element.bed
         genome_file = genomesizes.sizes
-        tag = ElementTag(
-            root=bed_element.tag.root or bed_element.bed.stem,
-            level=bed_element.tag.level + 1,
-            stage=bed_element.tag.stage,
-            method=Method.BEDTOOLS,
-            state=State.PADDED,
-            omics=bed_element.tag.omics,
-            ext="bed",
-        ).merge(tag)
-        output_bed = self.build_outfile(outdir, filename, tag, input_bed)
+        resolved_tag = bed_element.tag.bump(
+            method=Method.BEDTOOLS, state=State.PADDED
+        ).resolve(tag)
+        resolved_out = OutSpec.from_tag(resolved_tag).resolve(
+            OutSpec(folder=input_bed.parent, ext="bed"), out
+        )
+        output_bed = resolved_out.file
 
         if slop_bp:
             if slop_bp > 0:
-                params = Params(b=slop_bp, **(params.to_dict() if params else {}))
+                par = (par or Params()).override(b=slop_bp)
             if slop_bp < 0:
-                params = Params(l=slop_bp, **(params.to_dict() if params else {}))
+                par = (par or Params()).override(l=slop_bp)
 
         runner = self.slop_bed(
             input_bed=input_bed,
             genome_file=genome_file,
             output_bed=output_bed,
-            params=params,
+            par=par,
             cfg=cfg,
         )
-        determinants = self.signature_determinants(params, subroutine="slop")
-        element = Element(
-            key=f"{tag.default_name}_slop_{slop_bp}_{self.version_name}",
-            run=runner,
-            tag=tag,
-            determinants=determinants,
+        key = Element.generate_key(
+            resolved_tag, self.version_name, "slop", slop_bp=slop_bp
+        )
+        return Element(
+            key,
+            runner,
+            tag=resolved_tag,
+            determinants=self.signature_determinants(par, subroutine="slop"),
             inputs=(input_bed, genome_file),
-            artifacts={"bed": output_bed},
+            artifacts=ArtifactSet(output_bed, primary_name="bed"),
             pres=(bed_element,),
         )
-        return element
 
     @subroutine
     def slop_bed(
@@ -435,8 +347,8 @@ class Bedtools(External):
         genome_file: Path | str,
         output_bed: Path | str,
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Extend BED intervals using bedtools slop.
 
@@ -451,10 +363,10 @@ class Bedtools(External):
                 Path to the genome file (chr\tlength format).
         output_bed : Path | str
                 Path for the output BED file with extended intervals.
-        params : Params | None
+        par : ParType | None
                 Additional parameter overrides (e.g., {"l": 50, "r": 150} for asymmetric
                 extension).
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
                 Configuration for running the command.
 
         Returns
@@ -466,7 +378,7 @@ class Bedtools(External):
         --------
         >>> bt = Bedtools()
         >>> slop_runner = bt.slop_bed(
-        ...     "targets.bed", "mm10.genome", "targets.pad100.bed", slop_bp=100
+        ...     "targets.bed", "mm10.genome", "targets.pad100.bed", par={"b": 100}
         ... )
         >>> slop_runner()  # Execute the slop
         """
@@ -478,9 +390,20 @@ class Bedtools(External):
             "-g",
             self.strabs(genome_file),
         ]
+        if par:
+            for k, v in par.items():
+                arguments.extend([f"-{k}", str(v)])
 
         subcommand = "slop"
-        return arguments, subcommand, [input_bed, genome_file], [self.abs(output_bed)], self.abs(output_bed), None, None
+        return (
+            arguments,
+            subcommand,
+            [input_bed, genome_file],
+            [self.abs(output_bed)],
+            self.abs(output_bed),
+            None,
+            None,
+        )  # noqa: E501
 
     ###########################################################################
     # Merge (High-level and Low-level wrapper)
@@ -491,11 +414,10 @@ class Bedtools(External):
         self,
         bed_element: Element,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Merge overlapping intervals using bedtools merge.
 
@@ -507,19 +429,15 @@ class Bedtools(External):
         bed_element : Element
             Element containing the sorted BED file to merge
             (expects 'bed' in artifacts).
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default naming.
-            If not provided, a default tag will be generated based on the input
-            Element's tag.
-        outdir : Path | str | None
-            Directory for the sorted output BED file. If not provided, defaults to
-            the same directory as the input BED file.
-        filename : Path | str | None
-            Filename for the sorted output BED file. If not provided, defaults to
-            the default filename based on the tag. Overrides default filename from tag.
-        params : Params | None
+        tag : TagType | None
+            Partial or full Element tag override. Defaults are derived from the
+            input Element's tag.
+        out : OutType | None
+            Output specification override. Defaults to the directory of the
+            input BED file and extension ``bed``.
+        par : ParType | None
             Parameter for the merge command. Overrides instance defaults.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -538,39 +456,30 @@ class Bedtools(External):
         >>> merged_elem.run()  # Execute the merge
         """
         input_bed = bed_element.bed
-        tag = ElementTag(
-            root=bed_element.tag.root or bed_element.bed.stem,
-            level=bed_element.tag.level + 1,
-            stage=bed_element.tag.stage,
-            method=Method.BEDTOOLS,
-            state=State.MERGED,
-            omics=bed_element.tag.omics,
-            ext="bed",
-        ).merge(tag)
-        output_bed = self.build_outfile(outdir, filename, tag, input_bed)
-        params = params or Params()
-        cfg = cfg or ExternalRunConfig()
-        determinants = self.signature_determinants(params, subroutine="merge")
-        # build callable
+        resolved_tag = bed_element.tag.bump(
+            method=Method.BEDTOOLS, state=State.MERGED
+        ).resolve(tag)
+        resolved_out = OutSpec.from_tag(resolved_tag).resolve(
+            OutSpec(folder=input_bed.parent, ext="bed"), out
+        )
+        output_bed = resolved_out.file
+
         runner = self.merge_bed(
             input_bed=input_bed,
             output_bed=output_bed,
-            params=params,
+            par=par,
             cfg=cfg,
         )
-        # build element
-        key, name = generate_element_key_name(tag, self.version_name, "merge")
-        element = Element(
-            key=key,
-            run=runner,
-            tag=tag,
-            determinants=determinants,
+        key = Element.generate_key(resolved_tag, self.version_name, "merge")
+        return Element(
+            key,
+            runner,
+            tag=resolved_tag,
+            determinants=self.signature_determinants(par, subroutine="merge"),
             inputs=(input_bed,),
-            artifacts={"bed": output_bed},
+            artifacts=ArtifactSet(output_bed, primary_name="bed"),
             pres=(bed_element,),
-            name=name,
         )
-        return element
 
     @subroutine
     def merge_bed(
@@ -578,8 +487,8 @@ class Bedtools(External):
         input_bed: Union[Path, str],
         output_bed: Union[Path, str],
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Merge overlapping intervals using bedtools merge.
 
@@ -592,9 +501,9 @@ class Bedtools(External):
             Path to the sorted input BED file.
         output_bed : Union[Path, str]
             Path for the merged output BED file.
-        params : Params | None
+        par : ParType | None
             Parameter overrides (e.g., {"d": 100} to merge intervals within 100bp).
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -623,36 +532,33 @@ class Bedtools(External):
         self,
         bed_element: Element,
         *,
-        tags: Mapping[str, ElementTag | None] | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        parameters: Mapping[str, Params] | None = None,
-        cfgs: Mapping[str, ExternalRunConfig | None] | None = None,
+        tag: TagType | SpecValues[TagType] | None = None,
+        out: OutType | SpecValues[OutType] | None = None,
+        par: ParType | SpecValues[ParType] | None = None,
+        cfg: CfgType | SpecValues[CfgType] | None = None,
     ) -> Element:
-        """Convenience method: sort and merge a BED file in one step.
+        """Convenience method: merge and sort a BED file in one step.
 
-        This combines bedtools sort and merge operations
-        (equivalent to: bedtools sort | bedtools merge).
+        This combines bedtools merge and sort operations.
 
         Parameters
         ----------
         bed_element : Element
             Element containing the BED file to sort and merge.
-        tags : Mapping[str, ElementTag | None] | None
-            Mandatory tags for the output Element for default naming. If not provided,
-            default tags will be generated based on each input Element's tag.
-        outdir : Path | str | None
-            Directory for the sorted output BED file. If not provided, defaults to
-            the same directory as the input BED file.
-        filename : Path | str | None
-            Filename for the sorted output BED file. If not provided, defaults to
-            the default filename based on the tag. Overrides default filename from tag.
-        parameters : Mapping[str, Params] | None
-            Parameter for sort and merge commands. Each one gets its own Params
-            object in the mapping (e.g., {"sort": Params(...), "merge": Params(...)}).
-        cfg : ExternalRunConfig | None
-            Optional configuration for running the subprocess (e.g. working
-            directory, environment variables).
+        tag : TagType | SpecValues[TagType] | None
+            Tag override, either for both steps or per step using
+            ``SpecValues``. For per-step overrides, declare
+            ``valid_steps=("merge", "sort")`` and put values in the
+            ``values`` mapping.
+        out : OutType | SpecValues[OutType] | None
+            Output specification override, either for both steps or per step
+            using ``SpecValues``. Use per-step values if a non-default ``out``
+            is given, since both steps would otherwise write to the same file.
+        par : ParType | SpecValues[ParType] | None
+            Parameters, either for both steps or per step using ``SpecValues``.
+        cfg : CfgType | SpecValues[CfgType] | None
+            Run configuration, either for both steps or per step using
+            ``SpecValues``.
 
 
         Returns
@@ -663,20 +569,23 @@ class Bedtools(External):
         Examples
         --------
         >>> bt = Bedtools()
-        >>> merged_elem = bt.mergesort(input_element, "targets.merged.bed")
+        >>> merged_elem = bt.mergesort(input_element)
         >>> merged_elem.run()  # Execute sort+merge
         """
-        tag, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "merge")
-        merge_element = self.merge(
+        merge_element = self.merge(  # type: ignore[reportCallIssue]
             bed_element,
-            tag=tag,
-            outdir=outdir,
-            filename=filename,
-            params=params,
-            cfg=cfg,
+            tag=pick_spec(tag, "merge"),
+            out=pick_spec(out, "merge"),
+            par=pick_spec(par, "merge"),
+            cfg=pick_spec(cfg, "merge"),
         )
-        tag, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "sort")
-        sort_element = self.sort(merge_element, tag=tag, params=params, cfg=cfg)
+        sort_element = self.sort(  # type: ignore[reportCallIssue]
+            merge_element,
+            tag=pick_spec(tag, "sort"),
+            out=pick_spec(out, "sort"),
+            par=pick_spec(par, "sort"),
+            cfg=pick_spec(cfg, "sort"),
+        )
         return sort_element
 
     def pad(
@@ -684,11 +593,10 @@ class Bedtools(External):
         targets: Element,
         genomesizes: Element,
         *,
-        tags: Mapping[str, ElementTag | None] | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        parameters: Mapping[str, Params] | None = None,
-        cfgs: Mapping[str, ExternalRunConfig | None] | None = None,
+        tag: TagType | SpecValues[TagType] | None = None,
+        out: OutType | SpecValues[OutType] | None = None,
+        par: ParType | SpecValues[ParType] | None = None,
+        cfg: CfgType | SpecValues[CfgType] | None = None,
         slop_bp: int = 100,
     ) -> Element:
         """
@@ -701,22 +609,19 @@ class Bedtools(External):
             Element containing the targets BED file to pad.
         genomesizes : Element
             Element containing the genome sizes file.
-        tags : Mapping[str, ElementTag | None] | None
-            Optional tags for the sort, slop, and merge steps. If not provided,
-            default tags will be generated based on the input Element's tag.
-        outdir : Path | str | None
-            Directory for the output BED file. If not provided, defaults to the same
-            directory as the input BED file.
-        filename : Path | str | None
-            Filename for the output BED file. If not provided, defaults to the default
-            filename based on the tag. Overrides default filename from tag.
-        parameters : Mapping[str, Params] | None, optional
-            Parameters for sort, slop, and merge commands. Each one gets its
-            own Params object in the mapping (e.g.,
-            {"sort": Params(...), "slop": Params(...), "merge": Params(...)}
-            ), by default None.
-        cfgs : Mapping[str, ExternalRunConfig | None] | None, optional
-            Configuration for running the command, by default None
+        tag : TagType | SpecValues[TagType] | None
+            Tag override, either for all steps or per step using
+            ``SpecValues``. For per-step overrides, declare
+            ``valid_steps=("sort", "slop", "merge")`` and put values in the
+            ``values`` mapping.
+        out : OutType | SpecValues[OutType] | None
+            Output specification override, either for all steps or per step
+            using ``SpecValues``. The final sort step always uses defaults.
+        par : ParType | SpecValues[ParType] | None
+            Parameters, either for all steps or per step using ``SpecValues``.
+        cfg : CfgType | SpecValues[CfgType] | None
+            Run configuration, either for all steps or per step using
+            ``SpecValues``.
         slop_bp : int, optional
             Number of base pairs to pad each interval, by default 100
 
@@ -725,32 +630,38 @@ class Bedtools(External):
         Element
             New Element representing the padded BED file.
         """
-        tag_sort, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "sort")
-        sorted_element = self.sort(
+        tag_sort = pick_spec(tag, "sort")
+        sorted_element = self.sort(  # type: ignore[reportCallIssue]
             bed_element=targets,
             tag=tag_sort,
-            outdir=outdir,
-            params=params,
-            cfg=cfg,
+            out=pick_spec(out, "sort"),
+            par=pick_spec(par, "sort"),
+            cfg=pick_spec(cfg, "sort"),
         )
-        tag, params, cfg = self.get_tag_params_cfg(tags, parameters, cfgs, "slop")
-        slopped = self.slop(
+        slopped = self.slop(  # type: ignore[reportCallIssue]
             bed_element=sorted_element,
             genomesizes=genomesizes,
-            tag=tag,
-            outdir=outdir,
-            params=params,
-            cfg=cfg,
+            tag=pick_spec(tag, "slop"),
+            out=pick_spec(out, "slop"),
+            par=pick_spec(par, "slop"),
+            cfg=pick_spec(cfg, "slop"),
             slop_bp=slop_bp,
         )
-        tag_merge, _, _ = self.get_tag_params_cfg(tags, parameters, cfgs, "merge")
-        tag_sort = from_prior(tag_sort, None, state=State.PADDED)
+        padded = PartialElementTag(state=State.PADDED)
+        tag_sort = padded if tag_sort is None else tag_sort.resolve(padded)
         merged_element = self.mergesort(
             bed_element=slopped,
-            outdir=outdir,
-            filename=filename,
-            tags={"sort": tag_sort, "merge": tag_merge},
-            parameters=parameters,
-            cfgs=cfgs,
+            tag=SpecValues(
+                None,
+                valid_steps=("merge", "sort"),
+                values={"sort": tag_sort, "merge": pick_spec(tag, "merge")},
+            ),
+            out=SpecValues(
+                None,
+                valid_steps=("merge", "sort"),
+                values={"merge": pick_spec(out, "merge")},
+            ),
+            par=par,
+            cfg=cfg,
         )
         return merged_element

@@ -90,23 +90,23 @@ class EnsemblAPI:
         Element
             Element whose artifact ``"tsv"`` is the path to the output TSV file.
         """
-        tag = flanks.tag.bump(
+        resolved_tag = flanks.tag.bump(
             method=Method.CUSTOM, state=State.ANNOTATED  # noqa: E501
         ).resolve(tag)
-        out = OutSpec.from_tag(tag).resolve(out)
-        artifacts = ArtifactSet.from_outspec(out)
+        resolved_out = OutSpec.from_tag(resolved_tag).resolve(out)
+        artifacts = ArtifactSet.from_outspec(resolved_out)
         par = par or Params()
         runner = self.generate_amplicons(
-            output_file=out.file,
+            output_file=resolved_out.file,
             frame_file=flanks.file,
             genome=genome,
             par=par,
         )
-        key = Element.generate_key(tag, "GenomeAPi", "amplicons")
+        key = Element.generate_key(resolved_tag, "GenomeAPi", "amplicons")
         return Element(
             key=key,
             run=runner,
-            tag=tag,
+            tag=resolved_tag,
             artifacts=artifacts,
             determinants=par.determinants,
             inputs=(flanks.file,),
@@ -124,18 +124,18 @@ class EnsemblAPI:
         def run():
             df = read_frame(frame_file)
             df = df.drop_duplicates(subset=["target"], keep="first")
-            df = df[
-                [
-                    "target",
-                    "flank_start",
-                    "flank_end",
-                    "chr",
-                    "start",
-                    "stop",
-                    "strand",
-                    "guide",
-                ]
-            ].as_frame()
+            # df = df[
+            #     [
+            #         "target",
+            #         "flank_start",
+            #         "flank_end",
+            #         "chr",
+            #         "start",
+            #         "stop",
+            #         "strand",
+            #         "guide",
+            #     ]
+            # ].as_frame()
             df_out = self.add_amplicon_sequences(
                 df,
                 par=par,
@@ -169,8 +169,8 @@ class EnsemblAPI:
         chr_col = cast(str, par.get("chr_col", "chr"))
         start_col = cast(str, par.get("start_col", "start"))
         stop_col = cast(str, par.get("stop_col", "stop"))
-        output_col = cast(str, par.get("output_col", "amplicon"))
         strand_col = cast(str, par.get("strand_col", "strand"))
+        output_col = cast(str, par.get("output_col", "amplicon"))
         sleep = cast(float, par.get("sleep", 0.1))
         timeout = cast(float, par.get("timeout", 60.0))
         result = df.copy()

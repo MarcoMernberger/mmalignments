@@ -48,6 +48,7 @@ from mmalignments.services.io import (
     write_frames,
 )
 from mmalignments.services.genomic import reverse_complement_gapped
+
 logger = logging.getLogger(__name__)
 
 
@@ -323,15 +324,17 @@ class BioAligner:
             raise ValueError(
                 "Unsupported sequences type. Use Element, FileSource, or FastqSource."  # noqa: E501
             )
-        tag = sequences.tag.bump(
+        resolved_tag = sequences.tag.bump(
             stage=Stage.ANALYSIS,
             method=Method.BIO,
             state=State.PROCESSED,
             omics=Omics.DNA,
             flag="bioalign",
         ).resolve(tag)
-        out = OutputSpec.from_tag(tag, Out(folder=self.default_path, ext="tsv"))
-        artifacts = ArtifactSet.from_outspec(out)
+        resolved_out = OutputSpec.from_tag(
+            resolved_tag, Out(folder=self.default_path, ext="tsv")
+        )
+        artifacts = ArtifactSet.from_outspec(resolved_out)
         ref_source = reference
         if isinstance(reference, (Element, FileSource)):
             ref_source = reference.file
@@ -340,12 +343,12 @@ class BioAligner:
         runner = self.align_and_write(
             sequence_paths=sequence_paths,
             reference_source=ref_source,
-            out_paths=out.files,
+            out_paths=resolved_out.files,
             par=par,
         )
 
         determinants = self.determinants + _overlay_signature_determinants(par)
-        key = Element.generate_key(tag, "BioAligner", "align")
+        key = Element.generate_key(resolved_tag, "BioAligner", "align")
         pres = (
             (sequences,)
             if not isinstance(reference, (Element, FileSource))
@@ -354,7 +357,7 @@ class BioAligner:
         return Element(
             key,
             runner,
-            tag=tag,
+            tag=resolved_tag,
             artifacts=artifacts,
             determinants=determinants,
             pres=pres,
@@ -430,16 +433,18 @@ class BioAligner:
             raise ValueError(
                 "Unsupported sequences type. Use Element, FileSource, or FastqSource."  # noqa: E501
             )
-        tag = sequences.tag.bump(
+        resolved_tag = sequences.tag.bump(
             stage=Stage.ANALYSIS,
             method=Method.BIO,
             state=State.PROCESSED,
             omics=Omics.DNA,
             flag="alignvariant",
         ).resolve(tag)
-        out = OutputSpec.from_tag(tag, Out(folder=self.default_path, ext="tsv"))
-        alignment_file = out.file.with_suffix(".alignments.tsv")
-        artifacts = ArtifactSet.from_outspec(out).with_extra(
+        resolved_out = OutputSpec.from_tag(
+            resolved_tag, Out(folder=self.default_path, ext="tsv")
+        )
+        alignment_file = resolved_out.file.with_suffix(".alignments.tsv")
+        artifacts = ArtifactSet.from_outspec(resolved_out).with_extra(
             "alignments", alignment_file
         )
         ref_source = reference
@@ -449,13 +454,13 @@ class BioAligner:
         runner = self.align_and_annotate_variant(
             sequence_paths=sequence_paths,
             reference_source=ref_source,
-            variants_out=out.files,
+            variants_out=resolved_out.files,
             alignments_out=[alignment_file],
             par=par,
         )
 
         determinants = self.determinants + _overlay_signature_determinants(par)
-        key = Element.generate_key(tag, "BioAligner", "align")
+        key = Element.generate_key(resolved_tag, "BioAligner", "align")
         pres = (
             (sequences,)
             if not isinstance(reference, (Element, FileSource))
@@ -464,7 +469,7 @@ class BioAligner:
         return Element(
             key,
             runner,
-            tag=tag,
+            tag=resolved_tag,
             artifacts=artifacts,
             determinants=determinants,
             pres=pres,
@@ -487,7 +492,7 @@ class BioAligner:
         if isinstance(reference, (Element, FileSource)):
             ref_source = reference.file
             pres = (reference,)
-            tag = reference.tag.bump(
+            resolved_tag = reference.tag.bump(
                 stage=Stage.ANALYSIS,
                 method=Method.BIO,
                 state=State.PROCESSED,
@@ -496,7 +501,7 @@ class BioAligner:
         else:
             ref_source = reference
             pres = ()
-            tag = ElementTag(
+            resolved_tag = ElementTag(
                 root="references",
                 level=0,
                 stage=Stage.ANALYSIS,
@@ -506,19 +511,21 @@ class BioAligner:
                 flag="fetchref",
             )
 
-        out = OutputSpec.from_tag(tag, Out(folder=Path("cache/references"), ext="tsv"))
-        artifacts = ArtifactSet.from_outspec(out)
+        resolved_out = OutputSpec.from_tag(
+            resolved_tag, Out(folder=Path("cache/references"), ext="tsv")
+        )
+        artifacts = ArtifactSet.from_outspec(resolved_out)
         runner = self.fetch_references(
             reference_source=ref_source,
-            outfiles=out.files,
+            outfiles=resolved_out.files,
             par=par,
         )
         determinants = self.determinants + _overlay_signature_determinants(par)
-        key = Element.generate_key(tag, "BioAligner", "align")
+        key = Element.generate_key(resolved_tag, "BioAligner", "align")
         return Element(
             key,
             runner,
-            tag=tag,
+            tag=resolved_tag,
             artifacts=artifacts,
             determinants=determinants,
             pres=pres,
@@ -946,7 +953,7 @@ class BioAligner:
                 reference_aligned=reference_aligned,
                 query_aligned=query_aligned,
                 chrom=chrom,
-                reference_start=reference_start, # """1-based genomic start position of the amplicon."""
+                reference_start=reference_start,  # """1-based genomic start position of the amplicon."""
                 left_trim=left_trim,
                 right_trim=right_trim,
             )
@@ -995,7 +1002,14 @@ class BioAligner:
 
         return DataFrame.from_records(variant_rows)
 
-    def get_left_right_trim(self, left_query_gap: int, right_query_gap: int, left_target_gap: int, right_target_gap: int, strand: int) -> tuple[int, int]:
+    def get_left_right_trim(
+        self,
+        left_query_gap: int,
+        right_query_gap: int,
+        left_target_gap: int,
+        right_target_gap: int,
+        strand: int,
+    ) -> tuple[int, int]:
         # Ignore terminal gaps in either sequence.
         left_trim = max(left_query_gap, left_target_gap)
         right_trim = max(right_query_gap, right_target_gap)
@@ -1004,7 +1018,9 @@ class BioAligner:
 
         return left_trim, right_trim
 
-    def get_forward_strand_aligned(self, reference_aligned: str, query_aligned: str, strand: int) -> tuple[str, str]:
+    def get_forward_strand_aligned(
+        self, reference_aligned: str, query_aligned: str, strand: int
+    ) -> tuple[str, str]:
         """Return the aligned sequences oriented to the forward strand."""
         if strand == -1:
             reference_aligned = reverse_complement_gapped(reference_aligned)
@@ -1048,10 +1064,7 @@ class BioAligner:
             )
 
         # Number of reference bases before the retained alignment region.
-        ref_index = sum(
-            base != "-"
-            for base in reference_aligned[:start]
-        )
+        ref_index = sum(base != "-" for base in reference_aligned[:start])
 
         variants: list[Variant] = []
         i = start
@@ -1120,11 +1133,7 @@ class BioAligner:
             ref_base = reference_aligned[alignment_index]
             query_base = query_aligned[alignment_index]
 
-            if (
-                ref_base == "-"
-                or query_base == "-"
-                or ref_base == query_base
-            ):
+            if ref_base == "-" or query_base == "-" or ref_base == query_base:
                 break
 
             reference_bases.append(ref_base)

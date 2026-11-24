@@ -5,20 +5,26 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from subprocess import CompletedProcess
-from typing import Callable, Mapping
+from typing import Mapping, cast
 
+from mmalignments.models.artifacts import ArtifactSet
 from mmalignments.models.elements import (
     Element,
-    NextGenSampleElement,
+    FastqArtifact,
+    NextGenSample,
     element,
-    sample_fastqs,
 )
-from mmalignments.models.tags import ElementTag, Method, Stage, State
-from mmalignments.models.tags import PartialElementTag as Tag
+from mmalignments.models.overlay import (
+    CfgType,
+    OutSpec,
+    OutType,
+    ParType,
+    TagType,
+)
+from mmalignments.models.tags import Method, Stage, State
 
 from ..externals import External, ExternalRunConfig, subroutine, SubroutineIn
-from ..parameters import Params, ParamSet
+from ..parameters import ParamSet
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +86,7 @@ class FastP(External):
     def __init__(
         self,
         name: str = "fastp",
-        primary_binary: str = "./code/fastp",  # replace with "fastp" if fastp in PATH
+        primary_binary: str = "fastp",
         version: str | None = None,
         source: str = "https://github.com/OpenGene/fastp",
         parameters: Mapping[str, ParamSet] | ParamSet | str | Path | None = None,
@@ -161,8 +167,8 @@ class FastP(External):
         json_out: Path | str,
         html_out: Path | str,
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Run fastp quality control and filtering (low-level).
 
@@ -183,7 +189,7 @@ class FastP(External):
             Output JSON report file.
         html_out : Path | str
             Output HTML report file.
-        params : Params | None
+        par : ParType | None
             Additional fastp parameters (e.g., {"--qualified_quality_phred": 20}).
 
         Returns
@@ -253,13 +259,12 @@ class FastP(External):
     @element
     def qc(
         self,
-        sample: NextGenSampleElement,
+        sample: NextGenSample,
         *,
-        tag: Tag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Run fastp quality control and filtering (high-level).
 
@@ -271,18 +276,15 @@ class FastP(External):
         ----------
         sample : Sample | Element
             Sample or Element containing FASTQ file paths and metadata.
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default
-            naming. If not provided, a default tag will be generated based on
-            the input Element's name.
-        outdir : Path | str | None
-            Directory for the sorted BAM file. If not provided, defaults to
-            the same directory as the input BAM file.
-        filename : Path | str | None
-            Filename override. If not provided, defaults to ``tag.default_output``.
-        params : Params | None
+        tag : TagType | None
+            Tag override for the output Element.
+        out : OutType | None
+            Output specification override. The primary file is the cleaned R1
+            FASTQ (default ext ``R1.fastq.gz``); R2, JSON and HTML names are
+            derived from it. Defaults to ``<sample.result_dir>/qc/fastp``.
+        par : ParType | None
             Additional fastp parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Configuration for running the fastp command (e.g., working
             directory, threads).
 
@@ -292,76 +294,69 @@ class FastP(External):
             An Element that executes fastp when run. Artifacts include:
             - fastq_r1: Cleaned R1 FASTQ file
             - fastq_r2: Cleaned R2 FASTQ file (if paired-end)
-            - fastp_json: JSON report
-            - fastp_html: HTML report
-            - sample_name: Sample name string
+            - json: JSON report
+            - html: HTML report
 
         Examples
         --------
         >>> fastp = FastP()
         >>> from mmalignments.models.externals import ExternalRunConfig
-        >>> sample = Sample(name="my_sample", pairing="paired",
-        ...                 fastq_r1_path="raw_R1.fastq.gz",
-        ...                 fastq_r2_path="raw_R2.fastq.gz")
         >>> fastp_elem = fastp.qc(sample, cfg=ExternalRunConfig(threads=8))
         >>> fastp_elem.run()
+        >>> fastp_elem, sample
         """
-        tag = ElementTag(
-            root=sample.root,
-            level=sample.tag.level + 1,
+        resolved_tag = sample.tag.bump(
             stage=Stage.PREP,
             method=Method.FASTP,
             state=State.TRIM,
-            omics=sample.tag.omics,
-            ext=".R1.fastq.gz",
-        ).merge(tag)
-        fastq_r1, fastq_r2, _, _ = sample_fastqs(sample)
+        ).resolve(tag)
 
-        outdir = Path(outdir or sample.result_dir / "qc" / "fastp")
-        filename = filename or tag.default_output
-        params = params or Params(thread=10)
-        cfg = cfg or ExternalRunConfig(threads=params.get("thread", 10))
-        # Extract FASTQ paths from Sample or Element
+        resolved_out = OutSpec.from_tag(resolved_tag).resolve(
+            OutSpec(folder=sample.result_dir / "qc" / "fastp", ext="R1.fastq.gz"),
+            out,
+        )
+        resolved_par = par or ParType(thread=10)
+        resolved_cfg = cfg or ExternalRunConfig(
+            threads=cast(int, resolved_par.get("thread", 10))
+        )
 
         # Define output paths
-        out_r1 = outdir / filename
+        out_r1 = resolved_out.file
         json_out = out_r1.with_name(out_r1.name.replace(".fastq.gz", ".json"))
         html_out = out_r1.with_name(out_r1.name.replace(".fastq.gz", ".html"))
         # Build artifacts
         out_r2 = (
-            out_r1.with_name(out_r1.name.replace(".R1.", ".R2.")) if fastq_r2 else None
+            out_r1.with_name(out_r1.name.replace(".R1.", ".R2.")) if sample.r2 else None
         )
-        input_files = [fastq_r1]
-        artifacts = {
-            "fastq_r1": out_r1,
-            "json": json_out,
-            "html": html_out,
-        }
-        if fastq_r2 and out_r2:
-            artifacts["fastq_r2"] = out_r2
-            input_files.append(fastq_r2)
+        input_files = [sample.r1]
+        extras = {"json": json_out, "html": html_out, "fastq_r1": out_r1}
+        if sample.r2 and out_r2:
+            extras["fastq_r2"] = out_r2
+            input_files.append(sample.r2)
+        trimmed_fastq_source = FastqArtifact(out_r1, out_r2)
+        artifacts = ArtifactSet(trimmed_fastq_source, primary_name="source", **extras)
 
         # Build runner
         runner = self.run_fastp(
-            fastq_r1=fastq_r1,
-            fastq_r2=fastq_r2,
+            fastq_r1=sample.r1,
+            fastq_r2=sample.r2 if sample.r2 else None,
             out_r1=out_r1,
             out_r2=out_r2,
             json_out=json_out,
             html_out=html_out,
-            params=params,
-            cfg=cfg,
+            par=par,
+            cfg=resolved_cfg,
         )
 
         # Build prerequisites list
         pres = [sample] if isinstance(sample, Element) else []
         # determinants
-        determinants = self.signature_determinants(params)
-        key = f"{tag.default_name}_fastp_qc_{self.version_name}"
+        determinants = self.signature_determinants(par)
+        key = Element.generate_key(resolved_tag, self.version_name, "qc")
         return Element(
-            key=key,
-            run=runner,
-            tag=tag,
+            key,
+            runner,
+            tag=resolved_tag,
             determinants=determinants,
             inputs=tuple(input_files),
             artifacts=artifacts,

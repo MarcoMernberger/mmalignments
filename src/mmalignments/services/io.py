@@ -5,11 +5,13 @@ from __future__ import annotations
 import gzip
 import json
 import subprocess
+from csv import QUOTE_NONE
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 import pandas as pd  # type: ignore[import]
 import pyarrow.parquet as pq  # type: ignore[import]
+import re  # type: ignore[import]
 from Bio import SeqIO  # type: ignore[import]
 from matplotlib.figure import Figure  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
@@ -580,3 +582,37 @@ def read_sequence_file(sequence_path: Path) -> DataFrame:
         return fastq_to_dataframe(sequence_path)
     else:
         raise ValueError(f"Unsupported sequence file type: {sequence_path.suffix}")
+
+
+def safe_name(value: str | int) -> str:
+    """Return a path-safe identifier while preserving readable block names."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_") or "dummy_safe"
+
+
+def read_vcf(path: Path) -> DataFrame:
+    """Read a plain or gzipped VCF, preserving header and sample names."""
+    path = Path(path)
+    opener = gzip.open if path.suffix in {".gz", ".bgz", ".bgzf"} else open
+    fixed_columns = ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO"]
+    with opener(path, "rt") as handle:
+        for line in handle:
+            if line.startswith("##"):
+                continue
+            if not line.startswith("#CHROM\t"):
+                break
+            columns = line[1:].rstrip("\r\n").split("\t")
+            if (
+                columns[:8] != fixed_columns
+                or (len(columns) > 8 and columns[8] != "FORMAT")
+                or len(columns) != len(set(columns))
+            ):
+                raise ValueError(f"Invalid VCF header in {path}")
+            return pd.read_csv(
+                handle,
+                sep="\t",
+                names=columns,
+                dtype={column: int if column == "POS" else str for column in columns},
+                keep_default_na=False,
+                quoting=QUOTE_NONE,
+            )
+    raise ValueError(f"Missing #CHROM header in {path}")

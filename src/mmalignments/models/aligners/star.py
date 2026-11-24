@@ -1,4 +1,7 @@
-"""Module contains an aligner interface for STAR (Spliced Transcripts Alignment to a Reference)."""
+"""
+Module contains an aligner interface for STAR  (Spliced Transcripts Alignment to a
+Reference).
+"""
 
 from __future__ import annotations
 
@@ -6,30 +9,36 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from subprocess import CompletedProcess
-from typing import Callable, Mapping
+from typing import Mapping
 
+from mmalignments.models.artifacts import ArtifactSet
 from mmalignments.models.data import Genome
 from mmalignments.models.elements import (
     Element,
     MappedElement,
-    NextGenSampleElement,
+    NextGenSample,
     element,
-    sample_fastqs,
+)
+from mmalignments.models.overlay import (
+    CfgType,
+    ElementTag,
+    OutSpec,
+    OutType,
+    ParType,
+    SpecValues,
+    TagType,
+    pick_spec,
 )
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
     Omics,
-    PartialElementTag,
     Stage,
     State,
-    from_prior,
 )
 from mmalignments.services.io import parents
 
-from ..externals import External, ExternalRunConfig, SubroutineIn, subroutine
-from ..parameters import Params, ParamSet
+from ..externals import External, SubroutineIn, subroutine
+from ..parameters import ParamSet
 from .samtools import Samtools
 
 logger = logging.getLogger(__name__)
@@ -89,14 +98,14 @@ class STAR(External):
 
         mapped = star.align(
             sample, idx,
-            params=Params(twopassMode="Basic", quantMode="GeneCounts"),
+            par=ParType(twopassMode="Basic", quantMode="GeneCounts"),
         )
 
     STARsolo (single-cell)::
 
         mapped = star.align(
             sample, idx,
-            params=Params(
+            par=ParType(
                 soloType="CB_UMI_Simple",
                 soloCBwhitelist="barcodes.txt",
                 soloCBlen=16,
@@ -194,11 +203,7 @@ class STAR(External):
     def default_aligned_dir(self, sample_name: str, genome_name: str) -> Path:
         """Return the default output directory for an alignment run."""
         return (
-            Path("results")
-            / "aligned"
-            / self.version_name
-            / genome_name
-            / sample_name
+            Path("results") / "aligned" / self.version_name / genome_name / sample_name
         )
 
     def genome_files(self, genome_dir: Path) -> list[Path]:
@@ -225,9 +230,9 @@ class STAR(External):
         gtf: Path | str | None = None,
         output_dir: Path | str | None = None,
         sjdb_overhang: int = 100,
-        tag: PartialElementTag | ElementTag | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Build a STAR genome index.
 
@@ -246,11 +251,11 @@ class STAR(External):
             Directory for genome index files.  Auto-derived when ``None``.
         sjdb_overhang : int
             ``--sjdbOverhang`` value (ideally read_length - 1).
-        tag : PartialElementTag | ElementTag | None
+        tag : TagType | None
             Tag override for naming / provenance.
-        params : Params | None
+        par : ParType | None
             Additional ``genomeGenerate`` parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional subprocess configuration (threads, env, …).
 
         Returns
@@ -267,36 +272,34 @@ class STAR(External):
             genome_dir=output_dir,
             gtf=gtf_path,
             sjdb_overhang=sjdb_overhang,
-            params=params,
+            par=par,
             cfg=cfg,
         )
 
-        tag = ElementTag(
+        resolved_tag = ElementTag(
             root=genome.name,
             level=1,
             omics=Omics.RNA,
             stage=Stage.PREP,
             method=Method.STAR,
             state=State.INDEX,
-            ext=None,
-        ).merge(tag)
+        ).resolve(tag)
 
-        artifacts: dict = {"genome_dir": output_dir}
+        artifacts = ArtifactSet(output_dir, primary_name="genome_dir")
         if gtf_path:
-            artifacts["gtf"] = gtf_path
+            artifacts = artifacts.with_extra("gtf", gtf_path)
 
         in_paths = [fasta_file] + ([gtf_path] if gtf_path else [])
-        determinants = self.signature_determinants(params, subroutine="genomeGenerate")
-        key, name = self.build_element_name(tag, "genomeGenerate")
+        determinants = self.signature_determinants(par, subroutine="genomeGenerate")
+        key = Element.generate_key(resolved_tag, self.version_name, "genomeGenerate")
 
         return Element(
             key,
             runner,
-            tag=tag,
+            tag=resolved_tag,
             artifacts=artifacts,
             determinants=determinants,
             inputs=tuple(in_paths),
-            name=name,
         )
 
     # ------------------------------------------------------------------
@@ -311,8 +314,8 @@ class STAR(External):
         *,
         gtf: Path | str | None = None,
         sjdb_overhang: int = 100,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Run ``STAR --runMode genomeGenerate``.
 
@@ -326,9 +329,9 @@ class STAR(External):
             Optional GTF annotation file.
         sjdb_overhang : int
             ``--sjdbOverhang`` value.
-        params : Params | None
+        par : ParType | None
             Additional parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional subprocess configuration.
 
         Returns
@@ -340,10 +343,14 @@ class STAR(External):
         parents(genome_dir / "_placeholder")  # ensure dir exists
 
         arguments = [
-            "--runMode", "genomeGenerate",
-            "--genomeDir", str(genome_dir),
-            "--genomeFastaFiles", str(fasta_file),
-            "--sjdbOverhang", str(sjdb_overhang),
+            "--runMode",
+            "genomeGenerate",
+            "--genomeDir",
+            str(genome_dir),
+            "--genomeFastaFiles",
+            str(fasta_file),
+            "--sjdbOverhang",
+            str(sjdb_overhang),
         ]
 
         in_paths: list[Path] = [fasta_file]
@@ -363,37 +370,39 @@ class STAR(External):
     @element
     def align(
         self,
-        sample: NextGenSampleElement,
+        sample: NextGenSample,
         index: Element,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
         read_group: str | None = None,
         sorted_bam: bool = True,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> MappedElement:
         """Align FASTQ reads with STAR (``--runMode alignReads``).
 
         Parameters
         ----------
-        sample : NextGenSampleElement
+        sample : NextGenSample
             Element carrying R1 (and optional R2) FASTQ paths.
         index : Element
             Genome index element produced by :meth:`index`.  Must expose
             ``element.genome_dir``.
-        tag : PartialElementTag | ElementTag | None
+        tag : TagType | None
             Tag override.
-        outdir : Path | str | None
-            Output directory.  Auto-derived when ``None``.
+        out : OutType | None
+            Output specification override.  STAR writes all files with fixed
+            names, so only ``out.folder`` is used; it is auto-derived when not
+            given.
         read_group : str | None
             ``--outSAMattrRGline`` value.  Auto-generated when ``None``.
         sorted_bam : bool
             When ``True`` (default), ``--outSAMtype BAM SortedByCoordinate``
             is used.  Set to ``False`` for unsorted BAM output.
-        params : Params | None
+        par : ParType | None
             Additional ``alignReads`` parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional subprocess configuration.
 
         Returns
@@ -404,50 +413,58 @@ class STAR(External):
             sorted.
         """
         genome_dir = Path(index.genome_dir).absolute()
-        fastq_r1, fastq_r2, sample_name, _ = sample_fastqs(sample)
 
-        tag = from_prior(
-            sample.tag,
-            tag,
+        resolved_tag = sample.tag.bump(
             stage=Stage.ALIGN,
             method=Method.STAR,
             state=State.MAP,
             omics=Omics.RNA,
-            ext="bam",
             flag=index.tag.root,
-        )
+        ).resolve(tag)
 
-        outdir = Path(outdir or self.default_aligned_dir(sample_name, index.tag.root))
-        rg = read_group or self.rg(sample_name)
+        resolved_out = OutSpec.from_tag(resolved_tag).resolve(
+            OutSpec(
+                folder=self.default_aligned_dir(sample.root, index.tag.root),
+                ext="bam",
+            ),
+            out,
+        )
+        outdir = Path(resolved_out.folder)
 
         runner = self.align_fastq(
             genome_dir=genome_dir,
-            fastq_r1=fastq_r1,
-            fastq_r2=fastq_r2,
+            fastq_r1=sample.r1,
+            fastq_r2=sample.r2,
             outdir=outdir,
-            read_group=rg,
+            read_group=sample.read_group,
             sorted_bam=sorted_bam,
-            params=params,
+            par=par,
             cfg=cfg,
         )
 
         output_map = _ALIGN_OUTPUTS if sorted_bam else _ALIGN_OUTPUTS_UNSORTED
-        artifacts = {k: outdir / v for k, v in output_map.items()}
+        extras = {k: outdir / v for k, v in output_map.items() if k != "bam"}
+        artifacts = ArtifactSet(
+            outdir / output_map["bam"], primary_name="bam", **extras
+        )
 
-        determinants = self.signature_determinants(params, subroutine="alignReads")
-        key, name = self.build_element_name(
-            tag, "alignReads", genome=genome_dir.name, rg=rg
+        determinants = self.signature_determinants(par, subroutine="alignReads")
+        key = Element.generate_key(
+            resolved_tag,
+            self.version_name,
+            "alignReads",
+            genome=genome_dir.name,
+            rg=sample.read_group,
         )
 
         return MappedElement(
             key,
             runner,
-            tag=tag,
+            tag=resolved_tag,
             determinants=determinants,
-            inputs=(fastq_r1, fastq_r2) if fastq_r2 else (fastq_r1,),
+            inputs=(sample.r1, sample.r2) if sample.r2 else (sample.r1,),
             artifacts=artifacts,
             pres=(index,),
-            name=name,
         )
 
     # ------------------------------------------------------------------
@@ -464,8 +481,8 @@ class STAR(External):
         fastq_r2: Path | str | None = None,
         read_group: str | None = None,
         sorted_bam: bool = True,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Low-level STAR alignment subroutine.
 
@@ -487,9 +504,9 @@ class STAR(External):
             ``--outSAMattrRGline`` string.
         sorted_bam : bool
             ``True`` → ``BAM SortedByCoordinate``; ``False`` → ``BAM Unsorted``.
-        params : Params | None
+        par : ParType | None
             Additional parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional subprocess configuration.
 
         Returns
@@ -511,11 +528,16 @@ class STAR(External):
         bam_sort_type = "BAM SortedByCoordinate" if sorted_bam else "BAM Unsorted"
 
         arguments = [
-            "--runMode", "alignReads",
-            "--genomeDir", str(genome_dir),
-            "--outFileNamePrefix", out_prefix,
-            "--outSAMtype", bam_sort_type,
-            "--readFilesIn", str(fastq_r1),
+            "--runMode",
+            "alignReads",
+            "--genomeDir",
+            str(genome_dir),
+            "--outFileNamePrefix",
+            out_prefix,
+            "--outSAMtype",
+            bam_sort_type,
+            "--readFilesIn",
+            str(fastq_r1),
         ]
         if fastq_r2:
             arguments.append(str(Path(fastq_r2).absolute()))
@@ -546,10 +568,10 @@ class STAR(External):
         bam: Element,
         *,
         wig_type: str = "bedGraph",
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Generate a wiggle/bedGraph from an existing sorted BAM.
 
@@ -562,13 +584,14 @@ class STAR(External):
         wig_type : str
             ``--outWigType`` value, e.g. ``"bedGraph"`` or
             ``"bedGraph read1_5p"``.
-        tag : PartialElementTag | ElementTag | None
+        tag : TagType | None
             Tag override.
-        outdir : Path | str | None
-            Output directory.
-        params : Params | None
+        out : OutType | None
+            Output specification override.  Only ``out.folder`` is used
+            (STAR fixes the file names).
+        par : ParType | None
             Additional parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional subprocess configuration.
 
         Returns
@@ -577,43 +600,46 @@ class STAR(External):
             Artifacts: ``{"wig_plus": Path, "wig_minus": Path}``.
         """
         bam_file = Path(bam.bam).absolute()
-        outdir = Path(outdir or bam_file.parent / "wig").absolute()
 
-        tag = from_prior(
-            bam.tag,
-            tag,
+        resolved_tag = bam.tag.bump(
             stage=Stage.ALIGN,
             method=Method.STAR,
             state=State.STAT,
-            ext="bedGraph",
+        ).resolve(tag)
+
+        resolved_out = OutSpec.from_tag(resolved_tag).resolve(
+            OutSpec(folder=bam_file.parent / "wig", ext="bedGraph"), out
         )
+        outdir = Path(resolved_out.folder).absolute()
 
         runner = self.bam_to_wig(
             bam_file=bam_file,
             outdir=outdir,
             wig_type=wig_type,
-            params=params,
+            par=par,
             cfg=cfg,
         )
 
         # STAR produces Stranded files by default
-        artifacts = {
-            "wig_plus": outdir / "Signal.Unique.str1.out.bg",
-            "wig_minus": outdir / "Signal.Unique.str2.out.bg",
-        }
+        artifacts = ArtifactSet(
+            outdir / "Signal.Unique.str1.out.bg",
+            primary_name="wig_plus",
+            wig_minus=outdir / "Signal.Unique.str2.out.bg",
+        )
 
-        determinants = self.signature_determinants(params, subroutine="alignReads")
-        key, name = self.build_element_name(tag, "inputAlignmentsFromBAM")
+        determinants = self.signature_determinants(par, subroutine="alignReads")
+        key = Element.generate_key(
+            resolved_tag, self.version_name, "inputAlignmentsFromBAM"
+        )
 
         return Element(
             key,
             runner,
-            tag=tag,
+            tag=resolved_tag,
             determinants=determinants,
             inputs=(bam_file,),
             artifacts=artifacts,
             pres=(bam,),
-            name=name,
         )
 
     @subroutine
@@ -623,8 +649,8 @@ class STAR(External):
         outdir: Path | str,
         *,
         wig_type: str = "bedGraph",
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Run ``STAR --runMode inputAlignmentsFromBAM``.
 
@@ -636,9 +662,9 @@ class STAR(External):
             Output directory.
         wig_type : str
             ``--outWigType`` value.
-        params : Params | None
+        par : ParType | None
             Additional parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional subprocess configuration.
 
         Returns
@@ -650,10 +676,14 @@ class STAR(External):
         parents(outdir / "_placeholder")
 
         arguments = [
-            "--runMode", "inputAlignmentsFromBAM",
-            "--inputBAMfile", str(bam_file),
-            "--outFileNamePrefix", str(outdir) + "/",
-            "--outWigType", wig_type,
+            "--runMode",
+            "inputAlignmentsFromBAM",
+            "--inputBAMfile",
+            str(bam_file),
+            "--outFileNamePrefix",
+            str(outdir) + "/",
+            "--outWigType",
+            wig_type,
         ]
 
         out_paths = [
@@ -674,10 +704,10 @@ class STAR(External):
         gtf: Path | str,
         chain_files: list[Path | str],
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Lift-over a GTF file between genome assemblies (``--runMode liftOver``).
 
@@ -687,13 +717,14 @@ class STAR(External):
             GTF file to lift over.
         chain_files : list[Path | str]
             One or more chain files.
-        tag : PartialElementTag | ElementTag | None
+        tag : TagType | None
             Tag override.
-        outdir : Path | str | None
-            Output directory.
-        params : Params | None
+        out : OutType | None
+            Output specification override.  Only ``out.folder`` is used
+            (STAR fixes the file name).
+        par : ParType | None
             Additional parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional subprocess configuration.
 
         Returns
@@ -702,41 +733,41 @@ class STAR(External):
             Artifacts: ``{"gtf": Path}`` — lifted-over GTF.
         """
         gtf = Path(gtf).absolute()
-        outdir = Path(outdir or gtf.parent / "liftover").absolute()
         chain_paths = [Path(c).absolute() for c in chain_files]
 
-        tag_default = ElementTag(
+        resolved_tag = ElementTag(
             root=gtf.stem,
             level=1,
             omics=Omics.RNA,
             stage=Stage.PREP,
             method=Method.STAR,
             state=State.ANNOTATE,
-            ext="gtf",
+        ).resolve(tag)
+
+        resolved_out = OutSpec.from_tag(resolved_tag).resolve(
+            OutSpec(folder=gtf.parent / "liftover", ext="gtf"), out
         )
-        tag = tag_default.merge(tag)
+        outdir = Path(resolved_out.folder).absolute()
 
         runner = self.run_liftover(
             gtf=gtf,
             chain_files=chain_paths,
             outdir=outdir,
-            params=params,
+            par=par,
             cfg=cfg,
         )
 
         out_gtf = outdir / (gtf.stem + ".liftOver.gtf")
-        artifacts = {"gtf": out_gtf}
 
         in_paths = [gtf] + chain_paths
-        key, name = self.build_element_name(tag, "liftOver")
+        key = Element.generate_key(resolved_tag, self.version_name, "liftOver")
 
         return Element(
             key,
             runner,
-            tag=tag,
+            tag=resolved_tag,
             inputs=tuple(in_paths),
-            artifacts=artifacts,
-            name=name,
+            artifacts=ArtifactSet(out_gtf, primary_name="gtf"),
         )
 
     @subroutine
@@ -746,8 +777,8 @@ class STAR(External):
         chain_files: list[Path],
         outdir: Path | str,
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Run ``STAR --runMode liftOver``.
 
@@ -759,9 +790,9 @@ class STAR(External):
             Chain files for liftover.
         outdir : Path | str
             Output directory.
-        params : Params | None
+        par : ParType | None
             Additional parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional subprocess configuration.
 
         Returns
@@ -773,10 +804,14 @@ class STAR(External):
         parents(outdir / "_placeholder")
 
         arguments = [
-            "--runMode", "liftOver",
-            "--sjdbGTFfile", str(gtf),
-            "--genomeChainFiles", *[str(c) for c in chain_files],
-            "--outFileNamePrefix", str(outdir) + "/",
+            "--runMode",
+            "liftOver",
+            "--sjdbGTFfile",
+            str(gtf),
+            "--genomeChainFiles",
+            *[str(c) for c in chain_files],
+            "--outFileNamePrefix",
+            str(outdir) + "/",
         ]
 
         out_gtf = outdir / (gtf.stem + ".liftOver.gtf")
@@ -791,13 +826,14 @@ class STAR(External):
 
     def alignsort(
         self,
-        sample: NextGenSampleElement,
+        sample: NextGenSample,
         index: Element,
         *,
-        outdir: Path | str | None = None,
         read_group: str | None = None,
-        parameters: Mapping[str, Params] | None = None,
-        cfgs: Mapping[str, ExternalRunConfig] | None = None,
+        tag: TagType | SpecValues[TagType] | None = None,
+        out: OutType | SpecValues[OutType] | None = None,
+        par: ParType | SpecValues[ParType] | None = None,
+        cfg: CfgType | SpecValues[CfgType] | None = None,
     ) -> tuple[Element, Element, Element]:
         """Align, then sort + index the BAM using Samtools.
 
@@ -806,19 +842,15 @@ class STAR(External):
 
         Parameters
         ----------
-        sample : NextGenSampleElement
+        sample : NextGenSample
             Input sample.
         index : Element
             STAR genome index element.
-        outdir : Path | str | None
-            Output directory (shared for align and sort steps).
         read_group : str | None
             Read group string.
-        parameters : Mapping[str, Params] | None
-            Per-step parameter overrides keyed by ``"alignReads"``,
-            ``"sort"``, ``"index"``.
-        cfgs : Mapping[str, ExternalRunConfig] | None
-            Per-step run-config overrides using the same keys.
+        tag, out, par, cfg
+            Overrides, optionally per step (``align``, ``sort``, ``index``)
+            via ``SpecValues``.
 
         Returns
         -------
@@ -826,29 +858,30 @@ class STAR(External):
             ``(sorted_bam, sorted_bam_index, raw_mapped)`` — first entry is
             the terminal Element of the chain.
         """
-        parameters = parameters or {}
-        cfgs = cfgs or {}
-
         mapped = self.align(
             sample=sample,
             index=index,
-            outdir=outdir,
+            tag=pick_spec(tag, "align"),
+            out=pick_spec(out, "align"),
             read_group=read_group,
-            params=parameters.get("alignReads"),
-            cfg=cfgs.get("alignReads"),
+            par=pick_spec(par, "align"),
+            cfg=pick_spec(cfg, "align"),
         )
 
         st = Samtools()
         mapped_sorted = st.sort(
             mapped=mapped,
-            outdir=outdir,
-            params=parameters.get("sort"),
-            cfg=cfgs.get("sort"),
+            tag=pick_spec(tag, "sort"),
+            out=pick_spec(out, "sort"),
+            par=pick_spec(par, "sort"),
+            cfg=pick_spec(cfg, "sort"),
         )
         mapped_sorted_index = st.index(
             mapped=mapped_sorted,
-            params=parameters.get("index"),
-            cfg=cfgs.get("index"),
+            tag=pick_spec(tag, "index"),
+            out=pick_spec(out, "index"),
+            par=pick_spec(par, "index"),
+            cfg=pick_spec(cfg, "index"),
         )
 
         return mapped_sorted, mapped_sorted_index, mapped

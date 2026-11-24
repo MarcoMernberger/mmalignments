@@ -20,6 +20,8 @@ from mmalignments.models.overlay import (  # type: ignore[import]
     PartialElementTag,
     PartialExternalRunConfig,
     PartialOutputSpec,
+    SpecValues,
+    pick_spec,
 )
 from mmalignments.models.tags import Method, Omics, Stage, State  # type: ignore[import]
 
@@ -193,6 +195,47 @@ def test_params_mapping_and_patching() -> None:
     assert resolved.to_dict(drop_none=False) == {"a": 5, "b": None, "c": None}
     assert resolved.to_dict() == {"a": 5}
     assert isinstance(params, Mapping)
+
+
+def test_spec_values_resolve_overrides_defaults_and_falsy_values() -> None:
+    specs = SpecValues[object](
+        default=10,
+        valid_steps=("count", "false", "empty", "match", "default", "get"),
+        values={
+            "count": 0,
+            "false": False,
+            "empty": {},
+            "match": None,
+            "default": 20,
+            "get": 30,
+        },
+    )
+
+    assert specs.get("count") == 0
+    assert specs.get("false") is False
+    assert specs.get("empty") == {}
+    assert specs.get("match") == 10
+    assert specs.get("default") == 20
+    assert specs.get("get") == 30
+    assert pick_spec(specs, "match") == 10
+    assert pick_spec(5, "match") == 5
+    assert pick_spec(None, "match") is None
+
+    with pytest.raises(TypeError):
+        specs.values["count"] = 1  # type: ignore[index]
+
+
+def test_spec_values_reject_invalid_steps() -> None:
+    with pytest.raises(ValueError, match="Unknown override step"):
+        SpecValues(
+            default=None,
+            valid_steps=("configure", "process"),
+            values={"proces": object()},
+        )
+
+    specs = SpecValues(default=None, valid_steps=("configure", "process"))
+    with pytest.raises(KeyError, match="Unknown step"):
+        specs.get("proces")
 
 
 def test_output_specs_and_filespec_resolution() -> None:
