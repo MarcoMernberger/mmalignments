@@ -1128,15 +1128,22 @@ class MmFqCount(External):
         id_col : str
             ID column in the predefined TSV. Default: ``"Name"``.
         tag : TagType | SpecValues[TagType] | None
-            Tag override (propagated to both elements).
+            Tag shared by both steps or overridden for ``"count"`` and/or
+            ``"match"``.
         out : OutType | SpecValues[OutType] | None
-            Output specification overrides.
+            Output specification shared by both steps or overridden per step.
         par : ParType | SpecValues[ParType] | None
-            Trimming parameters for the ``count`` step.
-        par : ParType | SpecValues[ParType] | None
-            Column parameters for the ``match`` step.
-        cfg : CfgType |None
-            Subprocess configuration (shared by both steps).
+            Parameters shared by both steps or overridden per step.
+        cfg : CfgType | SpecValues[CfgType] | None
+            Subprocess configuration shared by both steps or overridden per
+            step.
+
+        Notes
+        -----
+        The step names are ``"count"`` and ``"match"``. Construct a
+        ``SpecValues`` with ``valid_steps=("count", "match")`` and put any
+        step-specific values in its ``values`` mapping. Missing overrides
+        fall back to ``default``; a plain value is shared by both steps.
 
         Returns
         -------

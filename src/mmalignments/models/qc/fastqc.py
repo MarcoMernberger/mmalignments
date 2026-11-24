@@ -5,20 +5,25 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from subprocess import CompletedProcess
-from typing import Callable, Mapping
+from typing import Mapping
 
+from mmalignments.models.artifacts import ArtifactSet
 from mmalignments.models.elements import (
     Element,
-    NextGenSampleElement,
+    NextGenSample,
     element,
-    sample_fastqs,
-    generate_element_key_name,
 )
-from mmalignments.models.tags import ElementTag, Method, Stage, State, PartialElementTag
+from mmalignments.models.overlay import (
+    CfgType,
+    OutSpec,
+    OutType,
+    ParType,
+    TagType,
+)
+from mmalignments.models.tags import Method, Stage, State
 
 from ..externals import External, ExternalRunConfig, subroutine, SubroutineIn
-from ..parameters import Params, ParamSet
+from ..parameters import ParamSet
 
 logger = logging.getLogger(__name__)
 
@@ -164,8 +169,8 @@ class FastQC(External):
         self,
         input_files: list[Path | str],
         output_dir: Path | str,
-        params: Params | None,
-        cfg: ExternalRunConfig | None = ExternalRunConfig(threads=10),
+        par: ParType | None,
+        cfg: CfgType | None,
     ) -> SubroutineIn:
         """Run FastQC on FASTQ files (low-level).
 
@@ -178,9 +183,9 @@ class FastQC(External):
             List of input FASTQ files to analyze.
         output_dir : Path | str
             Output directory for FastQC reports.
-        params : Params | None
-            Additional FastQC parameters (e.g., Params(threads=4, extract=True)).
-        cfg : ExternalRunConfig | None
+        par : ParType | None
+            Additional FastQC parameters (e.g., ParType(threads=4, extract=True)).
+        cfg : CfgType | None
             External run configuration (e.g., threads, working directory).
 
         Returns
@@ -195,7 +200,7 @@ class FastQC(External):
         >>> runner = fastqc.run_fastqc(
         ...     input_files=["sample_R1.fastq.gz", "sample_R2.fastq.gz"],
         ...     output_dir="qc_results/fastqc",
-        ...     params=Params(threads=4, extract=True),
+        ...     par=ParType(threads=4, extract=True),
         ...     cfg=ExternalRunConfig(threads=4),
         ... )
         >>> runner()
@@ -212,14 +217,13 @@ class FastQC(External):
     @element
     def qc(
         self,
-        sample: NextGenSampleElement,
+        sample: NextGenSample,
         label: str,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Run FastQC quality control (high-level).
 
@@ -228,23 +232,20 @@ class FastQC(External):
 
         Parameters
         ----------
-        sample : Sample | Element
-            Sample or Element containing FASTQ file paths and metadata.
+        sample : NextGenSample
+            NextGenSample containing FASTQ file paths and metadata.
         label : str
             Label for this QC run (e.g., "raw" or "cleaned").
-            Used in Element naming and key generation.
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default
-            naming. If not provided, a default tag will be generated based on
-            the input Element's name.
-        outdir : Path | str | None
-            Directory for the sorted BAM file. If not provided, defaults to
-            the same directory as the input BAM file.
-        filename : Path | str | None
-            Filename override. If not provided, defaults to ``tag.default_output``.
-        params : Params | None
+            Used as the tag flag.
+        tag : TagType | None
+            Tag override for the output Element.
+        out : OutType | None
+            Output specification override. Only ``out.folder`` is used
+            (FastQC names its files after the input files). Defaults to
+            ``<fastq dir>/qc/fastqc``.
+        par : ParType | None
             Additional FastQC parameters.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Configuration for running the FastQC command (e.g., working
             directory, threads).
 
@@ -252,82 +253,72 @@ class FastQC(External):
         -------
         Element
             An Element that executes FastQC when run. Artifacts include:
-            - fastqc_dir: Output directory
-            - fastqc_html_r1: HTML report for R1
-            - fastqc_zip_r1: ZIP archive for R1
-            - fastqc_html_r2: HTML report for R2 (if paired-end)
-            - fastqc_zip_r2: ZIP archive for R2 (if paired-end)
-            - fastq_r1: Input R1 FASTQ (for traceability)
-            - fastq_r2: Input R2 FASTQ (for traceability, if paired-end)
+            - html_r1: HTML report for R1
+            - zip_r1: ZIP archive for R1
+            - html_r2: HTML report for R2 (if paired-end)
+            - zip_r2: ZIP archive for R2 (if paired-end)
 
         Examples
         --------
         >>> fastqc = FastQC()
         >>> from mmalignments.models.externals import ExternalRunConfig
-        >>> sample = Sample(name="my_sample", pairing="paired",
-        ...                 fastq_r1_path="sample_R1.fastq.gz",
-        ...                 fastq_r2_path="sample_R2.fastq.gz")
         >>> fastqc_elem = fastqc.qc(
         ...     sample=sample,
-        ...     outdir="results/qc/my_sample/fastqc_raw",
+        ...     out=OutSpec(folder="results/qc/my_sample/fastqc_raw", ext="html"),
         ...     label="raw",
         ...     cfg=ExternalRunConfig(threads=4),
         ... )
         >>> fastqc_elem.run()
         """
-        params = params or Params(extract=False)
-        cfg = cfg or ExternalRunConfig()
-        tag = ElementTag(
-            root=sample.root,
-            level=sample.tag.level + 1,
+        par = par or ParType(extract=False)
+        resolved_cfg = cfg or ExternalRunConfig()
+        resolved_tag = sample.tag.bump(
             stage=Stage.QC,
             method=Method.FASTQC,
             state=State.REPORT,
-            omics=sample.tag.omics,
             flag=label,
-        ).merge(tag)
+        ).resolve(tag)
+
+        # Collect input files
+        input_files = [sample.r1, sample.r2] if sample.r2 else [sample.r1]
 
         # Prepare output folder
-        outdir = Path(outdir or sample.fastq_r1.parent / "qc" / "fastqc")
-        # Extract FASTQ paths from Sample or Element
-        fastq_r1, fastq_r2, _, _ = sample_fastqs(sample)
-        # Collect input files
-        input_files = [fastq_r1, fastq_r2] if fastq_r2 else [fastq_r1]
+        resolved_out = OutSpec.from_tag(resolved_tag).resolve(
+            OutSpec(folder=sample.r1.parent / "qc" / "fastqc", ext="html"), out
+        )
+        outdir = Path(resolved_out.folder)
 
         # Build runner
         runner = self.run_fastqc(
             input_files=input_files,
             output_dir=outdir,
-            params=params,
-            cfg=cfg,
+            par=par,
+            cfg=resolved_cfg,
         )
         # Build artifacts
         # FastQC names output files based on input filename
-        r1_base = self.get_base(fastq_r1)
-        artifacts = {
-            "html_r1": outdir / f"{r1_base}_fastqc.html",
-            "zip_r1": outdir / f"{r1_base}_fastqc.zip",
-        }
-        if fastq_r2:
-            r2_base = self.get_base(fastq_r2)
-            artifacts["html_r2"] = outdir / f"{r2_base}_fastqc.html"
-            artifacts["zip_r2"] = outdir / f"{r2_base}_fastqc.zip"
+        r1_base = self.get_base(sample.r1)
+        extras = {"zip_r1": outdir / f"{r1_base}_fastqc.zip"}
+        if sample.r2:
+            r2_base = self.get_base(sample.r2)
+            extras["html_r2"] = outdir / f"{r2_base}_fastqc.html"
+            extras["zip_r2"] = outdir / f"{r2_base}_fastqc.zip"
+        artifacts = ArtifactSet(
+            outdir / f"{r1_base}_fastqc.html", primary_name="html_r1", **extras
+        )
 
         # Build prerequisites list
         pres = [sample] if isinstance(sample, Element) else []
-        determinants = self.signature_determinants(params)
-        key, name = generate_element_key_name(
-            tag, self.name, self.version,
-        )
+        determinants = self.signature_determinants(par)
+        key = Element.generate_key(resolved_tag, self.version_name, "qc")
         return Element(
-            key=key,
-            run=runner,
-            tag=tag,
+            key,
+            runner,
+            tag=resolved_tag,
             determinants=determinants,
             inputs=tuple(input_files),
             artifacts=artifacts,
             pres=tuple(pres),
-            name=name
         )
 
     @subroutine
@@ -335,8 +326,8 @@ class FastQC(External):
         self,
         input_file: Path | str | list[Path | str],
         output_dir: Path | str,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Run FastQC on one or more sequencing files.
 
@@ -350,9 +341,9 @@ class FastQC(External):
             file or list of files.
         output_dir : Path | str
             Output directory for FastQC reports.
-        params : Params | None
-            Additional FastQC parameters (e.g., Params(extract=True)).
-        cfg : ExternalRunConfig | None
+        par : ParType | None
+            Additional FastQC parameters (e.g., ParType(extract=True)).
+        cfg : CfgType | None
             External run configuration (e.g., threads, working directory).
 
         Returns
@@ -369,8 +360,7 @@ class FastQC(External):
         ... )
         >>> qc()
         """
-        params = params or Params(threads=10, extract=False)
-        cfg = cfg or ExternalRunConfig()
+        par = par or ParType(threads=10, extract=False)
         # Handle single file or list of files
         if isinstance(input_file, (list, tuple)):
             input_files = [Path(f).absolute() for f in input_file]

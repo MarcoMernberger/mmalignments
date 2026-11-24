@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, replace
 from functools import cached_property
 from pathlib import Path
+from types import MappingProxyType
 from typing import (
     IO,
     Any,
     Generic,
+    Iterable,
     Iterator,
     Mapping,
     Self,  # # type: ignore[import] Python 3.11+
@@ -787,29 +789,130 @@ def from_prior(
 
 
 ################################################################################
-# StepValues
+# Per-step specification values
 ################################################################################
 
 T = TypeVar("T")
 
 
+@dataclass(frozen=True, eq=False, init=False)
 class SpecValues(Generic[T]):
-    """Per-step override container for grabfast-style multi-Element calls.
-    Unset steps fall back to `default`."""
+    """Immutable defaults and overrides for a multi-step workflow.
 
-    def __init__(self, default: T | None, **kwargs) -> None:
-        self.default = default
-        for step in kwargs:
-            setattr(self, step, kwargs.get(step, None))
+    A plain value supplied to a workflow applies to every step. Use
+    ``SpecValues`` when one or more steps need different values: ``default`` is
+    used for declared steps with no override, and ``values`` contains the
+    per-step overrides. ``valid_steps`` is the complete set of step names
+    supported by the workflow. Both configured override names and calls to
+    :meth:`get` are checked against it, so a misspelled step fails explicitly.
+
+    ``None`` means "use the default". Other falsy values (for example ``0``,
+    ``False`` or an empty mapping) are valid overrides and are preserved.
+    Values are stored in a read-only mapping; step names such as ``"default"``
+    and ``"get"`` are ordinary mapping keys and cannot shadow class members.
+
+    Examples
+    --------
+    >>> options = SpecValues(
+    ...     default="shared",
+    ...     valid_steps=("mem", "sort", "index"),
+    ...     values={"mem": "alignment-only"},
+    ... )
+    >>> options.get("mem")
+    'alignment-only'
+    >>> options.get("sort")
+    'shared'
+    >>> pick_spec("shared", "sort")
+    'shared'
+    """
+
+    default: T | None
+    values: Mapping[str, T | None]
+    valid_steps: frozenset[str]
+
+    def __init__(
+        self,
+        default: T | None,
+        *,
+        valid_steps: Iterable[str],
+        values: Mapping[str, T | None] | None = None,
+    ) -> None:
+        """Create a validated per-step override set.
+
+        Parameters
+        ----------
+        default
+            Value returned for any valid step without a non-``None``
+            override.
+        valid_steps
+            All step names accepted by the workflow. This is required so
+            unknown override names can be rejected immediately.
+        values
+            Optional mapping from step name to its override. An override
+            whose value is ``None`` falls back to ``default``.
+
+        Raises
+        ------
+        TypeError
+            If ``valid_steps`` is a string or contains a non-string name, or
+            if ``values`` contains a non-string step name.
+        ValueError
+            If step names are empty or duplicated, or an override is supplied
+            for an empty or undeclared step name.
+        """
+        if isinstance(valid_steps, str):
+            raise TypeError("valid_steps must be an iterable of step names, not a string")
+
+        step_names = tuple(valid_steps)
+        if not step_names:
+            raise ValueError("valid_steps must contain at least one step name")
+        if any(not isinstance(step, str) for step in step_names):
+            raise TypeError("Every valid step name must be a string")
+        if any(not step for step in step_names):
+            raise ValueError("Step names must not be empty")
+        if len(set(step_names)) != len(step_names):
+            raise ValueError("valid_steps must not contain duplicate step names")
+
+        overrides = {} if values is None else dict(values)
+        if any(not isinstance(step, str) for step in overrides):
+            raise TypeError("Every override step name must be a string")
+        if any(not step for step in overrides):
+            raise ValueError("Override step names must not be empty")
+        invalid_steps = overrides.keys() - set(step_names)
+        if invalid_steps:
+            invalid_names = ", ".join(sorted(invalid_steps))
+            raise ValueError(
+                f"Unknown override step(s): {invalid_names}. "
+                f"Valid steps are: {', '.join(step_names)}."
+            )
+
+        object.__setattr__(self, "default", default)
+        object.__setattr__(self, "values", MappingProxyType(overrides))
+        object.__setattr__(self, "valid_steps", frozenset(step_names))
 
     def get(self, step: str) -> T | None:
-        return getattr(self, step, None) or self.default
+        """Return ``step``'s override, or the default when it is unset.
+
+        A step not listed in ``valid_steps`` raises ``KeyError`` rather than
+        silently receiving the default.
+        """
+        if step not in self.valid_steps:
+            valid = ", ".join(sorted(self.valid_steps))
+            raise KeyError(f"Unknown step {step!r}; valid steps are: {valid}")
+
+        value = self.values.get(step)
+        return self.default if value is None else value
 
 
 def pick_spec(
     value: T | SpecValues[T] | None,
     step: str,
 ) -> T | None:
+    """Resolve a workflow argument for one step.
+
+    ``None`` remains ``None``; a plain value is shared by all steps; and a
+    ``SpecValues`` instance resolves its override/default for ``step``.
+    """
     if value is None:
         return None
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import traceback
+import re
 from functools import cached_property, wraps
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -1470,6 +1471,7 @@ class NovogeneSelector(FastqSelector):
             indicating whether the stem matches the sample. If no match is
             found, returns ("", False).
         """
+        print(f"Matching stem '{stem}' against sample '{sample}'")
         if stem.startswith(sample):
             if stem.endswith("_1"):
                 return "R1", True
@@ -1621,6 +1623,45 @@ class FastqConcat(Element):
         else:
             raise ValueError(f"Unsupported type: {type(self.selector)}")
 
+    @classmethod
+    def _expected_r2_for_r1(cls, r1: Path) -> Path:
+        """Derive the expected R2 filename from an R1 filename."""
+        name = r1.name
+        if "_R1_" in name:
+            mate_name = name.replace("_R1_", "_R2_", 1)
+        elif re.search(r"_1(?=\.(?:fastq|fq)(?:\.gz)?$)", name):
+            mate_name = re.sub(
+                r"_1(?=\.(?:fastq|fq)(?:\.gz)?$)",
+                "_2",
+                name,
+                count=1,
+            )
+        elif name.endswith("_1"):
+            mate_name = f"{name[:-2]}_2"
+        else:
+            raise ValueError(
+                f"Could not derive R2 filename from R1 filename: {r1}"
+            )
+        return r1.with_name(mate_name)
+
+    def _sorted_r1_files(self, files_to_concat: Mapping[str, list[Path]]) -> list[Path]:
+        r1_files = sorted(files_to_concat.get("R1", []), key=lambda p: p.name)
+        if not r1_files:
+            raise FileNotFoundError(
+                f"No R1 files found for sample '{self.library_name}'"
+            )
+        return r1_files
+
+    def _ordered_r2_for_r1(self, r1_files: list[Path]) -> list[Path]:
+        expected_pairs = [(r1, self._expected_r2_for_r1(r1)) for r1 in r1_files]
+        found_r2 = [r2.resolve() for _, r2 in expected_pairs if r2.exists()]
+        if found_r2 and len(found_r2) != len(r1_files):
+            missing = [str(r2) for _, r2 in expected_pairs if not r2.exists()]
+            raise FileNotFoundError(
+                "Missing R2 mates for some R1 files: " + ", ".join(missing)
+            )
+        return found_r2
+
     def r1(self) -> Path:
         return self.artifacts["r1"]
 
@@ -1646,10 +1687,20 @@ class FastqConcat(Element):
     def setup_normalization(self, prefix: str):
         files_to_concat = self.selector.select(prefix)
         if not files_to_concat:
-            raise FileNotFoundError(f"No files found for sample '{self.library_name}'")
+            raise FileNotFoundError(
+                f"No files found for sample '{self.library_name}'"
+            )
+
+        r1_files = self._sorted_r1_files(files_to_concat)
+        r2_files = self._ordered_r2_for_r1(r1_files)
+
+        ordered_files: dict[str, list[Path]] = {"R1": r1_files}
+        if r2_files:
+            ordered_files["R2"] = r2_files
+
         normalized: dict[str, Path] = {}
         files_to_merge: dict[Path, list[Path]] = {}
-        for key, tuple_of_files in files_to_concat.items():
+        for key, tuple_of_files in ordered_files.items():
             if not tuple_of_files:
                 raise FileNotFoundError(
                     f"No files found for key '{key}' in sample '{self.library_name}'"
@@ -1663,6 +1714,8 @@ class FastqConcat(Element):
                 output_path = self.output_folder / output_filename
                 files_to_merge[output_path] = list(tuple_of_files)
                 normalized[key] = output_path
+        print(f"Normalized files for sample '{self.library_name}': {normalized}")
+        print(f"Files to merge for sample '{self.library_name}': {files_to_merge}")
         return normalized, files_to_merge
 
     @classmethod

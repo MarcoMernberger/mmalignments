@@ -90,7 +90,9 @@ def collect_undetermined_fastqs(
 def rename_files(files_to_rename: Mapping[Path, Path], log_fh: TextIOWrapper):
     """Rename files according to the provided mapping."""
     for old_path, new_path in files_to_rename.items():
+        print(f"Checking if {old_path} exists and {new_path} does not exist.")
         if old_path.exists() and not new_path.exists():
+            print(f"Renaming {old_path} to {new_path}")
             log_fh.write(f"Renaming {old_path} to {new_path}\n")
             old_path.rename(new_path)
 
@@ -101,6 +103,8 @@ def rename_files(files_to_rename: Mapping[Path, Path], log_fh: TextIOWrapper):
 
 # Mapping from barcode_sequence (or "barcode1_barcode2") to sample name
 BarcodeMap = Mapping[str, str]
+# Mapping from project sample name -> fastqgrab output id/name
+SampleNameMap = Mapping[str, str]
 
 
 class FastGrab(External):
@@ -593,7 +597,7 @@ class FastGrab(External):
         process: Element,
         config: Element,
         *,
-        names: Iterator[str] | list[str],
+        names: Iterator[str] | list[str] | SampleNameMap,
         tag: TagType | None = None,
     ) -> Element:
         """Create an Element that consolidates demultiplexed FASTQ files.
@@ -612,8 +616,9 @@ class FastGrab(External):
         ----------
         process : Element
             The process Element that produced the demultiplexed FASTQs.
-        names : Iterator[str] | list[str]
-            Names of the samples to consolidate.
+        names : Iterator[str] | list[str] | Mapping[str, str]
+            Sample names to consolidate. If a mapping is provided, it must map
+            ``project_sample_name -> fastqgrab_output_name``.
         tag : TagType | None
             Optional tag override.
 
@@ -630,8 +635,18 @@ class FastGrab(External):
             flag="consolidate",
         ).resolve(tag)
 
-        names = list(names) if isinstance(names, Iterator) else names
-        if len(names) == 0:
+        name_map: dict[str, str]
+        if isinstance(names, Mapping):
+            name_map = {
+                str(sample_name): str(output_name)
+                for sample_name, output_name in names.items()
+            }
+        elif isinstance(names, Iterator):
+            name_map = {sample_name: sample_name for sample_name in names}
+        else:
+            name_map = {sample_name: sample_name for sample_name in names}
+
+        if len(name_map) == 0:
             raise ValueError("No sample names provided for consolidation.")
         key = Element.generate_key(tag, "consolidate")
         # Build artifacts: one per sample (R1 + R2) plus undetermined
@@ -640,13 +655,21 @@ class FastGrab(External):
         fastqs = {}
 
         def check_output(
-            full_name: str, paired: bool = True
+            sample_full_name: str,
+            source_full_name: str,
+            paired: bool = True,
         ) -> tuple[FastqArtifact, dict[Path, Path]]:
-            r1 = config.prefix / f"{full_name}_R1.{config.suffix}"
-            r2 = config.prefix / f"{full_name}_R2.{config.suffix}" if paired else None
-            r1_in = config.prefix / f"{full_name}_read1.{config.suffix}"
+            r1 = config.prefix / f"{sample_full_name}_R1.{config.suffix}"
+            r2 = (
+                config.prefix / f"{sample_full_name}_R2.{config.suffix}"
+                if paired
+                else None
+            )
+            r1_in = config.prefix / f"{source_full_name}_read1.{config.suffix}"
             r2_in = (
-                config.prefix / f"{full_name}_read2.{config.suffix}" if paired else None
+                config.prefix / f"{source_full_name}_read2.{config.suffix}"
+                if paired
+                else None
             )
             files_to_rename = {r1_in: r1}
             if paired:
@@ -654,15 +677,24 @@ class FastGrab(External):
             return FastqArtifact(r1, r2), files_to_rename
 
         paths = {}
-        for sample_name in names:
-            full_name = f"{config.library_name}_{sample_name}"
-            artifact, files_to_rename = check_output(full_name)
-            fastqs[full_name] = artifact
+        for sample_name, output_name in name_map.items():
+            output_full_name = f"{config.library_name}_{output_name}"
+            sample_full_name = f"{config.library_name}_{sample_name}"
+            artifact, files_to_rename = check_output(
+                sample_full_name=sample_full_name,
+                source_full_name=output_full_name,
+            )
+            # Input files are named by fastqgrab output ids (barcode names);
+            # destination files/artifacts are named by project sample names.
+            fastqs[sample_full_name] = artifact
 
             paths.update(files_to_rename)
 
         undetermined_name = f"{config.library_name}_undetermined"
-        undetermined, _ = check_output(undetermined_name)
+        undetermined, _ = check_output(
+            sample_full_name=undetermined_name,
+            source_full_name=undetermined_name,
+        )
         fastqs[undetermined_name] = undetermined
         undetermined_rename = (
             {"read1": undetermined.r1, "read2": undetermined.r2}
@@ -686,7 +718,11 @@ class FastGrab(External):
             empty_ok=True,
         )
 
-    @depends(rename_files, collect_undetermined_fastqs, FastqConcat.concat)
+    @depends(
+        rename_files,
+        collect_undetermined_fastqs,
+        FastqConcat.concat,
+    )
     def run_consolidate(
         self,
         paths: Mapping[Path, Path],
@@ -708,7 +744,6 @@ class FastGrab(External):
         Runnable
             Runnable that performs the file consolidation.
         """
-
         # def default_rename(filename: str) -> str:
         #     return (
         #         filename.replace("barcode_unambiguous=true_", "")
@@ -739,7 +774,6 @@ class FastGrab(External):
                 log_fh.write(f"Consolidating FASTQ files for prefix {prefix_name}\n")
                 # rename the demultiplexed FASTQ files to a consistent naming scheme
                 rename_files(paths, log_fh)  # will not rename if the files exist
-
                 # concatenate the undetermined FASTQ files into a single file
                 log_fh.write(
                     f"Merging FASTQ files for undetermined reads for prefix {prefix_name}\n"
@@ -881,30 +915,42 @@ class FastGrab(External):
 
         def __run():
             df_constructs = pd.read_csv(sensorfile, sep="\t")
+
             if library_name:
                 df_constructs = df_constructs[df_constructs["library"] == library_name]
-            names = []
-            sequences = []
-            for barcode_column in barcode_columns:
-                df_dedup = df_constructs.drop_duplicates(subset=[barcode_column])
-                names.extend(df_dedup[name_column].tolist())
-                sequences.extend(df_dedup[barcode_column].tolist())
+
+            # Deduplicate based on the combination of all barcode columns
+            df_dedup = df_constructs.drop_duplicates(subset=barcode_columns)
+
+            names = df_dedup[name_column].tolist()
+
+            # Combine barcode columns into a single sequence per sample
+            sequences = (
+                df_dedup[barcode_columns].astype(str).agg("_".join, axis=1).tolist()
+            )
             if duplicate_behaviour == "raise":
                 if len(names) != len(set(names)):
                     raise ValueError(
-                        f"Duplicate sample names found in {sensorfile} for columns {barcode_columns}."
+                        f"Duplicate sample names found in {sensorfile} "
+                        f"for columns {barcode_columns}."
                     )
+
                 if len(sequences) != len(set(sequences)):
                     raise ValueError(
-                        f"Duplicate barcode sequences found in {sensorfile} for columns {barcode_columns}."
+                        f"Duplicate barcode combinations found in {sensorfile} "
+                        f"for columns {barcode_columns}."
                     )
+
             elif duplicate_behaviour == "drop":
-                names = list(dict.fromkeys(names))
-                sequences = list(dict.fromkeys(sequences))
+                # Already deduplicated based on the barcode combination
+                pass
+
             else:
                 raise ValueError(
-                    f"Invalid duplicate_behaviour: {duplicate_behaviour}. Must be 'drop' or 'raise'."
+                    f"Invalid duplicate_behaviour: {duplicate_behaviour}. "
+                    "Must be 'drop' or 'raise'."
                 )
+
             write_fasta_from_list(outfile, names, sequences)
 
         callspec = CallSpec(
@@ -934,7 +980,7 @@ class FastGrab(External):
         template: FileSource | Sequence[FileSource],
         barcodes: Callable | Element | Mapping[str, Element],
         *,
-        names: Iterator[str] | list[str],
+        names: Iterator[str] | list[str] | SampleNameMap,
         config_dir: Path | None = None,
         demultiplex_dir: Path | None = None,
         compression: Literal["Raw", "Gzip"] = "Gzip",
@@ -958,9 +1004,11 @@ class FastGrab(External):
             Mapping of barcode set name → Element with FASTA artifact or Callable
             returning such a mapping. If it's just a single demultiplexing step,
             this can be a single Element with FASTA artifact.
-        names : Iterator[str] | list[str] | None
+        names : Iterator[str] | list[str] | Mapping[str, str]
             Optional list of sample names to expect in the consolidated output. If
             *None*, all samples found in the process output are included.
+            When a mapping is provided, it is interpreted as
+            ``project_sample_name -> fastqgrab_output_name``.
         compression : Literal["Raw", "Gzip"]
             Compression method for the consolidated FASTQ files.  If *Gzip*, the files
             are compressed with gzip; if *Raw*, they are left uncompressed.
@@ -970,25 +1018,30 @@ class FastGrab(External):
         config_dir : Path | None
             Directory in which to write the configuration file.  If *None*, a default
             directory is derived from the sample name.
-        tag : TagType | None
-            Optional tag override for all created Elements.
-        out: OutType | None
-            Output specification for the demultiplexed FASTQs.  If *None*, a default
-            specification is derived from the sample name.
-        outdir: Path | str | None
-            Base output directory for the demultiplexed FASTQs.  If *None*, a default
-            directory is derived from the sample name.
-        configdir: Path | None
-            Directory in which to write the configuration file.  If *None*, a default
-            directory is derived from the sample name.
-        filename: Path | str | None
-            Filename for the configuration file.  If *None*, a default name is derived
-            from the sample name.
-        params : ParType | None
-            Parameter sets keyed by step name (``"configure"``,
-            ``"process"``).
-        cfg : CfgType |None
-            Run configurations keyed by step name.
+        tag : TagType | SpecValues[TagType] | None
+            Tag shared by all applicable steps, or per-step overrides.
+        out : OutType | SpecValues[OutType] | None
+            Output specification for the configuration and processing steps.
+        par : ParType | SpecValues[ParType] | None
+            Parameters for the configuration and processing steps.
+        cfg : CfgType | SpecValues[CfgType] | None
+            Run configuration for the configuration and processing steps.
+
+        Notes
+        -----
+        The workflow step names are ``"configure"``, ``"process"``,
+        ``"consolidate"`` and ``"report"``. A per-step override can be
+        constructed as::
+
+            par = SpecValues(
+                default=None,
+                valid_steps=("configure", "process", "consolidate", "report"),
+                values={"process": process_value},
+            )
+
+        ``SpecValues`` rejects misspelled or unsupported step names. A plain
+        value can be used instead when the same override should apply
+        everywhere it is consumed.
 
         Returns
         -------
@@ -1036,7 +1089,7 @@ class FastGrab(External):
         template: FileSource | Sequence[FileSource],
         barcodes: Callable | Element | Mapping[str, Element],
         *,
-        names: Iterator[str] | list[str],
+        names: Iterator[str] | list[str] | SampleNameMap,
         config_dir: Path | None = None,
         demultiplex_dir: Path | None = None,
         compression: Literal["Raw", "Gzip"] = "Gzip",
@@ -1061,9 +1114,11 @@ class FastGrab(External):
             Mapping of barcode set name → Element with FASTA artifact or Callable
             returning such a mapping. If it's just a single demultipolexing step,
             this can be a single Element with FASTA artifact.
-        names : Iterator[str] | list[str]
+        names : Iterator[str] | list[str] | Mapping[str, str]
             List of sample names to expect in the consolidated output. All samples found
             in the process output are included.
+            When a mapping is provided, it is interpreted as
+            ``project_sample_name -> fastqgrab_output_name``.
         config_dir : Path | None
             Directory in which to write the configuration file.  If *None*, a default
             directory is derived from the sample name.
@@ -1073,19 +1128,30 @@ class FastGrab(External):
         compression : Literal["Raw", "Gzip"]
             Compression method for the consolidated FASTQ files.  If *Gzip*, the files
             are compressed with gzip; if *Raw*, they are left uncompressed.
-        tag : TagType | StepValues[TagType] | None
-            Optional tag override for all created Elements.
-        out: OutType | StepValues[OutType] | None
-            Output specification for the created elements.
-        par : ParType | StepValues[ParType] | None
-            Parameter for the created elements.
-        cfg : CfgType |None
-            Run configuration for the created elements.
+        tag : TagType | SpecValues[TagType] | None
+            Tag shared by all applicable steps, or per-step overrides.
+        out : OutType | SpecValues[OutType] | None
+            Output specification for the configuration and processing steps.
+        par : ParType | SpecValues[ParType] | None
+            Parameters for the configuration and processing steps.
+        cfg : CfgType | SpecValues[CfgType] | None
+            Run configuration for the configuration and processing steps.
+
+        Notes
+        -----
+        The workflow step names are ``"configure"``, ``"process"``,
+        ``"consolidate"`` and ``"report"``. Pass those names in
+        ``SpecValues.valid_steps`` to specify per-step overrides; the example
+        in :meth:`grabfast` shows the syntax. A plain value applies to every
+        step where that argument is used.
 
         Returns
         -------
-        dict[str, NextGenSample]
-            Mapping of sample name to demultiplexed NextGenSample.
+        tuple[dict[str, NextGenSample], NextGenSample | None]
+            ``(samples, undetermined)``. ``samples`` maps each demultiplexed
+            sample name to its ``NextGenSample``; ``undetermined`` is the
+            sample containing reads that were not assigned to a barcode, or
+            ``None`` if there is no such sample.
         """
         consolidate_el, process_el, config_el, report_el = self.grabfast(
             sample=sample,

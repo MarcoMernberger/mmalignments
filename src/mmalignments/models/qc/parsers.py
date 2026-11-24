@@ -14,14 +14,10 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from mmalignments.models.data import Pairing
-from mmalignments.models.elements import Element, NextGenSampleElement
-from mmalignments.models.tags import (
-    ElementTag,
-    Method,
-    PartialElementTag,
-    Stage,
-    State,
-)
+from mmalignments.models.artifacts import ArtifactSet
+from mmalignments.models.elements import Element, NextGenSample
+from mmalignments.models.overlay import OutSpec, OutType, TagType
+from mmalignments.models.tags import Method, Stage, State
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +226,7 @@ def parse_fastqc_zip(zip_path: Path | str) -> dict[str, Any]:
 
 
 def write_build_qc_tsv(
-    out_tsv: Path | str, sample: NextGenSampleElement, summary: dict[str, Any]
+    out_tsv: Path | str, sample: NextGenSample, summary: dict[str, Any]
 ) -> Path:
     """Write a flattened TSV summary from the QC summary dict.
 
@@ -251,13 +247,13 @@ def write_build_qc_tsv(
     out_tsv = Path(out_tsv)
     with open(out_tsv, "w") as f:
         f.write("sample\tmetric\tvalue\n")
-        f.write(f"{sample.name}\tsample_name\t{sample.name}\n")
-        f.write(f"{sample.name}\tpairing\t{sample.pairing}\n")
+        f.write(f"{sample.root}\tsample_name\t{sample.root}\n")
+        f.write(f"{sample.root}\tpairing\t{sample.pairing}\n")
 
         # Write fastp metrics
         if "fastp" in summary:
             for key, value in summary["fastp"].items():
-                f.write(f"{sample.name}\tfastp_{key}\t{value}\n")
+                f.write(f"{sample.root}\tfastp_{key}\t{value}\n")
 
         # Write FastQC metrics
         for qc_type in [
@@ -268,17 +264,16 @@ def write_build_qc_tsv(
         ]:
             if qc_type in summary:
                 for key, value in summary[qc_type].items():
-                    f.write(f"{sample.name}\t{qc_type}_{key}\t{value}\n")
+                    f.write(f"{sample.root}\t{qc_type}_{key}\t{value}\n")
     return out_tsv
 
 
 def build_qc_summary(
-    sample: NextGenSampleElement,
+    sample: NextGenSample,
     elements_to_summary: tuple[Element, ...],
     *,
-    tag: PartialElementTag | ElementTag | None = None,
-    outdir: Path | str | None,
-    filename: str | None = None,
+    tag: TagType | None = None,
+    out: OutType | None = None,
 ) -> Element:
     """Build QC summary from fastp and FastQC outputs (pure Python Element).
 
@@ -287,19 +282,15 @@ def build_qc_summary(
 
     Parameters
     ----------
-    sample : NextGenSampleElement
-        NextGenSampleElement object representing a sample and containing metadata.
+    sample : NextGenSample
+        NextGenSample object representing a sample and containing metadata.
     elements_to_summary : tuple[Element, ...]
         Tuple of QC Elements whose outputs should be included in the QC summary.
-    tag : Tag | ElementTag | None
-        Partial or full Element tag for the output Element, used for default
-        naming. If not provided, a default tag will be generated based on
-        the input Element's name and level.
-    outdir : Path | str | None
-        Directory for the sorted BAM file. If not provided, defaults to
-        the same directory as the input BAM file.
-    filename : Path | str | None
-        Filename override. If not provided, defaults to ``tag.default_output``.
+    tag : TagType | None
+        Tag override for the output Element.
+    out : OutType | None
+        Output specification override (folder, stem, ext). Defaults to
+        ``<sample.result_dir>/qc`` and the tag's default name with ``json``.
 
     Returns
     -------
@@ -322,26 +313,26 @@ def build_qc_summary(
     ... )
     >>> summary_elem.run()
     """
-    tag = ElementTag(
-        root=sample.tag.root,
+    resolved_tag = sample.tag.bump(
         level=max([el.tag.level for el in elements_to_summary]) + 1,
         stage=Stage.QC,
         method=Method.MULTIQC,
         state=State.REPORT,
-        omics=sample.tag.omics,
-        ext="json",
-    ).merge(tag)
-    outdir = Path(outdir or sample.result_dir / "qc")
-    out_json = outdir / (filename or (tag.default_name + ".json"))
+    ).resolve(tag)
+    resolved_out = OutSpec.from_tag(resolved_tag).resolve(
+        OutSpec(folder=sample.result_dir / "qc", ext="json"), out
+    )
+    out_json = resolved_out.file
     out_tsv = out_json.with_suffix(".tsv")
     input_files = []
     for qc_element in elements_to_summary:
-        input_files.extend(qc_element.output_files)
+        if qc_element is not None:
+            input_files.extend(qc_element.files)
 
     def _build_summary() -> None:
         """Generate QC summary files."""
         summary = {
-            "sample_name": sample.name,
+            "sample_name": sample.root,
             "pairing": sample.pairing.value,
         }
         for qc_element in elements_to_summary:
@@ -353,7 +344,7 @@ def build_qc_summary(
 
             elif method == Method.FASTQC:
                 # # Parse FastQC ZIPs
-                label = qc_element.tag.param
+                label = qc_element.tag.flag
                 summary[f"fastqc_{label}_r1"] = parse_fastqc_zip(
                     qc_element.artifacts["zip_r1"]
                 )
@@ -372,16 +363,15 @@ def build_qc_summary(
         logger.info(f"QC summary written to {out_json} and {out_tsv}")
 
     _build_summary.command = [str(signature(_build_summary))]  # type: ignore[attr-defined]
-    _build_summary.command_display = f"Build QC summary for {sample.name}"
-    key = f"{tag.default_name}_qc_summary"
+    _build_summary.command_display = f"Build QC summary for {sample.root}"
+    key = Element.generate_key(resolved_tag, "custom", "qc_summary")
     return Element(
-        key=key,
-        run=_build_summary,
-        tag=tag,
-        inputs=input_files,
-        artifacts={
-            "qc_summary_json": out_json,
-            "qc_summary_tsv": out_tsv,
-        },
-        pres=elements_to_summary,
+        key,
+        _build_summary,
+        tag=resolved_tag,
+        inputs=tuple(input_files),
+        artifacts=ArtifactSet(
+            out_json, primary_name="qc_summary_json", qc_summary_tsv=out_tsv
+        ),
+        pres=tuple(elements_to_summary),
     )

@@ -7,25 +7,32 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Mapping
 
+from mmalignments.models.artifacts import ArtifactSet
 from mmalignments.models.data import Genome
 from mmalignments.models.elements import (
     Element,
     MappedElement,
     element,
-    generate_element_key_name,
+)
+from mmalignments.models.overlay import (
+    CfgType,
+    ElementTag,
+    OutSpec,
+    OutType,
+    ParType,
+    SpecValues,
+    TagType,
+    pick_spec,
 )
 from mmalignments.models.tags import (
-    ElementTag,
     Method,
-    PartialElementTag,
     Stage,
     State,
-    from_prior,
 )
 from mmalignments.services.io import parents
 
-from ..externals import External, ExternalRunConfig, SubroutineIn, subroutine
-from ..parameters import Params, ParamSet
+from ..externals import External, SubroutineIn, subroutine
+from ..parameters import ParamSet
 
 logger = logging.getLogger(__name__)
 
@@ -147,11 +154,10 @@ class Samtools(External):
         self,
         mapped: MappedElement,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> MappedElement:
         """Sort a BAM file using samtools sort.
 
@@ -163,19 +169,15 @@ class Samtools(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file to be sorted.
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default
-            naming. If not provided, a default tag will be generated based on
-            the input Element's name.
-        outdir : Path | str | None
-            Directory for the sorted BAM file. If not provided, defaults to
-            the same directory as the input BAM file.
-        filename : Path | str | None
-            Filename override. If not provided, defaults to
-            ``tag.default_output``.
-        params : Params | None
+        tag : TagType | None
+            Partial or full Element tag override. Defaults are derived from the
+            input Element's tag.
+        out : OutType | None
+            Output specification override. Defaults to the directory of the
+            input BAM and extension ``bam``.
+        par : ParType | None
             Parameters for sorting call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -193,32 +195,28 @@ class Samtools(External):
         >>> sort_runner()  # Execute the sort
         """
         input_bam = mapped.bam
-        tag = from_prior(mapped.tag, tag, method=Method.SAMTOOLS, state=State.SORT)
-        sorted_bam = Path(outdir or input_bam.parent) / (filename or tag.default_output)
+        tag = mapped.tag.bump(method=Method.SAMTOOLS, state=State.SORT).resolve(tag)
+        out = OutSpec.from_tag(tag).resolve(
+            OutSpec(folder=input_bam.parent, ext="bam"), out
+        )
+        sorted_bam = out.file
 
-        # Create the runner by calling External.run
         runner = self.sort_bam(
             input_bam=input_bam,
             output_bam=sorted_bam,
             cfg=cfg,
-            params=params,
+            par=par,
         )
-        key, name = generate_element_key_name(
-            tag,
-            self.version_name,
-            "sort",
-        )
-        element = MappedElement(
-            key=key,
-            run=runner,
+        key = Element.generate_key(tag, self.version_name, "sort")
+        return MappedElement(
+            key,
+            runner,
             tag=tag,
-            determinants=self.signature_determinants(params, subroutine="sort"),
+            determinants=self.signature_determinants(par, subroutine="sort"),
             inputs=(input_bam,),
-            artifacts={"bam": sorted_bam},
+            artifacts=ArtifactSet(sorted_bam, primary_name="bam"),
             pres=(mapped,),
-            name=name,
         )
-        return element
 
     @subroutine
     def sort_bam(
@@ -226,8 +224,8 @@ class Samtools(External):
         input_bam: Path | str,
         output_bam: Path | str,
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Sort a BAM file using samtools sort.
 
@@ -241,9 +239,9 @@ class Samtools(External):
             Path to the unsorted BAM file.
         output_bam : Path | str
             Path for the sorted output BAM file.
-        params : Params | None
+        par : ParType | None
             Parameters for sorting call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -264,6 +262,110 @@ class Samtools(External):
         return arguments, subcommand, [input_bam], [output_bam], None, None, None
 
     ###########################################################################
+    # Compress (High-level and Low-level wrapper)
+    ###########################################################################
+
+    @element
+    def compress(
+        self,
+        mapped: MappedElement,
+        *,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
+    ) -> MappedElement:
+        """Compress a BAM file using samtools view -b.
+
+        Converts an uncompressed BAM into a BGZF-compressed BAM suitable for
+        ``samtools index``.
+
+        Parameters
+        ----------
+        mapped : MappedElement
+            MappedElement containing the BAM file to compress.
+        tag : TagType | None
+            Partial or full Element tag override.
+        out : OutType | None
+            Output specification override. Defaults to ``<bam>.compressed.bam``
+            next to the input BAM.
+        par : ParType | None
+            Parameters for compression call.
+        cfg : CfgType | None
+            Optional configuration for running the subprocess.
+
+        Returns
+        -------
+        MappedElement
+            New MappedElement representing the compressed BAM.
+        """
+        input_bam = mapped.bam
+        tag = mapped.tag.bump(
+            method=Method.SAMTOOLS, state=State.TRANSFORMED, flag="compress"
+        ).resolve(tag)
+        out = OutSpec.from_tag(tag).resolve(
+            OutSpec(
+                folder=input_bam.parent, stem=f"{input_bam.stem}.compressed", ext="bam"
+            ),
+            out,
+        )
+        compressed_bam = out.file
+
+        runner = self.bgfz_compress(
+            input_bam=input_bam,
+            output_bam=compressed_bam,
+            par=par,
+            cfg=cfg,
+        )
+        key = Element.generate_key(tag, self.version_name, "compress")
+        return MappedElement(
+            key,
+            runner,
+            tag=tag,
+            determinants=self.signature_determinants(par, subroutine="view"),
+            inputs=(input_bam,),
+            artifacts=ArtifactSet(compressed_bam, primary_name="bam"),
+            pres=(mapped,),
+        )
+
+    @subroutine
+    def bgfz_compress(
+        self,
+        input_bam: Path | str,
+        output_bam: Path | str,
+        *,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
+    ) -> SubroutineIn:
+        """Compress a BAM file to BGZF BAM using samtools view.
+
+        Parameters
+        ----------
+        input_bam : Path | str
+            Path to the BAM file to compress.
+        output_bam : Path | str
+            Path for the compressed BAM output.
+        par : ParType | None
+            Parameters for compression call.
+        cfg : CfgType | None
+            Optional configuration for running the subprocess.
+
+        Returns
+        -------
+        SubroutineIn
+            Subroutine tuple for ``samtools view -b <input> -o <output>``.
+        """
+        arguments = [
+            "view",
+            "-b",
+            self.strabs(input_bam),
+            "-o",
+            self.strabs(output_bam),
+        ]
+        subcommand = "view"
+        return arguments, subcommand, [input_bam], [output_bam], None, None, None
+
+    ###########################################################################
     # Index (High-level and Low-level wrapper)
     ###########################################################################
 
@@ -272,9 +374,10 @@ class Samtools(External):
         self,
         mapped: MappedElement,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """Create a BAM index (.bai) using samtools index.
 
@@ -286,13 +389,14 @@ class Samtools(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file to index.
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default
-            naming. If not provided, a default tag will be generated based on
-            the input Element's name.
-        params : Params | None
+        tag : TagType | None
+            Partial or full Element tag override.
+        out : OutType | None
+            Output specification override. Defaults to ``<bam>.bai`` next to
+            the input BAM.
+        par : ParType | None
             Parameters for indexing call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -308,40 +412,29 @@ class Samtools(External):
         >>> index_runner()  # Execute the index
         """
         bam_file = mapped.bam
-        tag = from_prior(
-            mapped.tag,
-            tag=tag,
-            level=mapped.tag.level,
-            method=Method.SAMTOOLS,
-            state=State.INDEX,
-            ext="bai",
+        tag = mapped.tag.bump(method=Method.SAMTOOLS, state=State.INDEX).resolve(tag)
+        out = OutSpec.from_tag(tag).resolve(
+            OutSpec(folder=bam_file.parent, stem=bam_file.name, ext="bai"), out
         )
-        # must always be the same as the sorted file
-        bai_file = bam_file.with_suffix(bam_file.suffix + ".bai")
+        bai_file = out.file
 
         runner = self.index_bam(
             bam_file=bam_file,
             bai_file=bai_file,
-            params=params,
+            par=par,
             cfg=cfg,
         )
 
-        key, name = generate_element_key_name(
-            tag,
-            self.version_name,
-            "index",
-        )
-        element = Element(
-            key=key,
-            run=runner,
+        key = Element.generate_key(tag, self.version_name, "index")
+        return Element(
+            key,
+            runner,
             tag=tag,
-            determinants=self.signature_determinants(params, subroutine="index"),
+            determinants=self.signature_determinants(par, subroutine="index"),
             inputs=(bam_file,),
-            artifacts={"bai": bai_file},
+            artifacts=ArtifactSet(bai_file, primary_name="bai"),
             pres=(mapped,),
-            name=name,
         )
-        return element
 
     @subroutine
     def index_bam(
@@ -349,8 +442,8 @@ class Samtools(External):
         bam_file: Path | str,
         *,
         bai_file: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Create a BAM index (.bai) using samtools index.
 
@@ -362,9 +455,9 @@ class Samtools(External):
         ----------
         bam_file : Path | str
             Path to the BAM file to index.
-        params : Params | None
+        par : ParType | None
             Parameters for indexing call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -379,7 +472,7 @@ class Samtools(External):
         >>> index_runner = st.index_bam("sorted.bam")
         >>> index_runner()  # Execute the index
         """
-        bam_file = Path(bam_file).absolute()
+        bam_file = Path(bam_file).resolve()
         bai_file = bai_file or bam_file.with_suffix(bam_file.suffix + ".bai")
         # Build command: samtools index <bam_file>
         arguments = ["index", self.strabs(bam_file), "-o", self.strabs(bai_file)]
@@ -395,12 +488,11 @@ class Samtools(External):
         self,
         genome: Genome,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
         cut2: bool = True,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> Element:
         """
         Run faidx on a Genome-like object and return an Element.
@@ -409,25 +501,21 @@ class Samtools(External):
         ----------
         genome : Genome
             Genome-like object containing the reference FASTA file.
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default
-            naming. If not provided, a default tag will be generated based on
-            the genome name.
-        outdir : Path | str | None
-            Directory for the output genome file. If not provided, defaults to
-            the FASTA file's parent directory.
-        filename : Path | str | None
-            Filename override. If not provided, defaults to
-            ``tag.default_output``.
+        tag : TagType | None
+            Partial or full Element tag override. The default tag is derived
+            from the genome name.
+        out : OutType | None
+            Output specification override. Defaults to the FASTA file's parent
+            directory and extension ``genome``.
         cut2 : bool, optional
             Whether to cut the .fai output to create a .genome file
             (default: True).
             If True, a .genome file will be created with the same base name as
             the output_file, containing the first two columns of the .fai
             (chromosome name and length).
-        params : Params | None
+        par : ParType | None
             Parameters for the faidx call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -444,30 +532,28 @@ class Samtools(External):
             method=Method.SAMTOOLS,
             state=State.INDEX,
             omics=None,
-            ext="genome",
-        ).merge(tag)
-        output = Path(outdir or fasta.parent) / (filename or tag.default_output)
+        ).resolve(tag)
+        out = OutSpec.from_tag(tag).resolve(
+            OutSpec(folder=fasta.parent, ext="genome"), out
+        )
+        output = out.file
 
         runner = self.faidx_fasta(
-            fasta=fasta, output_file=output, cut2=cut2, params=params, cfg=cfg
+            fasta=fasta, output_file=output, cut2=cut2, par=par, cfg=cfg
         )
-        artifacts = {"fai": output}
+        artifacts = ArtifactSet(output, primary_name="fai")
         if cut2:
-            artifacts["faicut"] = output.with_suffix(".faicut")
-        key, name = generate_element_key_name(
-            tag, self.version_name, "faidx", params=f"{cut2}"
-        )
-        element = Element(
-            key=key,
-            run=runner,
+            artifacts = artifacts.with_extra("faicut", output.with_suffix(".faicut"))
+        key = Element.generate_key(tag, self.version_name, "faidx", cut2=cut2)
+        return Element(
+            key,
+            runner,
             tag=tag,
-            determinants=self.signature_determinants(params, subroutine="faidx"),
+            determinants=self.signature_determinants(par, subroutine="faidx"),
             inputs=(fasta,),
             artifacts=artifacts,
             pres=(),
-            name=name,
         )
-        return element
 
     @subroutine
     def faidx_fasta(
@@ -476,8 +562,8 @@ class Samtools(External):
         output_file: Path | str,
         cut2: bool = True,
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Create a fasta index (.fai) with samtools faidx and write a two-column genome
         file.
@@ -536,7 +622,15 @@ class Samtools(External):
                 output_file.with_suffix(".faicut")
             )
         subcommand = "faidx"
-        return arguments, subcommand, [fasta], [output_file], None, None, call_afterwards
+        return (
+            arguments,
+            subcommand,
+            [fasta],
+            [output_file],
+            None,
+            None,
+            call_afterwards,
+        )
 
     ###########################################################################
     # Stats (High-level and Low-level wrapper)
@@ -547,11 +641,10 @@ class Samtools(External):
         self,
         mapped: MappedElement,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> "Element":
         """Run samtools stats from a MappedElement.
 
@@ -562,19 +655,14 @@ class Samtools(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file.
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default
-            naming. If not provided, a default tag will be generated based on
-            the input Element's name.
-        outdir : Path | str | None
-            Directory for the output stats file. If not provided, defaults to
-            "qc/samtools/" relative to the BAM file's directory.
-        filename : Path | str | None
-            Filename override. If not provided, defaults to
-            ``tag.default_output``.
-        params : Params | None
+        tag : TagType | None
+            Partial or full Element tag override.
+        out : OutType | None
+            Output specification override. Defaults to ``qc/samtools/``
+            relative to the BAM file's directory and extension ``txt``.
+        par : ParType | None
             Parameters for the stats call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -590,38 +678,29 @@ class Samtools(External):
         >>> stats_elem.run()
         """
         input_bam = mapped.bam
-        tag = from_prior(
-            mapped.tag,
-            tag,
-            level=1,
-            stage=Stage.QC,
-            method=Method.SAMTOOLS,
-            state=State.RAW,
-            ext="txt",  # may be tsv or json
+        tag = mapped.tag.bump(
+            stage=Stage.QC, method=Method.SAMTOOLS, state=State.STAT
+        ).resolve(tag)
+        out = OutSpec.from_tag(tag).resolve(
+            OutSpec(folder=input_bam.parent / "qc" / "samtools", ext="txt"), out
         )
-        default_outdir = input_bam.parent / "qc" / "samtools"
-        output_file = Path(outdir or default_outdir) / (filename or tag.default_output)
+        output_file = out.file
 
         runner = self.stats_bam(
             input_bam=input_bam,
             output_file=output_file,
-            params=params,
+            par=par,
             cfg=cfg,
         )
-        key, name = generate_element_key_name(
-            tag,
-            self.version_name,
-            "stats",
-        )
+        key = Element.generate_key(tag, self.version_name, "stats")
         return Element(
-            key=key,
-            run=runner,
+            key,
+            runner,
             tag=tag,
-            determinants=self.signature_determinants(params, subroutine="stats"),
+            determinants=self.signature_determinants(par, subroutine="stats"),
             inputs=(input_bam,),
-            artifacts={"stats": output_file},
+            artifacts=ArtifactSet(output_file, primary_name="stats"),
             pres=(mapped,),
-            name=name,
         )
 
     @subroutine
@@ -630,8 +709,8 @@ class Samtools(External):
         input_bam: Path | str,
         output_file: Path | str,
         *,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Run samtools stats on a BAM file.
 
@@ -644,9 +723,9 @@ class Samtools(External):
             Input BAM file.
         output_file : Path | str
             Output file for stats results.
-        params : Params | None
+        par : ParType | None
             Parameters for the stats call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
         Returns
@@ -663,7 +742,15 @@ class Samtools(External):
         # samtools stats input.bam > output.txt
         arguments = ["stats", self.strabs(input_bam)]
         subcommand = "stats"
-        return arguments, subcommand, [input_bam], [output_file], output_file, None, None
+        return (
+            arguments,
+            subcommand,
+            [input_bam],
+            [output_file],
+            output_file,
+            None,
+            None,
+        )
 
     ###########################################################################
     # Flagstat (High-level and Low-level wrapper)
@@ -674,11 +761,10 @@ class Samtools(External):
         self,
         mapped: MappedElement,
         *,
-        tag: PartialElementTag | ElementTag | None = None,
-        outdir: Path | str | None = None,
-        filename: Path | str | None = None,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        tag: TagType | None = None,
+        out: OutType | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> "Element":
         """Run samtools flagstat from a MappedElement.
 
@@ -689,19 +775,15 @@ class Samtools(External):
         ----------
         mapped : MappedElement
             MappedElement containing the BAM file.
-        tag : Tag | ElementTag | None
-            Partial or full Element tag for the output Element, used for default
-            naming. If not provided, a default tag will be generated based on
-            the input Element's name.
-        outdir : Path | str | None
-            Directory for the output flagstat file. If not provided, defaults
-            to "qc/samtools/" relative to the BAM file's directory.
-        filename : Path | str | None
-            Filename override. If not provided, defaults to
-            ``tag.default_output``.
-        params : Params | None
+        tag : TagType | None
+            Partial or full Element tag override.
+        out : OutType | None
+            Output specification override. Defaults to ``qc/samtools/``
+            relative to the BAM file's directory and extension ``json``
+            (``json`` or ``tsv`` are supported).
+        par : ParType | None
             Parameters for the flagstat call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -717,39 +799,29 @@ class Samtools(External):
         >>> flagstat_elem.run()
         """
         input_bam = mapped.bam
-        tag = from_prior(
-            mapped.tag,
-            tag,
-            stage=Stage.QC,
-            method=Method.SAMTOOLS,
-            state=State.STAT,
-            ext="json",
+        tag = mapped.tag.bump(
+            stage=Stage.QC, method=Method.SAMTOOLS, state=State.STAT, flag="flagstat"
+        ).resolve(tag)
+        out = OutSpec.from_tag(tag).resolve(
+            OutSpec(folder=input_bam.parent / "qc" / "samtools", ext="json"), out
         )
-        outdir = Path(outdir or input_bam.parent / "qc" / "samtools")
-        filename = filename or tag.default_output
-        output_file = outdir / filename
-        # generate runner
+        output_file = out.file
         runner = self.flagstat_bam(
             input_bam=input_bam,
             output_file=output_file,
-            params=params,
+            par=par,
             cfg=cfg,
         )
-        key, name = generate_element_key_name(
-            tag,
-            self.version_name,
-            "sort",
-        )
+        key = Element.generate_key(tag, self.version_name, "flagstat")
 
         return Element(
-            key=key,
-            run=runner,
+            key,
+            runner,
             tag=tag,
-            determinants=self.signature_determinants(params, subroutine="flagstat"),
+            determinants=self.signature_determinants(par, subroutine="flagstat"),
             inputs=(input_bam,),
-            artifacts={"flagstat": output_file},
+            artifacts=ArtifactSet(output_file, primary_name="flagstat"),
             pres=(mapped,),
-            name=name,
         )
 
     @subroutine
@@ -757,8 +829,8 @@ class Samtools(External):
         self,
         input_bam: Path | str,
         output_file: Path | str,
-        params: Params | None = None,
-        cfg: ExternalRunConfig | None = None,
+        par: ParType | None = None,
+        cfg: CfgType | None = None,
     ) -> SubroutineIn:
         """Run samtools flagstat on a BAM file.
 
@@ -771,9 +843,9 @@ class Samtools(External):
             Input BAM file.
         output_file : Path | str
             Output file for flagstat results.
-        params : Params | None
+        par : ParType | None
             Parameters for the flagstat call.
-        cfg : ExternalRunConfig | None
+        cfg : CfgType | None
             Optional configuration for running the subprocess (e.g. working
             directory, environment variables).
 
@@ -798,4 +870,62 @@ class Samtools(External):
         # samtools flagstat input.bam > output.txt
         arguments = ["flagstat", str(input_bam), "-O", suffix[1:]]
         subcommand = "flagstat"
-        return arguments, subcommand, [input_bam], [output_file], output_file, None, None
+        return (
+            arguments,
+            subcommand,
+            [input_bam],
+            [output_file],
+            output_file,
+            None,
+            None,
+        )
+
+    ###########################################################################
+    # Convenience methods for common workflows
+    ###########################################################################
+
+    def compress_index(
+        self,
+        mapped: MappedElement,
+        *,
+        tag: TagType | SpecValues[TagType] | None = None,
+        out: OutType | SpecValues[OutType] | None = None,
+        par: ParType | SpecValues[ParType] | None = None,
+        cfg: CfgType | SpecValues[CfgType] | None = None,
+    ) -> tuple[MappedElement, Element]:
+        """Compress a BAM and then create its index.
+
+        Parameters
+        ----------
+        mapped : MappedElement
+            Input mapped BAM element.
+        tag : TagType | SpecValues[TagType] | None
+            Tag overrides, optionally per step (``compress``, ``index``).
+        out : OutType | SpecValues[OutType] | None
+            Output overrides, optionally per step (``compress``, ``index``).
+        par : ParType | SpecValues[ParType] | None
+            Parameter overrides, optionally per step (``compress``, ``index``).
+        cfg : CfgType | SpecValues[CfgType] | None
+            Run configuration overrides, optionally per step
+            (``compress``, ``index``).
+
+        Returns
+        -------
+        tuple[MappedElement, Element]
+            ``(compressed_bam, compressed_bam_index)``.
+        """
+        compressed = self.compress(
+            mapped=mapped,
+            tag=pick_spec(tag, "compress"),
+            out=pick_spec(out, "compress"),
+            par=pick_spec(par, "compress"),
+            cfg=pick_spec(cfg, "compress"),
+        )
+        compressed_index = self.index(
+            mapped=compressed,
+            tag=pick_spec(tag, "index"),
+            out=pick_spec(out, "index"),
+            par=pick_spec(par, "index"),
+            cfg=pick_spec(cfg, "index"),
+        )
+        return compressed, compressed_index
