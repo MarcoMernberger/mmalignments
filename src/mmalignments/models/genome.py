@@ -669,8 +669,8 @@ class EnsemblGenome(GenomeBase):
     prebuild_prefix
         Accepted for compatibility with the legacy ``Genome`` dataclass; unused.
     base_dir
-        Store root (``.../ppg2/<host>/ensembl``). Defaults to the shared
-        ``MBF_EXTERNAL_PREBUILD_PATH`` location.
+        Store directory or a prebuilt DNA directory that contains
+        ``genome.fasta`` directly.
     toplevel
         Prefer the ``toplevel`` FASTA over ``primary_assembly``.
     extra_fastas
@@ -783,6 +783,11 @@ class EnsemblGenome(GenomeBase):
         """Path where ``item`` exists or will be created (cached)."""
         if item not in self._paths:
             spec = self._specs[item]
+            if item == "fasta" and self._base_dir is not None:
+                prebuilt = self._base_dir / spec.filename
+                if _usable(prebuilt):
+                    self._paths[item] = prebuilt
+                    return prebuilt
             group_dir = self.base / spec.group
             fresh = group_dir / "by_element" / str(self.revision) / spec.filename
             found = None if _usable(fresh) else _find_existing(

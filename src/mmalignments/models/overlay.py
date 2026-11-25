@@ -436,7 +436,7 @@ class OutSpec(Overlay[PartialOutSpec]):
                 "suffix are all empty. Set 'stem' (directly, or via "
                 "resolve_stem()), or a non-empty prefix/suffix."
             )
-        return f"{base}.{ext}"
+        return f"{base}.{ext.removeprefix('.')}"
 
     @property
     def output_groups(self) -> dict[str, list[Path]]:

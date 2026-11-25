@@ -18,7 +18,7 @@ from mmalignments.models.externals import External
 from mmalignments.models.genome import EnsemblGenome
 from mmalignments.models.mutations import vep_hgvs
 from mmalignments.models.mutations.vep_hgvs import VEPAnnotationError, VEPAnnotator
-from mmalignments.models.overlay import Par, PartialOutSpec, SpecValues
+from mmalignments.models.overlay import Par, PartialOutSpec
 
 
 @pytest.fixture
@@ -28,6 +28,7 @@ def annotate(
     """Run the annotation DAG with mocked VEP output."""
     genome = EnsemblGenome("Homo_sapiens", 116, base_dir=tmp_path)
     fasta = genome.fasta
+    fasta.parent.mkdir(parents=True, exist_ok=True)
     fasta.write_text(">1\nCAAAA\nAGTCA\nTATAT\nGCC\n")
     genome.fai.write_text("1\t18\t3\t5\t6\n")
 
@@ -40,6 +41,8 @@ def annotate(
         skipped_message: str | None = None,
         download_cache: bool = False,
         refseq: bool = False,
+        one_letter: bool = True,
+        extension: str | None = None,
     ) -> tuple[pd.DataFrame, list[list[str]], dict]:
         vcf_records: list[list[str]] = []
         species = "homo_sapiens_refseq" if refseq else "homo_sapiens"
@@ -105,14 +108,24 @@ def annotate(
         element, process, prepare = tool.annotate(
             source,
             transcript_policy=policy,
-            out=PartialOutSpec(folder=tmp_path / "output"),
-            par=SpecValues(None, process=Par(refseq=refseq)),
+            out=PartialOutSpec(folder=tmp_path / "output", ext=extension),
         )
+        if not one_letter:
+            element = tool.report(
+                prepare.pres[0],
+                prepare,
+                process,
+                element.file,
+                transcript_policy=policy,
+                one_letter=False,
+            )
         assert prepare.pres[0].primary.path == source
         prepared_step, cache_step = process.pres
         assert prepared_step is prepare
         info = cache / "info.txt"
         assert cache_step.file == info
+        assert tool.is_cache_downloaded(refseq=refseq)
+        assert not tool.is_cache_downloaded(refseq=not refseq)
         if download_cache:
             payload = info.read_bytes()
             info.unlink()
@@ -130,7 +143,9 @@ def annotate(
                 return BytesIO(compressed.getvalue())
 
             monkeypatch.setattr(vep_hgvs, "urlopen", fetch)
+            assert not tool.is_cache_downloaded(refseq=refseq)
         cache_step()
+        assert tool.is_cache_downloaded(refseq=refseq)
         assert cache_step.outputs_ok()[0]
         assert element.pres == (prepare.pres[0], prepare, process)
         for step in (prepare, process, element):
@@ -142,7 +157,16 @@ def annotate(
             metadata["reference_sha256"]
             == hashlib.sha256(fasta.read_bytes()).hexdigest()
         )
-        return pd.read_parquet(element.file), vcf_records, metadata
+        if extension is None:
+            result = pd.read_parquet(element.file)
+        else:
+            suffix = "." + extension.removeprefix(".")
+            assert element.file.suffix == suffix
+            assert not element.file.name.endswith("." + suffix)
+            result = pd.read_csv(
+                element.file, sep="\t" if suffix == ".tsv" else ",", index_col=0
+            )
+        return result, vcf_records, metadata
 
     return run
 
@@ -154,7 +178,10 @@ def annotate(
         ({"pos": 1, "ref": "G", "alt": "A"}, "Reference mismatch"),
         ({"pos": 1, "ref": "C", "alt": "A,<DEL>"}, "Invalid chromosome"),
         ({"pos": 1, "ref": "C", "alt": "C"}, "Invalid chromosome"),
-        ({"pos": 1, "ref": "C", "alt": "T", "transcript_id": "NM_1"}, "Invalid ENST"),
+        (
+            {"pos": 1, "ref": "C", "alt": "T", "transcript_id": "NP_1"},
+            "Invalid transcript",
+        ),
         ({"pos": 19, "ref": "C", "alt": "T"}, "outside the FASTA"),
         ({"pos": 1, "ref": "C"}, "Input requires"),
     ],
@@ -165,7 +192,11 @@ def test_invalid_input(annotate: Callable, values: dict, message: str) -> None:
         annotate(pd.DataFrame([{"chrom": "1", **values}]))
 
 
-def test_biallelic_ids_join_duplicates_and_missing(annotate: Callable) -> None:
+@pytest.mark.parametrize("one_letter", [True, False])
+@pytest.mark.parametrize("extension", [None, ".tsv", "csv"])
+def test_biallelic_ids_join_duplicates_and_missing(
+    annotate: Callable, one_letter: bool, extension: str | None
+) -> None:
     """Join each consequence to the original row and ALT."""
     frame = pd.DataFrame(
         {
@@ -183,7 +214,9 @@ def test_biallelic_ids_join_duplicates_and_missing(annotate: Callable) -> None:
         "row0_alt1\tENST1.3\tTranscript\tmissense_variant\tHGVSc=ENST1.3:c.1C>G;HGVSp=-\n"
         "row0_alt1\tENST2.5\tTranscript\tsynonymous_variant\tHGVSc=ENST2.5:c.1C>G\n"
     )
-    result, vcf, metadata = annotate(frame, tab)
+    result, vcf, metadata = annotate(
+        frame, tab, one_letter=one_letter, extension=extension
+    )
     assert [line[:5] for line in vcf] == [
         ["1", "1", "row0_alt0", "C", "T"],
         ["1", "1", "row0_alt1", "C", "G"],
@@ -214,7 +247,8 @@ def test_biallelic_ids_join_duplicates_and_missing(annotate: Callable) -> None:
         "ENST2.5:c.1C>T",
         None,
     ]
-    assert values["hgvs_p"].tolist() == [None, None, None, "ENSP1.1:p.(Arg1Cys)", None]
+    protein = "ENSP1.1:p.(R1C)" if one_letter else "ENSP1.1:p.(Arg1Cys)"
+    assert values["hgvs_p"].tolist() == [None, None, None, protein, None]
     assert result["hgvs_g"].iloc[3] == "NC_000001.11:g.1C>T"
     assert result["hgvs_g"].iloc[0] == result["hgvs_g"].iloc[3]
     assert result["spdi"].iloc[3] == "NC_000001.11:0:C:T"
@@ -230,7 +264,8 @@ def test_biallelic_ids_join_duplicates_and_missing(annotate: Callable) -> None:
         ("mane", None, ["ENST2.5"]),
         ("ENST2", None, ["ENST2.5"]),
         ("ENST2.5", None, ["ENST2.5"]),
-        ("ENST2.4", None, [None]),
+        ("ENST2.4", None, []),
+        ("ENST2.5", "ENST1.3", ["ENST2.5"]),
         ("mane", "ENST1.3", ["ENST1.3"]),
         ("canonical", "ENST4", [None]),
     ],
@@ -341,6 +376,14 @@ def test_empty_table_completes_all_steps(annotate: Callable) -> None:
 def test_download_cache_for_genome_revision(annotate: Callable, refseq: bool) -> None:
     """Install the reference release and use it for offline annotation."""
     frame = pd.DataFrame({"chrom": ["1"], "pos": [1], "ref": ["C"], "alt": ["A"]})
-    _, _, metadata = annotate(frame, download_cache=True, refseq=refseq)
+    policy = "NM_000546.6" if refseq else "ENST00000269305.9"
+    rows = (
+        f"row0_alt0\t{policy}\tTranscript\tmissense_variant\t-\n"
+        f"row0_alt0\t{policy.partition('.')[0]}.1\tTranscript\tmissense_variant\t-\n"
+    )
+    result, _, metadata = annotate(
+        frame, rows, policy=policy, download_cache=True, refseq=refseq
+    )
+    assert result["vep_transcript_id"].tolist() == [policy]
     assert ("--refseq" in metadata["vep_flags"]) == refseq
     assert metadata["ensembl_cache_release"] == 116

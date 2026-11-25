@@ -30,7 +30,7 @@ from mmalignments.models.overlay import (
     TagType,
     pick_spec,
 )
-from mmalignments.models.parameters import ParamSet, ParamSpec, render_flag
+from mmalignments.models.parameters import ParamSet
 from mmalignments.models.tags import Method, Omics, Stage, State
 from mmalignments.services.io import ensure, parents
 
@@ -40,6 +40,17 @@ if TYPE_CHECKING:
     from mmalignments.models.genome import EnsemblGenome
 
 _ENST = re.compile(r"ENST[0-9]+(?:\.[0-9]+)?")
+_REFSEQ_TRANSCRIPT = re.compile(r"[NX][MR]_[0-9]+(?:\.[0-9]+)?")
+_TRANSCRIPT_POLICIES = {"all", "mane", "canonical"}
+_REPORT_SEPARATORS = {".tsv": "\t", ".csv": ","}
+_AMINO_ACIDS = dict(
+    zip(
+        "Ala Arg Asn Asp Cys Gln Glu Gly His Ile Leu Lys Met Phe Pro Ser Thr Trp Tyr Val Sec Pyl Ter Xaa Asx Glx Xle".split(),
+        "ARNDCQEGHILKMFPSTWYVUO*XBZJ",
+        strict=True,
+    )
+)
+_AMINO_ACID = re.compile("|".join(_AMINO_ACIDS))
 _BASES = re.compile(r"[ACGT]+")
 _CONTIG = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]*")
 _REFSEQ = re.compile(r"N[CGTWZ]_[A-Z0-9]+\.[0-9]+")
@@ -269,9 +280,11 @@ def _variants(frame: DataFrame, fasta: _Reference) -> list[_Variant]:
         transcript = None
         if has_transcript and not isna(values[4]) and values[4] != "":
             transcript = str(values[4])
-            if not _ENST.fullmatch(transcript):
+            if not (
+                _ENST.fullmatch(transcript) or _REFSEQ_TRANSCRIPT.fullmatch(transcript)
+            ):
                 raise VEPAnnotationError(
-                    f"Invalid ENST transcript in input row {row}: {transcript}"
+                    f"Invalid transcript in input row {row}: {transcript}"
                 )
         chrom = fasta.resolve(chrom)
         start = int(pos) - 1
@@ -350,6 +363,22 @@ def _value(record: dict[str, str], key: str) -> str | None:
     return value if value not in {None, "", "-", "."} else None
 
 
+def _one_letter_hgvsp(value: str | None) -> str | None:
+    """Convert residue codes in the protein expression."""
+    if value is None:
+        return None
+    prefix, marker, expression = (
+        value.partition("p.") if value.startswith("p.") else value.partition(":p.")
+    )
+    if not marker:
+        return value
+    return (
+        prefix
+        + marker
+        + _AMINO_ACID.sub(lambda match: _AMINO_ACIDS[match[0]], expression)
+    )
+
+
 def _select(records: list[dict[str, str]], policy: str) -> list[dict[str, str]]:
     """Apply transcript policy, preferring MANE Select when available."""
     transcripts = [r for r in records if r["Feature_type"] == "Transcript"]
@@ -369,6 +398,7 @@ def _annotate(
     variants: list[_Variant],
     annotations: dict[str, list[dict[str, str]]],
     policy: str,
+    one_letter: bool,
 ) -> DataFrame:
     """Expand rows by ALT and selected transcript while retaining the input index."""
     accessions: dict[str, set[str]] = defaultdict(set)
@@ -383,6 +413,7 @@ def _annotate(
     }
     rows = []
     fields = []
+    explicit_transcript = policy not in _TRANSCRIPT_POLICIES
     for variant in variants:
         records = annotations.get(variant.id, [])
         accession = names.get(variant.chrom, variant.chrom)
@@ -390,7 +421,12 @@ def _annotate(
         spdi = next(
             (value for record in records if (value := _value(record, "SPDI"))), None
         )
-        for record in _select(records, variant.transcript or policy) or [{}]:
+        selection = policy if explicit_transcript else variant.transcript or policy
+        selected = _select(records, selection)
+        if not selected and not explicit_transcript:
+            selected = [{}]
+        for record in selected:
+            protein = _value(record, "HGVSp")
             rows.append(variant.row)
             fields.append(
                 (
@@ -401,7 +437,7 @@ def _annotate(
                     _value(record, "Consequence"),
                     genomic,
                     _value(record, "HGVSc"),
-                    _value(record, "HGVSp"),
+                    _one_letter_hgvsp(protein) if one_letter else protein,
                     _value(record, "SPDI") or spdi,
                 )
             )
@@ -442,6 +478,14 @@ def _cache_metadata(info: Path, assembly: str) -> str:
     if not text.strip() or (match and match[1].partition(".")[0] != assembly):
         raise VEPAnnotationError(f"Invalid or incompatible VEP cache metadata: {info}")
     return text
+
+
+def _cache_available(info: Path, assembly: str) -> bool:
+    """Check whether the cache metadata exists and passes validation."""
+    if not info.is_file():
+        return False
+    _cache_metadata(info, assembly)
+    return True
 
 
 class VEPAnnotator(External):
@@ -499,9 +543,7 @@ class VEPAnnotator(External):
             primary_binary=str(self.binary),
             version="probe",
             folder=folder or Path("cache/vep"),
-            parameters=ParamSet(
-                {"refseq": ParamSpec("refseq", "--refseq", bool, render=render_flag)}
-            ),
+            parameters=ParamSet({}),
         )
         self.assembly = assembly
         help_result = _probe(self, ["--help"])
@@ -547,6 +589,31 @@ class VEPAnnotator(External):
             )
         self.flags = tuple(flags)
 
+    def _cache_info_path(self, refseq: bool) -> Path:
+        """Return the metadata path for the selected VEP cache."""
+        species = "homo_sapiens_refseq" if refseq else "homo_sapiens"
+        return self.cache / species / f"{self.release}_{self.assembly}" / "info.txt"
+
+    def is_cache_downloaded(self, *, refseq: bool = False) -> bool:
+        """Check the local cache without creating a DAG element or downloading it.
+
+        Parameters
+        ----------
+        refseq : bool
+            Check the RefSeq transcript cache when enabled.
+
+        Returns
+        -------
+        bool
+            True if cache metadata passes validation, or False if it is missing.
+
+        Raises
+        ------
+        VEPAnnotationError
+            If existing cache metadata is invalid or incompatible.
+        """
+        return _cache_available(self._cache_info_path(refseq), self.assembly)
+
     @element(auto_outputs=False)
     def download_cache(
         self,
@@ -577,10 +644,8 @@ class VEPAnnotator(External):
         Element
             Deferred installation with cache metadata as its primary artifact.
         """
-        species = "homo_sapiens_refseq" if refseq else "homo_sapiens"
-        cache_info = (
-            self.cache / species / f"{self.release}_{self.assembly}" / "info.txt"
-        )
+        cache_info = self._cache_info_path(refseq)
+        species = cache_info.parent.parent.name
         tag = ElementTag(
             root=f"{species}_{self.release}_{self.assembly}",
             level=0,
@@ -613,8 +678,7 @@ class VEPAnnotator(External):
         """Build a runner that streams and installs an indexed cache archive."""
 
         def run() -> None:
-            if info.is_file():
-                _cache_metadata(info, assembly)
+            if _cache_available(info, assembly):
                 return
             ensure(cache)
             with TemporaryDirectory(prefix=".vep-cache-", dir=cache) as folder:
@@ -727,6 +791,7 @@ class VEPAnnotator(External):
         prepared: Element,
         output: Path | None = None,
         *,
+        refseq: bool = False,
         tag: TagType | None = None,
         out: OutType | None = None,
         par: ParType | None = None,
@@ -741,12 +806,14 @@ class VEPAnnotator(External):
         output : Path or None
             Destination for the VEP tabular output.
 
+        refseq : bool
+            Use the RefSeq transcript cache.
         tag : TagType or None
             Optional override for the derived tag.
         out : OutType or None
             Optional primary output specification.
         par : ParType or None
-            VEP options. Set ``refseq=True`` to use the RefSeq transcript cache.
+            VEP options.
         cfg : CfgType or None
             VEP subprocess configuration.
 
@@ -762,12 +829,12 @@ class VEPAnnotator(External):
             output = OutSpec(tag.default_name, self.folder, ext="tsv").patch(out).file
         output = output.resolve()
         key, _ = self.build_element_name(tag, "process")
-        cache = self.download_cache(refseq=bool(par and par.get("refseq")))
+        cache = self.download_cache(refseq=refseq)
         cache_info = cache.file
         return Element(
             key,
             self._process_vcf(
-                vcf, manifest, output, cache_info, self.assembly, par, cfg
+                vcf, manifest, output, cache_info, self.assembly, refseq, par, cfg
             ),
             tag,
             ArtifactSet(output, primary_name="vep_tsv"),
@@ -776,6 +843,7 @@ class VEPAnnotator(External):
             determinants=(
                 self.assembly,
                 *self.flags,
+                refseq,
                 str(output),
                 *self.signature_determinants(par),
                 repr(cfg),
@@ -789,6 +857,7 @@ class VEPAnnotator(External):
         output: Path,
         cache_info: Path,
         assembly: str,
+        refseq: bool,
         par: ParType | None,
         cfg: CfgType | None,
     ) -> Runnable:
@@ -803,7 +872,9 @@ class VEPAnnotator(External):
                 tab = work / "output.tsv"
                 skipped = work / "skipped.txt"
                 if json.loads(manifest.read_text())["variants"]:
-                    self._run_vep(vcf, tab, skipped, par=par, cfg=run_cfg)()
+                    self._run_vep(
+                        vcf, tab, skipped, refseq=refseq, par=par, cfg=run_cfg
+                    )()
                     if skipped.exists():
                         for line in skipped.read_text().splitlines():
                             if "does not match Ensembl reference allele" in line:
@@ -825,6 +896,7 @@ class VEPAnnotator(External):
         tab: Path,
         skipped: Path,
         *,
+        refseq: bool = False,
         par: ParType | None = None,
         cfg: Ecfg | None = None,
     ) -> SubroutineIn:
@@ -856,6 +928,8 @@ class VEPAnnotator(External):
             "--no_stats",
             *self.flags,
         ]
+        if refseq:
+            arguments.append("--refseq")
         return arguments, None, (vcf, self.reference), (tab, skipped), None, None, None
 
     @element
@@ -868,6 +942,7 @@ class VEPAnnotator(External):
         metadata: Path | None = None,
         *,
         transcript_policy: str = "all",
+        one_letter: bool = True,
         tag: TagType | None = None,
         out: OutType | None = None,
         par: ParType | None = None,
@@ -884,12 +959,14 @@ class VEPAnnotator(External):
         processed : Element
             Element that produces raw VEP tabular output.
         output : Path or None
-            Destination for the annotated Parquet table.
+            Destination for the annotated Parquet, TSV, or CSV table.
         metadata : Path or None
             Destination for the JSON provenance record.
 
         transcript_policy : str
             Transcript selection policy for this report.
+        one_letter : bool
+            Convert protein HGVS residue codes to one-letter abbreviations.
         tag : TagType or None
             Optional override for the derived tag.
         out : OutType or None
@@ -904,11 +981,11 @@ class VEPAnnotator(External):
         TableElement
             Deferred report with the table as its primary artifact.
         """
-        if transcript_policy not in {
-            "all",
-            "mane",
-            "canonical",
-        } and not _ENST.fullmatch(transcript_policy):
+        if (
+            transcript_policy not in _TRANSCRIPT_POLICIES
+            and not _ENST.fullmatch(transcript_policy)
+            and not _REFSEQ_TRANSCRIPT.fullmatch(transcript_policy)
+        ):
             raise VEPAnnotationError(
                 f"Invalid transcript policy: {transcript_policy!r}"
             )
@@ -916,12 +993,20 @@ class VEPAnnotator(External):
         manifest = prepared.artifacts["manifest"]
         tab = processed.artifacts["vep_tsv"]
         tag = processed.tag.bump(flag="vep-report").resolve(tag)
-        if output is None or out is not None:
-            spec = OutSpec(tag.default_name, self.folder, ext="parquet").patch(out)
-            if spec.ext != "parquet":
-                raise VEPAnnotationError("VEPAnnotator output must be Parquet")
-            output = spec.file
+        if output is None:
+            output = (
+                OutSpec(tag.default_name, self.folder, ext="parquet").resolve(out).file
+            )
+        elif out is not None:
+            output = (
+                OutSpec(output.stem, output.parent, ext=output.suffix).resolve(out).file
+            )
         output = output.resolve()
+        extension = output.suffix
+        if extension != ".parquet" and extension not in _REPORT_SEPARATORS:
+            raise VEPAnnotationError(
+                "VEP report output must use .parquet, .tsv, or .csv"
+            )
         metadata = (metadata or output.with_suffix(".vep.json")).resolve()
         key, _ = self.build_element_name(tag, "report")
         _, cache = processed.pres
@@ -941,6 +1026,7 @@ class VEPAnnotator(External):
             "ensembl_cache_path": str(cache_info.parent),
             "vep_flags": vep_flags,
             "transcript_policy": transcript_policy,
+            "one_letter": one_letter,
         }
         return TableElement(
             key,
@@ -952,14 +1038,15 @@ class VEPAnnotator(External):
                 metadata,
                 cache_info,
                 transcript_policy,
+                one_letter,
                 provenance,
             ),
             tag,
             ArtifactSet(
-                TableArtifact(output), primary_name="parquet", metadata=metadata
+                TableArtifact(output), primary_name=extension[1:], metadata=metadata
             ),
             pres=(source, prepared, processed),
-            determinants=(transcript_policy, str(output), str(metadata)),
+            determinants=(transcript_policy, one_letter, str(output), str(metadata)),
         )
 
     @staticmethod
@@ -971,6 +1058,7 @@ class VEPAnnotator(External):
         metadata: Path,
         cache_info: Path,
         transcript_policy: str,
+        one_letter: bool,
         provenance: dict[str, object],
     ) -> Runnable:
         """Build a runner that writes the annotation table and provenance."""
@@ -983,7 +1071,9 @@ class VEPAnnotator(External):
             ]
             annotations = _read_vep(tab, {v.id for v in variants})
             frame = TableArtifact(table).read(drop_unnamed_columns=False)
-            result = _annotate(frame, variants, annotations, transcript_policy)
+            result = _annotate(
+                frame, variants, annotations, transcript_policy, one_letter
+            )
             report_metadata = {
                 **provenance,
                 "reference_sha256": mapping["reference_sha256"],
@@ -999,12 +1089,18 @@ class VEPAnnotator(External):
             parents(output, metadata)
             with TemporaryDirectory(prefix=".vep-report-", dir=output.parent) as folder:
                 work = Path(folder)
-                result.to_parquet(work / "result.parquet", index=True)
+                report_file = work / output.name
+                if output.suffix == ".parquet":
+                    result.to_parquet(report_file, index=True)
+                else:
+                    result.to_csv(
+                        report_file, sep=_REPORT_SEPARATORS[output.suffix], index=True
+                    )
                 (work / "metadata.json").write_text(
                     json.dumps(report_metadata, indent=2) + "\n"
                 )
                 (work / "metadata.json").replace(metadata)
-                (work / "result.parquet").replace(output)
+                report_file.replace(output)
 
         return Runnable(run, display=f"Write VEP annotation table {output}")
 
@@ -1025,16 +1121,17 @@ class VEPAnnotator(External):
         source : Element or FileSource or Path or str
             Upstream table or path to a Parquet, TSV, or CSV variant table.
         transcript_policy : str
-            all, mane, canonical, or an ENST identifier. An input transcript_id
-            overrides this policy. A versioned ENST requires an exact match.
+            all, mane, canonical, or an Ensembl or RefSeq transcript accession.
+            An explicit accession selects the matching transcript, including its
+            version when supplied. For all, mane, and canonical, an input
+            transcript_id overrides the policy.
         tag : TagType or SpecValues or None
             Tag override shared by all steps or keyed by step name.
         out : OutType or SpecValues or None
-            Shared output naming based on the report path. Use SpecValues for
-            overrides keyed by prepare, process, or report.
+            Report naming and format (Parquet by default, TSV, or CSV). Use
+            SpecValues for overrides keyed by prepare, process, or report.
         par : ParType or SpecValues or None
-            Options shared by all steps or keyed by step name, such as
-            ``Par(refseq=True)`` for process.
+            Options shared by all steps or keyed by step name.
         cfg : CfgType or SpecValues or None
             Runtime configuration shared by all steps or keyed by step name.
 
@@ -1053,10 +1150,6 @@ class VEPAnnotator(External):
         spec = OutSpec(
             stem=default_tag.default_name, folder=self.folder, ext="parquet"
         ).resolve(pick_spec(out, "report"))
-        if spec.ext != "parquet":
-            raise VEPAnnotationError(
-                "VEPAnnotator output must be Parquet to preserve the input index"
-            )
         output = spec.file.resolve()
         metadata = output.with_suffix(".vep.json")
         vcf = output.with_suffix(".input.vcf")
@@ -1089,6 +1182,7 @@ class VEPAnnotator(External):
         processed = self.process(
             prepared,
             tab,
+            refseq=bool(_REFSEQ_TRANSCRIPT.fullmatch(transcript_policy)),
             tag=pick_spec(tag, "process"),
             par=pick_spec(par, "process"),
             cfg=pick_spec(cfg, "process"),
