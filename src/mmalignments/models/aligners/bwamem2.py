@@ -685,7 +685,7 @@ class BWAMem2(External):
         out: OutType | SpecValues[OutType] | None = None,
         par: ParType | SpecValues[ParType] | None = None,
         cfg: CfgType | SpecValues[CfgType] | None = None,
-    ) -> tuple[Element, ...]:
+    ) -> tuple[Element | None, ...]:
         """
         Align FASTQ reads to a reference genome, then sort and index the BAM.
 
@@ -762,14 +762,16 @@ class BWAMem2(External):
             cfg=pick_spec(cfg, "sort"),
         )
         mapped_final = mapped_sorted
+        mapped_compressed = None
         if compress:
-            mapped_final = st.compress(
+            mapped_compressed = st.compress(
                 mapped=mapped_sorted,
                 tag=pick_spec(tag, "compress"),
                 out=pick_spec(out, "compress"),
                 par=pick_spec(par, "compress"),
                 cfg=pick_spec(cfg, "compress"),
             )
+            mapped_final = mapped_compressed
         mapped_sorted_index = st.index(
             mapped=mapped_final,
             tag=pick_spec(tag, "index"),
@@ -777,4 +779,10 @@ class BWAMem2(External):
             par=pick_spec(par, "index"),
             cfg=pick_spec(cfg, "index"),
         )
-        return mapped_final, mapped_sorted_index, mapped
+        return (
+            mapped_final,
+            mapped_sorted_index,
+            mapped,
+            mapped_sorted,
+            mapped_compressed,
+        )
