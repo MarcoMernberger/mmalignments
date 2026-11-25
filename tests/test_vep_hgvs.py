@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import tarfile
+from copy import copy
 from io import BytesIO
 from pathlib import Path
 from typing import Callable
@@ -14,6 +15,7 @@ from typing import Callable
 import pandas as pd
 import pytest
 
+from mmalignments.models.executor import Executor
 from mmalignments.models.externals import External
 from mmalignments.models.genome import EnsemblGenome
 from mmalignments.models.mutations import vep_hgvs
@@ -387,3 +389,52 @@ def test_download_cache_for_genome_revision(annotate: Callable, refseq: bool) ->
     assert result["vep_transcript_id"].tolist() == [policy]
     assert ("--refseq" in metadata["vep_flags"]) == refseq
     assert metadata["ensembl_cache_release"] == 116
+
+
+def test_annotations_share_cache_prerequisite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Share default cache nodes and reject distinct nodes with duplicate keys."""
+    genome = EnsemblGenome("Homo_sapiens", 116, base_dir=tmp_path)
+    genome.fasta.parent.mkdir(parents=True)
+    genome.fasta.touch()
+    genome.fai.touch()
+
+    def probe(tool: External, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, "ensembl-vep : 117.0\n", "")
+
+    monkeypatch.setattr(vep_hgvs, "_probe", probe)
+    executor = Executor(cache_path=tmp_path / "executor")
+    tool = VEPAnnotator(
+        genome=genome,
+        cache_dir=tmp_path / "vep",
+        executable=sys.executable,
+        folder=tmp_path,
+    )
+    second_tool = VEPAnnotator(
+        genome=genome,
+        cache_dir=tmp_path / "vep",
+        executable=sys.executable,
+        folder=tmp_path,
+    )
+    with executor.build():
+        report_a, process_a, _ = tool.annotate(tmp_path / "a.tsv")
+        report_b, process_b, _ = second_tool.annotate(tmp_path / "b.tsv")
+        report_c, process_c, _ = tool.annotate(
+            tmp_path / "c.tsv", transcript_policy="NM_000546.6"
+        )
+        cache = tool.download_cache()
+        assert cache is process_a.pres[1] is process_b.pres[1]
+        assert process_c.pres[1] is tool.download_cache(refseq=True)
+        assert process_c.pres[1] is not cache
+
+    nodes = executor.collect([report_a, report_b, report_c])
+    assert sum(node is cache for node in nodes) == 1
+    executor.check_duplicate_outputs(nodes)
+    duplicate = copy(cache)
+    with pytest.raises(ValueError, match="Duplicate key with different Element objects"):
+        executor.collect([report_a, duplicate])
+    with pytest.raises(ValueError, match="Duplicate key collision"):
+        executor.registry.intern(duplicate)
+    with pytest.raises(ValueError, match="Duplicate key collision"):
+        executor.registry.get_or_create(("different-resource",), lambda: duplicate)

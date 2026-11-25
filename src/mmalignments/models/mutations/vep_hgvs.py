@@ -17,7 +17,13 @@ from typing import TYPE_CHECKING, BinaryIO
 from urllib.request import urlopen
 
 from mmalignments.models.artifacts import ArtifactSet, TableArtifact
-from mmalignments.models.elements import Element, FileSource, TableElement, element
+from mmalignments.models.elements import (
+    Element,
+    FileSource,
+    TableElement,
+    element,
+    generate_element_key_name,
+)
 from mmalignments.models.externals import External, Runnable, SubroutineIn, subroutine
 from mmalignments.models.overlay import (
     CfgType,
@@ -31,6 +37,7 @@ from mmalignments.models.overlay import (
     pick_spec,
 )
 from mmalignments.models.parameters import ParamSet
+from mmalignments.models.registry import current_element_registry
 from mmalignments.models.tags import Method, Omics, Stage, State
 from mmalignments.services.io import ensure, parents
 
@@ -626,6 +633,9 @@ class VEPAnnotator(External):
     ) -> Element:
         """Create the Ensembl VEP cache installation element.
 
+        Default requests for the same cache path share an Element within an
+        executor build context.
+
         Parameters
         ----------
         refseq : bool
@@ -646,6 +656,7 @@ class VEPAnnotator(External):
         """
         cache_info = self._cache_info_path(refseq)
         species = cache_info.parent.parent.name
+        use_default = all(override is None for override in (tag, out, par, cfg))
         tag = ElementTag(
             root=f"{species}_{self.release}_{self.assembly}",
             level=0,
@@ -664,14 +675,27 @@ class VEPAnnotator(External):
             f"https://ftp.ensembl.org/pub/{branch}release-{self.release}"
             f"/variation/indexed_vep_cache/{species}_vep_{self.release}_{self.assembly}.tar.gz"
         )
-        key, _ = self.build_element_name(tag, "download_cache")
-        return Element(
-            key,
-            self._download_cache(url, self.cache, info, self.assembly),
-            tag,
-            ArtifactSet(info, primary_name="cache_info"),
-            determinants=(url, str(info)),
-        )
+        if use_default:
+            path_digest = hashlib.sha256(str(info).encode()).hexdigest()
+            key, _ = generate_element_key_name(
+                tag, self.name, subcommand="download_cache", suffix=path_digest
+            )
+        else:
+            key, _ = self.build_element_name(tag, "download_cache")
+
+        def create() -> Element:
+            return Element(
+                key,
+                self._download_cache(url, self.cache, info, self.assembly),
+                tag,
+                ArtifactSet(info, primary_name="cache_info"),
+                determinants=(url, str(info)),
+            )
+
+        registry = current_element_registry()
+        if use_default and registry is not None:
+            return registry.get_or_create(("vep-download-cache", info, url), create)
+        return create()
 
     @staticmethod
     def _download_cache(url: str, cache: Path, info: Path, assembly: str) -> Runnable:

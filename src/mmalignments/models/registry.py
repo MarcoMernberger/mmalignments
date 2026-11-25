@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Hashable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from threading import RLock
 from typing import TYPE_CHECKING, Dict, Iterator
 
 if TYPE_CHECKING:
@@ -28,11 +30,17 @@ def element_build_context(registry: "ElementRegistry"):
 
 
 class ElementRegistry:
-    """Intern registry: ensures one instance per key and tracks all Elements
-    created inside an :func:`element_build_context`."""
+    """Track Elements created inside an :func:`element_build_context`.
+
+    Each element key belongs to one object. Shared resources also have a
+    caller-supplied identity for looking up their Element before construction.
+    """
 
     def __init__(self) -> None:
+        """Initialize the registry for a pipeline."""
         self._by_key: Dict[str, Element] = {}
+        self._shared: dict[Hashable, Element] = {}
+        self._lock = RLock()
 
     def intern(self, e: Element) -> Element:
         """Register *e* and return it if the key is unique.
@@ -51,21 +59,53 @@ class ElementRegistry:
         ValueError
             If a different Element object is registered with an existing key.
         """
-        existing = self._by_key.get(e.key)
-        if existing is None:
-            self._by_key[e.key] = e
-            return e
+        with self._lock:
+            existing = self._by_key.get(e.key)
+            if existing is None:
+                self._by_key[e.key] = e
+                return e
 
-        if existing is e:
-            return e
+            if existing is e:
+                return e
 
-        raise ValueError(
-            "Duplicate key collision in ElementRegistry.intern:\n"
-            f"  key: {e.key!r}\n"
-            f"  existing element: {existing!r}\n"
-            f"  new element:      {e!r}\n"
-            "Element keys must be unique per distinct Element object."
-        )
+            raise ValueError(
+                "Duplicate key collision in ElementRegistry.intern:\n"
+                f"  key: {e.key!r}\n"
+                f"  existing element: {existing!r}\n"
+                f"  new element:      {e!r}\n"
+                "Element keys must be unique per distinct Element object."
+            )
+
+    def get_or_create(
+        self, resource: Hashable, factory: Callable[[], Element]
+    ) -> Element:
+        """Get a shared prerequisite or build and register it on first use.
+
+        Parameters
+        ----------
+        resource : Hashable
+            Namespaced identity covering every setting that affects the
+            resource. Requests with the same identity share a single Element.
+        factory : Callable[[], Element]
+            Builds the Element on a cache miss.
+
+        Returns
+        -------
+        Element
+            The registered shared prerequisite.
+
+        Raises
+        ------
+        ValueError
+            If the new Element's key belongs to a different Element.
+        """
+        with self._lock:
+            existing = self._shared.get(resource)
+            if existing is not None:
+                return existing
+            element = self.intern(factory())
+            self._shared[resource] = element
+            return element
 
     def keys(self) -> Iterator[str]:
         """Iterate over all registered Element keys."""
